@@ -1,4 +1,4 @@
-use crate::account::{create_jws, get_nonce, Account};
+use crate::account::{Account, create_jws, get_nonce};
 use crate::{AcmeError, Directory};
 use base64::Engine;
 use rcgen::DistinguishedName;

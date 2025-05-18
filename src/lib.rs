@@ -1,6 +1,6 @@
 use crate::account::{load_or_create_account_key, register_account};
 use crate::cache::{Cache, FileCache};
-use crate::challenge::{handle_challenge, ChallengeType};
+use crate::challenge::{ChallengeType, handle_challenge};
 use crate::dns::DnsProvider;
 use crate::order::{create_order, fetch_order, finalize_order};
 use serde::{Deserialize, Serialize};

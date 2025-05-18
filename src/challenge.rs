@@ -1,11 +1,11 @@
-use crate::account::{create_jws, get_nonce, Account};
-use crate::dns::{check_dns_propagation, DnsProvider};
-use crate::order::{fetch_order, Order};
+use crate::account::{Account, create_jws, get_nonce};
+use crate::dns::{DnsProvider, check_dns_propagation};
+use crate::order::{Order, fetch_order};
 use crate::{AcmeError, Directory};
 use ring::signature::EcdsaKeyPair;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::info;
 
 #[derive(Clone, Copy, PartialEq, Debug)]

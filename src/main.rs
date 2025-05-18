@@ -1,9 +1,9 @@
 use acmex::challenge::ChallengeType;
-use acmex::{cache::FileCache, dns::MockDnsProvider, AcmeClient, AcmeConfig};
+use acmex::{AcmeClient, AcmeConfig, cache::FileCache, dns::MockDnsProvider};
 use axum::{
-    http::StatusCode, routing::{get, post},
-    Json,
-    Router,
+    Json, Router,
+    http::StatusCode,
+    routing::{get, post},
 };
 use chrono::Utc;
 use clap::Parser;

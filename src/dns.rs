@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::{config::ResolverConfig, Resolver};
+use hickory_resolver::{Resolver, config::ResolverConfig};
 use std::error::Error;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::info;
 
 #[async_trait]
