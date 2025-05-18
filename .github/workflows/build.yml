@@ -1,0 +1,108 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "*"
+  pull_request:
+    # The branches below must be a subset of the branches above
+    branches: [ "main" ]
+
+jobs:
+  check:
+    name: rust-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: true
+      matrix:
+        rustc: [ nightly, stable ] # MSVR and current stable rustc
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rustc }}
+      - name: Run cargo check
+        run: cargo check --all-features
+  rust_fmt_check:
+    name: rust-fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+      - uses: actions/cache@v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+  clippy_check:
+    name: rust-clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+      - uses: actions/cache@v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Run clippy check
+        run: cargo clippy --all-features
+  test:
+    name: run-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+      - uses: actions/cache@v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Set up environment variables
+        run: echo "PEXELS_API_KEY=${{ secrets.PEXELS_API_KEY }}" >> $GITHUB_ENV
+      - name: Run cargo test
+        run: cargo test --all-features
+  publish_on_crates_io:
+    name: Publish on crates.io
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags') # Only on tags
+    needs:
+      - check
+      - rust_fmt_check
+      - clippy_check
+      - test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Run cargo publish
+        run: |
+          cargo publish --registry crates-io --allow-dirty -p acmex
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
