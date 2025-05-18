@@ -42,7 +42,8 @@ pub async fn handle_challenge(
         &ring::rand::SystemRandom::new(),
     )?;
 
-    for auth_url in &order.authorizations {
+    // 将 for 循环改为 if let，因为循环内有 return 语句导致它最多只执行一次
+    if let Some(auth_url) = order.authorizations.first() {
         let nonce = get_nonce(
             client,
             &Directory {
@@ -171,15 +172,17 @@ pub async fn handle_challenge(
             }
         }
 
-        // 轮询挑战状态
+        // 轮询挑战状态，使用当前处理的 auth_url 而非硬编码索引
         for _ in 0..10 {
-            let order = fetch_order(client, &order.authorizations[0], account, account_key).await?;
+            let order = fetch_order(client, auth_url, account, account_key).await?;
             if order.status == "valid" {
                 return Ok(());
             }
             sleep(Duration::from_secs(2)).await;
         }
-        return Err(AcmeError::Validation("Challenge validation timeout".into()));
+        Err(AcmeError::Validation("挑战验证超时".into()))
+    } else {
+        // 如果没有授权 URL，则返回错误
+        Err(AcmeError::Validation("未找到授权 URL".into()))
     }
-    Ok(())
 }
