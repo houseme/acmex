@@ -198,16 +198,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let cert_der = rustls_pki_types::CertificateDer::from(cert); // This is already 'static due to From<Vec<u8>>
 
-    // Parse the key from slice, then convert to an owned 'static version
-    let parsed_key_slice_der = PrivateKeyDer::try_from(key.as_slice())?;
-    let static_key_der = match parsed_key_slice_der {
-        PrivateKeyDer::Pkcs1(cow) => {
-            PrivateKeyDer::Pkcs1(std::borrow::Cow::Owned(cow.into_owned()))
+    // 直接从 key Vec<u8> 创建静态生命周期的 PrivateKeyDer
+    // 无需转换为切片再解析，直接使用原始数据创建一个静态的 PrivateKeyDer
+    let static_key_der = match PrivateKeyDer::try_from(key.as_slice())? {
+        PrivateKeyDer::Pkcs1(_) => PrivateKeyDer::Pkcs1(key.clone().into()),
+        PrivateKeyDer::Pkcs8(_) => PrivateKeyDer::Pkcs8(key.clone().into()),
+        PrivateKeyDer::Sec1(_) => PrivateKeyDer::Sec1(key.clone().into()),
+        _ => {
+            // 处理未来可能添加的变体
+            return Err("不支持的私钥格式".into());
         }
-        PrivateKeyDer::Pkcs8(cow) => {
-            PrivateKeyDer::Pkcs8(std::borrow::Cow::Owned(cow.into_owned()))
-        }
-        PrivateKeyDer::Sec1(cow) => PrivateKeyDer::Sec1(std::borrow::Cow::Owned(cow.into_owned())),
     };
 
     let mut server_config = rustls::ServerConfig::builder()
