@@ -27,7 +27,7 @@ ring = { version = "0.17.14" }
 rustls = { version = "0.23.29" }
 rustls-pki-types = "1.12.0"
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = { version = "1.0.140" }
+serde_json = { version = "1.0.141" }
 thiserror = { version = "2.0.12" }
 tokio = { version = "1.46.1", features = ["full"] }
 tokio-cron-scheduler = { version = "0.14.0" }
