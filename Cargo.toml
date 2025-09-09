@@ -16,7 +16,7 @@ categories = ["web-programming", "api-bindings", "asynchronous", "cryptography",
 async-trait = { version = "0.1.89" }
 axum = { version = "0.8.4" }
 base64 = { version = "0.22.1" }
-chrono = { version = "0.4.41" }
+chrono = { version = "0.4.42" }
 clap = { version = "4.5.47", features = ["derive"] }
 hickory-resolver = { version = "0.25.2" }
 pem = { version = "3.0.5" }
