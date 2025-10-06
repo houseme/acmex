@@ -37,7 +37,7 @@ x509-parser = { version = "0.18.0" }
 
 
 [dependencies.redis]
-version = "0.32.6"
+version = "0.32.7"
 features = ["tokio-comp", "cache-aio", "connection-manager"]
 optional = true
 
