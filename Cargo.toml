@@ -14,7 +14,7 @@ categories = ["web-programming", "api-bindings", "asynchronous", "cryptography",
 
 [dependencies]
 async-trait = { version = "0.1.89" }
-axum = { version = "0.8.6" }
+axum = { version = "0.8.7" }
 base64 = { version = "0.22.1" }
 chrono = { version = "0.4.42" }
 clap = { version = "4.5.51", features = ["derive"] }
