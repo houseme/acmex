@@ -17,7 +17,7 @@ async-trait = { version = "0.1.89" }
 axum = { version = "0.8.6" }
 base64 = { version = "0.22.1" }
 chrono = { version = "0.4.42" }
-clap = { version = "4.5.51", features = ["derive"] }
+clap = { version = "4.5.52", features = ["derive"] }
 hickory-resolver = { version = "0.25.2" }
 pem = { version = "3.0.6" }
 prometheus = { version = "0.14.0" }
