@@ -25,7 +25,7 @@ reqwest = { version = "0.12.28", features = ["json", "charset", "http2", "macos-
 rcgen = { version = "0.14.6" }
 ring = { version = "0.17.14" }
 rustls = { version = "0.23.36" }
-rustls-pki-types = "1.13.2"
+rustls-pki-types = "1.14.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149" }
 thiserror = { version = "2.0.17" }
