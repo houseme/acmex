@@ -2,7 +2,7 @@ use crate::account::{AccountManager, KeyPair};
 use crate::error::Result;
 use crate::order::CertificateRevocation;
 use crate::protocol::{DirectoryManager, NonceManager};
-use crate::storage::{CertificateStore, FileStorage, StorageBackend};
+use crate::storage::{FileStorage, StorageBackend};
 use crate::types::RevocationReason;
 use std::fs;
 use std::path::Path;

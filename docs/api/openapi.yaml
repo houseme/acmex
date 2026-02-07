@@ -1,0 +1,71 @@
+openapi: 3.0.3
+info:
+  title: AcmeX API
+  description: Enterprise ACME v2 management API for automated TLS certificate lifecycle.
+  version: 0.7.0
+servers:
+  - url: http://localhost:8080/api
+    description: Default server
+paths:
+  /accounts:
+    post:
+      summary: Create a new ACME account
+      responses:
+        '201':
+          description: Account created
+  /orders:
+    get:
+      summary: List all active tasks/orders
+      responses:
+        '200':
+          description: List of tasks
+    post:
+      summary: Create a new certificate order
+      responses:
+        '202':
+          description: Order accepted, task started
+  /orders/{id}:
+    get:
+      summary: Get status of a specific order/task
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task info
+  /orders/renew-all:
+    post:
+      summary: Trigger renewal for all managed certificates
+      responses:
+        '202':
+          description: Renewal triggered
+  /certificates:
+    get:
+      summary: List managed certificates
+      responses:
+        '200':
+          description: List of bundles
+  /certificates/{id}:
+    get:
+      summary: Download certificate bundle
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Certificate and key PEM
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+security:
+  - ApiKeyAuth: [ ]
+

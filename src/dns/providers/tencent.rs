@@ -15,6 +15,7 @@ use tracing::{debug, info};
 pub struct TencentCloudDnsProvider {
     secret_id: String,
     secret_key: String,
+    #[allow(dead_code)]
     region: String,
     client: reqwest::Client,
 }

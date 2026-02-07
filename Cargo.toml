@@ -1,6 +1,6 @@
 [package]
 name = "acmex"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.92.0"
 description = "A comprehensive ACME v2 client for obtaining TLS certificates"
@@ -40,8 +40,9 @@ tokio-rustls = "0.26"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-opentelemetry = "0.31"
-opentelemetry = { version = "0.31", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+opentelemetry = { version = "0.30", features = ["trace"] }
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic"] }
 urlencoding = "2.1"
 x509-parser = "0.18"
 
@@ -59,9 +60,18 @@ optional = true
 [dependencies.hickory-proto]
 version = "0.25"
 
+# AWS SDK for Route53
+[dependencies.aws-config]
+version = "1.8"
+optional = true
+
+[dependencies.aws-sdk-route53]
+version = "1.106"
+optional = true
+
 # HTTP 服务器
 [dependencies.hyper]
-version = "1.4"
+version = "1.8"
 
 # Redis 可选支持
 [dependencies.redis]
@@ -78,7 +88,7 @@ google-ca = []
 zerossl-ca = []
 
 dns-cloudflare = []
-dns-route53 = []
+dns-route53 = ["dep:aws-config", "dep:aws-sdk-route53"]
 dns-digitalocean = []
 dns-linode = []
 dns-azure = []
@@ -98,3 +108,4 @@ tokio-test = "0.4"
 mockito = "1.4"
 hex = "0.4.3"
 temp-env = "0.3"
+tower = { version = "0.5", features = ["util"] }

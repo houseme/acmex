@@ -1,5 +1,4 @@
 use crate::error::{AcmeError, Result};
-use std::time::Duration;
 use x509_parser::prelude::*;
 
 /// OCSP status for a certificate

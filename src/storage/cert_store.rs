@@ -4,6 +4,7 @@ use crate::error::{AcmeError, Result};
 use crate::storage::StorageBackend;
 
 /// Certificate store using a storage backend
+#[derive(Clone)]
 pub struct CertificateStore<B: StorageBackend> {
     backend: B,
 }
@@ -51,5 +52,19 @@ impl<B: StorageBackend> CertificateStore<B> {
     pub async fn delete(&self, domains: &[String]) -> Result<()> {
         let key = Self::key_for_domains(domains);
         self.backend.delete(&key).await
+    }
+
+    /// List all certificate bundles
+    pub async fn list_all(&self) -> Result<Vec<CertificateBundle>> {
+        let keys = self.backend.list("cert:").await?;
+        let mut bundles = Vec::new();
+        for key in keys {
+            if let Some(bytes) = self.backend.load(&key).await? {
+                if let Ok(bundle) = serde_json::from_slice(&bytes) {
+                    bundles.push(bundle);
+                }
+            }
+        }
+        Ok(bundles)
     }
 }

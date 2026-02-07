@@ -1,9 +1,37 @@
-/// Simple example of using acmex as a library
 use acmex::prelude::*;
+use opentelemetry::trace::TracerProvider as _;
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // 1. Initialize Tracing & OpenTelemetry
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    let filter_layer = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // OpenTelemetry Layer
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .build()
+        .expect("Failed to create OTLP exporter");
+
+    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+
+    // Set as global
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+
+    let tracer = tracer_provider.tracer("acmex");
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
+        .with(otel_layer)
+        .init();
+
+    tracing::info!("AcmeX starting with OpenTelemetry observability");
 
     // Create a configuration for Let's Encrypt staging
     let config = AcmeConfig::lets_encrypt_staging()

@@ -10,7 +10,10 @@ pub struct StorageMigrator<S: StorageBackend, D: StorageBackend> {
 
 impl<S: StorageBackend, D: StorageBackend> StorageMigrator<S, D> {
     pub fn new(source: S, destination: D) -> Self {
-        Self { source, destination }
+        Self {
+            source,
+            destination,
+        }
     }
 
     /// Migrate all data from source to destination
@@ -44,9 +47,15 @@ impl<S: StorageBackend, D: StorageBackend> StorageMigrator<S, D> {
             }
         }
 
-        info!("Migration completed. Success: {}, Failed: {}", success_count, fail_count);
+        info!(
+            "Migration completed. Success: {}, Failed: {}",
+            success_count, fail_count
+        );
         if fail_count > 0 {
-            return Err(crate::error::AcmeError::Storage(format!("Migration finished with {} errors", fail_count)));
+            return Err(crate::error::AcmeError::Storage(format!(
+                "Migration finished with {} errors",
+                fail_count
+            )));
         }
         Ok(())
     }

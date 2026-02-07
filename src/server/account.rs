@@ -1,9 +1,11 @@
+use crate::metrics::AcmeEvent;
+use crate::metrics::events::EventAuditor;
 use crate::server::api::AppState;
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -26,6 +28,11 @@ pub async fn create_account(
     Json(payload): Json<CreateAccountRequest>,
 ) -> impl IntoResponse {
     info!("Request to create account for email: {}", payload.email);
+
+    // Track event
+    EventAuditor::track_event(AcmeEvent::AccountCreated {
+        email: payload.email.clone(),
+    });
 
     if let Some(client) = state.client {
         // Clone the client from Arc to get a mutable instance

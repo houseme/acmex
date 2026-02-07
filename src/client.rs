@@ -8,7 +8,6 @@ use crate::types::{ChallengeType, Contact, Identifier};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 /// Configuration for ACME client
 #[derive(Clone)]
@@ -113,6 +112,41 @@ impl AcmeClient {
         tracing::info!("Account registered: {}", account.id);
 
         Ok(account.id)
+    }
+
+    /// Create a new order for domains
+    pub async fn create_order(&mut self, domains: Vec<String>) -> Result<crate::order::Order> {
+        // Ensure account is registered
+        if self.account_id.is_none() {
+            self.register_account().await?;
+        }
+
+        let account_id = self.account_id.as_ref().unwrap().clone();
+
+        let dir_mgr = DirectoryManager::new(&self.config.directory_url, self.http_client.clone());
+        let nonce_mgr =
+            NonceManager::new(&dir_mgr.get().await?.new_nonce, self.http_client.clone());
+
+        let account_mgr =
+            AccountManager::new(&self.key_pair, &nonce_mgr, &dir_mgr, &self.http_client)?;
+
+        let order_mgr = OrderManager::new(
+            &account_mgr,
+            &dir_mgr,
+            &nonce_mgr,
+            &self.http_client,
+            account_id,
+        );
+
+        let identifiers: Vec<Identifier> = domains.iter().map(|d| Identifier::dns(d)).collect();
+        let order_req = NewOrderRequest {
+            identifiers,
+            not_before: None,
+            not_after: None,
+        };
+
+        let (_url, order) = order_mgr.create_order(&order_req).await?;
+        Ok(order)
     }
 
     /// Issue a certificate for domains
@@ -272,6 +306,7 @@ impl AcmeClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn get_nonce(&self) -> Result<String> {
         if let Some(pool) = &self.nonce_pool {
             pool.get_nonce().await

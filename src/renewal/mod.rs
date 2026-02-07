@@ -18,8 +18,8 @@ pub trait RenewalHook: Send + Sync {
     fn on_error(&self, _domains: &[String], _error: &AcmeError) {}
 }
 
-/// Renewal scheduler
-pub struct RenewalScheduler<B: StorageBackend> {
+/// Simple renewal scheduler
+pub struct SimpleRenewalScheduler<B: StorageBackend> {
     client: AcmeClient,
     store: CertificateStore<B>,
     hook: Option<Arc<dyn RenewalHook>>,
@@ -27,7 +27,7 @@ pub struct RenewalScheduler<B: StorageBackend> {
     renew_before: Duration,
 }
 
-impl<B: StorageBackend> RenewalScheduler<B> {
+impl<B: StorageBackend> SimpleRenewalScheduler<B> {
     pub fn new(client: AcmeClient, store: CertificateStore<B>) -> Self {
         Self {
             client,

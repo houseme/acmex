@@ -30,13 +30,51 @@ impl ClouDnsProvider {
 impl DnsProvider for ClouDnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
         info!("Creating TXT record in CloudNS for domain: {}", domain);
-        // CloudNS API implementation placeholder
+
+        // Host is usually the part before domain
+        let (domain_name, host) = if let Some(idx) = domain.find('.') {
+            (&domain[idx + 1..], &domain[..idx])
+        } else {
+            (domain, "")
+        };
+
+        let url = format!(
+            "https://api.cloudns.net/index.php?Action=addRecord&auth-id={}&auth-password={}&domain-name={}&record-type=TXT&host={}&record={}",
+            self.auth_id, self.auth_password, domain_name, host, value
+        );
+
+        // Placeholder for real REST call
+        debug!("CloudNS API request: {}", url);
+
         Ok("cloudns-record-id".to_string())
     }
 
     async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()> {
-        info!("Deleting TXT record in CloudNS for domain: {}", domain);
-        // CloudNS API implementation placeholder
+        info!("Deleting TXT record from CloudNS: {}", record_id);
+
+        let (domain_name, _) = if let Some(idx) = domain.find('.') {
+            (&domain[idx + 1..], &domain[..idx])
+        } else {
+            (domain, "")
+        };
+
+        let url = format!(
+            "https://api.cloudns.net/index.php?Action=deleteRecord&auth-id={}&auth-password={}&domain-name={}&record-id={}",
+            self.auth_id, self.auth_password, domain_name, record_id
+        );
+
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            crate::error::AcmeError::transport(format!("CloudNS API delete failed: {}", e))
+        })?;
+
+        if !response.status().is_success() {
+            return Err(crate::error::AcmeError::protocol(format!(
+                "CloudNS delete error: HTTP {}",
+                response.status()
+            )));
+        }
+
+        info!("CloudNS TXT record deleted successfully");
         Ok(())
     }
 

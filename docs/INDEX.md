@@ -1,7 +1,7 @@
 # 📚 AcmeX 项目文档索引
 
-**项目版本**: v0.5.0  
-**最后更新**: 2026-02-07  
+**项目版本**: v0.7.0 (Development)  
+**最后更新**: 2026-02-08  
 **文档语言**: 中文
 
 ---
@@ -12,22 +12,20 @@
 
 1. 先读 → [项目主要介绍](./MAIN_README.md)
 2. 再看 → [5 分钟快速开始](../README.md)
-3. 查阅 → [v0.5.0 功能指南](./V0.5.0_FEATURES_GUIDE.md) - ⭐ 推荐
-4. 学习 → [v0.4.0 使用指南](./V0.4.0_USAGE_GUIDE.md)
+3. 查阅 → [v0.7.0 规划方案](./V0.7.0_PLANNING.md) - ⭐ 推荐 (New Phase)
+4. 学习 → [v0.5.0 功能指南](./V0.5.0_FEATURES_GUIDE.md)
 
 ### 📖 我想学习详细内容
 
-1. **v0.1.0** → [核心 ACME 协议完成报告](./V0.1.0_COMPLETION_REPORT.md)
-2. **v0.2.0** → [挑战验证完成报告](./V0.2.0_COMPLETION_REPORT.md)
-3. **v0.3.0** → [证书签发完成报告](./V0.3.0_COMPLETION_REPORT.md)
-4. **v0.4.0** → [企业功能完成报告](./V0.4.0_COMPLETION_REPORT.md)
-5. **v0.5.0** → [v0.5.0 完成报告](./V0.5.0_COMPLETION_REPORT.md) - ⭐ 最新
+1. **v0.1.0-v0.5.0** → [核心到企业特性的演进报告](./FINAL_PROJECT_SUMMARY.md)
+2. **v0.6.0** → [高级调度与性能优化完成报告](./V0.6.0_COMPLETION_REPORT.md) - ⭐ 最新完成
+3. **v0.7.0** → [服务器模式强化实现方案](./V0.7.0_IMPLEMENTATION_DETAIL_PLAN.md) - 🚀 施工中
 
 ### 💻 我想写代码
 
-1. [CHALLENGE_EXAMPLES.md](./CHALLENGE_EXAMPLES.md) - 挑战验证示例
-2. [INTEGRATION_EXAMPLES.md](./INTEGRATION_EXAMPLES.md) - 集成示例
-3. [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md) - v0.5.0 功能指南
+1. [AGENTS.md](../AGENTS.md) - ⭐ **必读：Agent 开发规范**
+2. [V0.7.0_IMPLEMENTATION_DETAIL_PLAN.md](./V0.7.0_IMPLEMENTATION_DETAIL_PLAN.md) - 服务器异步架构详解
+3. [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md) - 基础功能配置参考
 4. [V0.3.0_INTEGRATION_EXAMPLES.md](./V0.3.0_INTEGRATION_EXAMPLES.md) - v0.3.0 示例
 
 ### 🔍 我想深入某个功能
@@ -400,8 +398,8 @@ A: 查看 copilot-instructions.md 中的 Feature Gates 系统部分
 
 ---
 
-**文档版本**: v0.5.0  
-**最后更新**: 2026-02-07  
+**文档版本**: v0.7.0 (Development)  
+**最后更新**: 2026-02-08  
 **维护者**: houseme
 
 🎉 **祝您使用 AcmeX 愉快！**

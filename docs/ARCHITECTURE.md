@@ -35,6 +35,9 @@
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │
 │  │Provisioner│ │Validator │ │Renewer   │  │Cleanup  │  │
 │  └──────────┘  └──────────┘  └──────────┘  └─────────┘  │
+│  ┌──────────────────────────────────────────────────────┐│
+│  │             Task State Machine (Orchestrator)        ││
+│  └──────────────────────────────────────────────────────┘│
 └───────────┬─────────────────────────────────────────┬────┘
             │                                         │
 ┌───────────▼─────────────────────────────────────────▼────┐
@@ -106,268 +109,38 @@
 
 协调各业务模块，实现高层工作流。
 
-#### 2.1 Provisioner (证书申请编排器) [计划中]
+#### 2.1 Provisioner (证书申请编排器)
+
+`CertificateProvisioner` 负责驱动订单、挑战和最终签发的全流程。支持状态汇报和异步执行。
 
 ```rust
 pub struct CertificateProvisioner {
-    client: Arc<AcmeClient>,
-    account_manager: Arc<AccountManager>,
-    order_manager: Arc<OrderManager>,
-    challenge_solver: Arc<ChallengeSolver>,
-}
-
-impl CertificateProvisioner {
-    pub async fn provision(&self, domains: Vec<String>) -> Result<CertificateBundle>;
+    pub task_id: String,
+    pub status: Arc<RwLock<OrchestrationStatus>>,
+    // ...
 }
 ```
 
-#### 2.2 Validator (验证编排器) [计划中]
+#### 2.2 Orchestrator Trait
+
+所有编排器实现 `Orchestrator` trait，提供统一的异步任务处理能力。
 
 ```rust
-pub struct ChallengeValidator {
-    challenge_solver: Arc<ChallengeSolver>,
-    dns_resolver: Arc<DnsResolver>,
-}
-
-impl ChallengeValidator {
-    pub async fn validate(&self, authorization: &Authorization) -> Result<()>;
+#[async_trait]
+pub trait Orchestrator: Send + Sync {
+    async fn execute(&mut self) -> Result<()>;
+    fn status(&self) -> OrchestrationStatus;
 }
 ```
 
-#### 2.3 Renewer (续期编排器) [计划中]
+### 3. REST API 异步架构 (v0.7.0)
 
-```rust
-pub struct CertificateRenewer {
-    provisioner: Arc<CertificateProvisioner>,
-    storage: Arc<CertificateStore>,
-    metrics: Arc<MetricsRegistry>,
-}
+AcmeX 采用 "Post-Task-Polling" 模式处理耗时的 ACME 流程：
 
-impl CertificateRenewer {
-    pub async fn renew(&self, domains: Vec<String>) -> Result<CertificateBundle>;
-}
-```
-
-### 3. 业务逻辑层 (Business Logic Layer)
-
-实现 ACME 协议和证书管理核心逻辑。
-
-#### 3.1 Protocol 模块 (`src/protocol/`)
-
-处理 ACME 协议细节：
-
-- **directory.rs** - 发现 ACME 服务端点
-  ```rust
-  pub struct DirectoryManager {
-      url: String,
-      cache: Option<Directory>,
-  }
-  ```
-
-- **nonce.rs** - Nonce 管理（防重放）
-  ```rust
-  pub struct NonceManager {
-      pool: Vec<String>,
-      endpoint: String,
-  }
-  ```
-
-- **jws.rs** - JWS 签名生成
-  ```rust
-  pub struct JwsSigner {
-      key_pair: rcgen::KeyPair,
-      jwk: JwkPublicKey,
-  }
-  ```
-
-- **objects.rs** - ACME 对象序列化/反序列化
-
-#### 3.2 Account 模块 (`src/account/`)
-
-账户和身份管理：
-
-- **manager.rs** - 账户生命周期
-  ```rust
-  pub struct AccountManager {
-      directory: Arc<DirectoryManager>,
-      key_pair: rcgen::KeyPair,
-      contact: Vec<String>,
-  }
-  ```
-
-- **credentials.rs** - 密钥对管理
-- **eab.rs** - 外部账户绑定
-
-#### 3.3 Order 模块 (`src/order/`)
-
-证书订单管理：
-
-- **order.rs** - 订单状态机
-  ```rust
-  pub struct OrderManager {
-      orders: HashMap<String, Order>,
-      account: Arc<AccountManager>,
-  }
-  ```
-
-- **authorization.rs** - 授权资源跟踪
-- **finalize.rs** - CSR 提交和证书下载
-
-#### 3.4 Challenge 模块 (`src/challenge/`)
-
-挑战验证实现：
-
-- **solver.rs** - 通用求解器接口
-- **http01/server.rs** - HTTP-01 验证服务器
-  ```rust
-  pub struct Http01Solver {
-      server: AxumServer,
-      tokens: Arc<Mutex<HashMap<String, String>>>,
-  }
-  ```
-
-- **dns01/provider.rs** - DNS-01 提供商接口
-  ```rust
-  pub trait DnsProvider: Send + Sync {
-      async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String>;
-      async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()>;
-  }
-  ```
-
-### 4. 传输和支持层 (Transport & Support)
-
-#### 4.1 Transport 模块 (`src/transport/`)
-
-HTTP 通信抽象：
-
-- **http_client.rs** - HTTP 客户端封装
-  ```rust
-  pub struct HttpClient {
-      client: reqwest::Client,
-      config: HttpClientConfig,
-  }
-  ```
-
-- **retry.rs** - 重试策略
-  ```rust
-  pub enum RetryStrategy {
-      ExponentialBackoff { ... },
-      LinearBackoff { ... },
-      FixedDelay(Duration),
-  }
-  ```
-
-- **rate_limit.rs** - 速率限制 (令牌桶)
-  ```rust
-  pub struct RateLimiter {
-      max_tokens: u32,
-      tokens: Arc<Mutex<f64>>,
-  }
-  ```
-
-- **middleware.rs** - 请求中间件
-  ```rust
-  pub trait Middleware: Send + Sync {
-      async fn before_request(&self, url: &str, method: &str) -> Result<()>;
-      async fn after_response(&self, url: &str, response: &HttpResponse) -> Result<()>;
-  }
-  ```
-
-#### 4.2 Crypto 模块 (`src/crypto/`)
-
-密码学原语：
-
-- **keypair.rs** - 密钥对生成 (Ed25519, ECDSA)
-  ```rust
-  pub struct KeyPairGenerator {
-      key_type: KeyType,
-  }
-  
-  impl KeyPairGenerator {
-      pub fn generate(&self) -> Result<rcgen::KeyPair>;
-  }
-  ```
-
-- **signer.rs** - 签名接口
-  ```rust
-  pub trait Signer: Send + Sync {
-      fn sign(&self, data: &[u8]) -> Result<Signature>;
-  }
-  ```
-
-- **hash.rs** - 哈希工具 (SHA256, SHA384, SHA512)
-  ```rust
-  pub struct Sha256Hash;
-  impl Sha256Hash {
-      pub fn hash(data: &[u8]) -> Result<Vec<u8>>;
-      pub fn hash_hex(data: &[u8]) -> Result<String>;
-  }
-  ```
-
-- **encoding.rs** - Base64/PEM/Hex 编码
-  ```rust
-  pub struct Base64Encoding;
-  pub struct PemEncoding;
-  pub struct HexEncoding;
-  ```
-
-#### 4.3 Config 模块 (`src/config/`) [计划中]
-
-配置管理：
-
-- **builder.rs** - 配置构建器模式
-- **ca.rs** - CA 预设 (Let's Encrypt, Google, ZeroSSL)
-- **validation.rs** - 配置验证
-- **env.rs** - 环境变量加载
-
-### 5. 持久化和观测层
-
-#### 5.1 Storage 模块 (`src/storage/`)
-
-证书存储抽象：
-
-- **file.rs** - 文件系统存储
-  ```rust
-  pub struct FileStorage {
-      base_dir: PathBuf,
-  }
-  ```
-
-- **redis.rs** - Redis 存储 (可选)
-  ```rust
-  pub struct RedisStorage {
-      client: redis::Client,
-  }
-  ```
-
-- **encrypted.rs** - 加密存储包装器
-  ```rust
-  pub struct EncryptedStorage<B: StorageBackend> {
-      backend: B,
-      cipher: Aes256Gcm,
-  }
-  ```
-
-- **backend.rs** - 存储后端 trait
-
-#### 5.2 Metrics 模块 (`src/metrics/`)
-
-Prometheus 监控：
-
-- **collector.rs** - 指标收集
-- **exporter.rs** - Prometheus 导出
-- **events.rs** - 事件追踪
-
-#### 5.3 Renewal 模块 (`src/renewal/`)
-
-自动续期：
-
-- **mod.rs** - RenewalScheduler
-  ```rust
-  pub struct RenewalScheduler<B: StorageBackend> {
-      scheduler: tokio::task::JoinHandle<()>,
-  }
-  ```
+1. **提交订单**: `POST /api/orders` 返回 `202 Accepted` 及 `task_id`。
+2. **后台处理**: 服务器在后台线程启动 `Provisioner`。
+3. **状态轮询**: 用户通过 `GET /api/orders/:id` 检查进度。
+4. **结果获取**: 任务完成后，用户通过 `GET /api/certificates/:id` 下载证书。
 
 ---
 
@@ -644,4 +417,3 @@ pub struct NonceManager {
 **文档版本**: 1.0  
 **最后更新**: 2026-02-07  
 **维护者**: houseme
-

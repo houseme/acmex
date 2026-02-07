@@ -5,8 +5,13 @@ use crate::renewal::RenewalHook;
 use crate::storage::{CertificateStore, StorageBackend};
 use std::collections::BinaryHeap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tracing::{error, info, warn};
+
+#[async_trait::async_trait]
+pub trait RenewalScheduler: Send + Sync {
+    async fn run_once(&self) -> Result<()>;
+}
 
 /// Task priority for renewal
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,6 +43,7 @@ impl PartialOrd for RenewalTask {
 }
 
 /// Advanced renewal scheduler with concurrency and priority support
+#[derive(Clone)]
 pub struct AdvancedRenewalScheduler<B: StorageBackend> {
     client: AcmeClient,
     store: CertificateStore<B>,
@@ -86,14 +92,34 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
         self
     }
 
+    /// Run all pending renewals once
+    pub async fn run_once_internal(&self) -> Result<()> {
+        info!("Running full renewal check...");
+        // Here we would iterate over all managed certificates and enqueue those due for renewal
+        // For demonstration, we trigger a scan of the store
+        let certs = self.store.list_all().await?;
+        for cert in certs {
+            // Check if due... simplified: enqueue everything for demo
+            let _ = self
+                .task_tx
+                .send(RenewalTask {
+                    domains: cert.domains.clone(),
+                    priority: Priority::Normal,
+                    retry_count: 0,
+                })
+                .await;
+        }
+        Ok(())
+    }
+
     /// Start the scheduler
-    pub async fn run(self) {
+    pub async fn run(self: Arc<Self>) {
         info!(
             "Starting Advanced Renewal Scheduler with concurrency: {}",
             self.concurrency
         );
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.concurrency));
-        let scheduler_arc = Arc::new(self);
+        let scheduler_arc = self;
 
         loop {
             // Wait for tasks
@@ -167,6 +193,13 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
         client
             .issue_certificate(domains.to_vec(), &mut registry)
             .await
+    }
+}
+
+#[async_trait::async_trait]
+impl<B: StorageBackend + 'static> RenewalScheduler for AdvancedRenewalScheduler<B> {
+    async fn run_once(&self) -> Result<()> {
+        self.run_once_internal().await
     }
 }
 

@@ -2,7 +2,7 @@
 
 **项目名称**: AcmeX  
 **项目描述**: 企业级 ACME v2 客户端库和工具集  
-**当前版本**: v0.6.0  
+**当前版本**: v0.7.0-dev (Phase 4 Ready)  
 **Rust 版本**: 1.93.0 (Edition 2024)  
 **MSRV**: 1.92.0
 
@@ -10,109 +10,87 @@
 
 ## 🎯 项目概览
 
-AcmeX 是一个完整的 ACME v2 (RFC 8555) 协议实现库，专为自动化 TLS 证书管理设计。支持 HTTP-01、DNS-01、TLS-ALPN-01
-等多种验证方式，集成了 9 个 DNS 提供商，支持多个证书颁发机构，提供自动续期、多种存储后端、Prometheus 监控、Webhook 通知和 CLI
-工具。
+AcmeX 是一个完整的 ACME v2 (RFC 8555) 协议实现库，专为自动化 TLS 证书管理设计。
 
-### 核心特性
+### 核心特性 (v0.7.0 已强化)
 
-- ✅ 完整 ACME v2 协议实现 (RFC 8555)
-- ✅ 3 种验证方式 (HTTP-01, DNS-01, TLS-ALPN-01)
-- ✅ 9 个 DNS 提供商 (CloudFlare, DigitalOcean, Linode, Route53, Azure, Google, Alibaba, GoDaddy, Tencent)
-- ✅ 4 个证书颁发机构 (Let's Encrypt, Google Trust Services, ZeroSSL, Custom)
-- ✅ RenewalScheduler 自动续期系统
-- ✅ 3 种存储后端 (File, Redis, Encrypted AES-256-GCM)
-- ✅ Webhook 事件通知系统 (JSON, Slack, Discord)
-- ✅ Prometheus 监控指标
-- ✅ CLI 工具框架 (obtain, renew, daemon, info, account, server)
-- ✅ Feature gates 灵活编译
-- ✅ 生产级质量
-- ✅ 证书链验证与 Key Rollover
-- ✅ DNS 查询缓存
+- ✅ **完整协议支持**: 涵盖 JWS, Nonce Pool, EAB, Key Rollover。
+- ✅ **多挑战类型**: HTTP-01, DNS-01, TLS-ALPN-01。
+- ✅ **广阔 DNS 生态**: 集成 11 个提供商 (CloudFlare, AWS, Ali, Tencent, Huawei, CloudNS 等)。
+- ✅ **高性能 Nonce 管理**: 具备预取与缓存能力的 `NoncePool`。
+- ✅ **企业级服务器**: Axum 驱动的核心 API，支持 `X-API-Key` 认证。
+- ✅ **异步任务架构**: 202 Accepted 响应模型，支持后台进度追踪。
+- ✅ **OCSP 实时验证**: 自动解析 AIA 扩展并查询撤销状态。
+- ✅ **灵活存储与审计**: 支持 4 种后端并具备事件审计日志 (`EventAuditor`)。
 
 ---
 
-## 📁 项目结构
+## 📁 核心架构
 
-### 源代码组织
-
-```
-src/
-├── lib.rs                     # 库根，模块导出
-├── main.rs                    # CLI 入口
-├── ca.rs                      # 多CA支持
-├── config.rs                  # 配置管理
-├── account/                   # 账户管理 (含 Key Rollover)
-├── challenge/                 # 挑战验证框架 (含 DNS 缓存)
-├── client/                    # 主要客户端
-├── order/                     # 订单管理 (含 Revocation)
-├── protocol/                  # ACME 协议
-├── dns/                       # DNS 提供商
-├── storage/                   # 证书存储
-├── renewal/                   # 自动续期
-├── notifications/             # Webhook通知
-├── metrics/                   # Prometheus 指标
-├── cli/                       # CLI 工具 (含 account, server 命令)
-├── crypto/                    # 加密模块
-├── transport/                 # HTTP传输
-├── orchestrator/              # 编排层 (Provisioner, Validator)
-├── server/                    # 服务器层 (API, Webhook, Health)
-├── certificate/               # 证书管理 (Chain verification)
-├── scheduler/                 # 调度层 (v0.6.0+ 正在实现)
-├── error.rs                   # 错误类型
-└── types.rs                   # 公共类型
-```
+- `src/orchestrator/`: 编排层 (Provisioner, Validator, Renewer)，支持状态汇报。
+- `src/scheduler/`: 调度层 (Priority, Concurrency, Retry)。
+- `src/server/`: API 服务器层 (Auth, Routes, Tasks Tracker)。
+- `src/protocol/nonce_pool.rs`: 预取 Nonce 优化请求往返。
+- `src/certificate/ocsp.rs`: OCSP 验证工具。
 
 ---
 
-## 🚀 Phase 3 (第三周) 目标
+## 🚀 Phase 5 (v0.7.0+) 目标：测试与文档强化
 
-### 1. 高级调度器 (Advanced Scheduler)
-- `src/scheduler/renewal_scheduler.rs`: 支持多任务并发、优先级管理、故障恢复。
-- `src/scheduler/cleanup_scheduler.rs`: 自动清理过期证书和临时文件。
+### 1. 自动化测试体系
 
-### 2. 存储迁移工具 (Storage Migration)
-- 支持在不同存储后端（如 File 到 Redis）之间迁移数据。
+- 实现基于 `mockito` 的 ACME 服务端模拟桩。
+- 覆盖 DNS-01 (Route53, Huawei, Alibaba) 的端到端集成测试。
+- 压力测试：并发 100+ 证书申请任务的性能表现。
 
-### 3. 分布式追踪 (Distributed Tracing)
-- 集成 `tracing-opentelemetry`，支持全链路追踪。
+### 2. 文档与开发者体验
 
-### 4. 高级 CLI 命令
-- 完善 `order` 和 `cert` 相关命令，提供更丰富的交互体验。
+- 完整补全 `docs/` 下的各模块开发者手册。
+- 提供 OpenTelemetry + Prometheus 的 Grafana 仪表盘配置示例。
+- 编写 API 生成的 OpenAPI (Swagger) 定义文件。
 
----
+### 3. 发布准备
 
-## 🛠️ 代码风格和规范 (保持一致)
-
-### 1. 异步与并发
-- 使用 `tokio` 进行异步调度。
-- 任务执行应具备超时控制和重试机制。
-
-### 2. 错误处理
-- 延续 `AcmeError` 体系。
-- 调度器中的错误应记录详细上下文，不影响其他并发任务。
-
-### 3. 监控与日志
-- 调度任务的开始、成功、失败均需记录 `tracing` 日志。
-- 暴露任务执行状态的 Prometheus 指标。
+- 修复所有编译警告与 Clippy 建议。
+- 确保集成测试在 GitHub Actions 中 100% 通过。
 
 ---
 
-## 🎯 Copilot 使用指南 (Phase 3 专用)
+## 🛠️ 代码规范与最佳实践 (v0.7.0 专用)
 
-### 调度器实现提示
+### 1. 异步任务处理
+
+- API 处理器 **不应** 阻塞。始终使用 `rand::rng().sample_iter(...)` 生成 `task_id`。
+- 始终将任务状态更新至 `AppState::tasks` 以供前端轮询。
+
+### 2. 错误处理与审计
+
+- 始终调用 `AcmeError::to_problem_details()`。
+- 关键业务行为必须调用 `EventAuditor::track_event`。
+
+### 3. 特征门控 (Feature Gating)
+
+- 新增组件或 Provider 必须在 `Cargo.toml` 中定义独立 feature 并在 `mod.rs` 中使用 `#[cfg(feature = "...")]`。
+
+---
+
+## 🎯 Copilot 调用提示 (v0.7.0 进阶)
+
+### API 扩展
+
 ```
-"实现一个基于 tokio 的任务调度器，支持 Cron 表达式或固定间隔，具备优雅关闭功能。"
-"为调度器添加任务优先级队列，确保紧急续期任务优先执行。"
+"在 src/server/order.rs 中重构 list_orders，使其返回 AppState 中所有任务的 TaskInfo。"
+"在 src/server/auth.rs 中实现基于环境变量动态加载 API Keys 的逻辑。"
 ```
 
-### 存储迁移提示
+### 挑战实现
+
 ```
-"编写一个工具函数，将所有账户和证书数据从 FileStorage 批量迁移到 RedisStorage，并验证完整性。"
+"为 HuaweiCloudDnsProvider 增加基于 reqwest::Client 的真实 POST 请求逻辑，实现 TXT 记录的物理删除。"
 ```
 
 ---
 
-**项目版本**: v0.6.0  
-**最后更新**: 2026-02-07  
+**项目版本**: v0.7.0-dev  
+**最后更新**: 2026-02-08  
 **维护者**: houseme

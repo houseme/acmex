@@ -76,6 +76,7 @@ impl Default for MiddlewareChain {
 /// 日志中间件
 pub struct LoggingMiddleware {
     /// 是否记录请求体
+    #[allow(dead_code)]
     log_body: bool,
 }
 
@@ -106,6 +107,7 @@ impl Middleware for LoggingMiddleware {
 
 /// 超时中间件
 pub struct TimeoutMiddleware {
+    #[allow(dead_code)]
     timeout_secs: u64,
 }
 
@@ -126,6 +128,7 @@ impl Middleware for TimeoutMiddleware {
 
 /// 重试中间件
 pub struct RetryMiddleware {
+    #[allow(dead_code)]
     max_retries: u32,
 }
 

@@ -12,16 +12,47 @@ pub struct CertificateProvisioner {
     domains: Vec<String>,
 }
 
+#[async_trait]
+impl Orchestrator for CertificateProvisioner {
+    async fn execute(&self, config: &Config) -> Result<()> {
+        let mut retry_count = 0;
+        let max_retries = 3;
+        let mut last_error = None;
+
+        while retry_count <= max_retries {
+            if retry_count > 0 {
+                let delay = std::time::Duration::from_secs(2u64.pow(retry_count));
+                tracing::info!(
+                    "Retrying provisioning in {:?} (attempt {}/{})",
+                    delay,
+                    retry_count,
+                    max_retries
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            match self.provision(config).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!("Provisioning attempt {} failed: {}", retry_count, e);
+                    last_error = Some(e);
+                    retry_count += 1;
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            crate::error::AcmeError::Protocol("Provisioning failed".to_string())
+        }))
+    }
+}
+
 impl CertificateProvisioner {
     /// Create a new provisioner
     pub fn new(domains: Vec<String>) -> Self {
         Self { domains }
     }
-}
 
-#[async_trait]
-impl Orchestrator for CertificateProvisioner {
-    async fn execute(&self, config: &Config) -> Result<()> {
+    async fn provision(&self, config: &Config) -> Result<()> {
         tracing::info!(
             "Starting certificate provisioning for domains: {:?}",
             self.domains
@@ -99,10 +130,6 @@ impl Orchestrator for CertificateProvisioner {
             "Certificate issued successfully for domains: {:?}",
             self.domains
         );
-
-        // In a real implementation, we would save to the configured storage
-        // let storage = create_storage_from_config(&config.storage)?;
-        // storage.save(&bundle).await?;
 
         Ok(())
     }

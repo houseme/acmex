@@ -87,13 +87,13 @@ pub use metrics::{HealthStatus, MetricsRegistry};
 pub use notifications::{EventType, WebhookClient, WebhookConfig, WebhookEvent, WebhookManager};
 pub use orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator};
 pub use order::{
-    parse_certificate_chain, verify_certificate_domains, Authorization, CertificateRevocation, Challenge,
-    CsrGenerator, FinalizationRequest, NewOrderRequest, Order, OrderManager,
+    Authorization, CertificateRevocation, Challenge, CsrGenerator, FinalizationRequest,
+    NewOrderRequest, Order, OrderManager, parse_certificate_chain, verify_certificate_domains,
 };
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
-pub use renewal::{RenewalHook, RenewalScheduler};
-pub use scheduler::{AdvancedRenewalScheduler, CleanupScheduler};
-pub use server::{start_server, HealthCheck, WebhookHandler};
+pub use renewal::{RenewalHook, SimpleRenewalScheduler};
+pub use scheduler::{AdvancedRenewalScheduler, CleanupScheduler, RenewalScheduler};
+pub use server::{HealthCheck, WebhookHandler, start_server};
 #[cfg(feature = "redis")]
 pub use storage::RedisStorage;
 pub use storage::{EncryptedStorage, FileStorage};
@@ -104,7 +104,9 @@ pub use types::{
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
-        account::{Account, AccountManager, KeyPair, KeyRollover}, certificate::CertificateChain,
+        AcmeClient, AcmeConfig,
+        account::{Account, AccountManager, KeyPair, KeyRollover},
+        certificate::CertificateChain,
         crypto::{Base64Encoding, Sha256Hash},
         error::{AcmeError, Result},
         orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator},
@@ -118,7 +120,5 @@ pub mod prelude {
         types::{
             AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,
         },
-        AcmeClient,
-        AcmeConfig,
     };
 }

@@ -315,3 +315,23 @@
 
 🚀 **开始探索 AcmeX 项目！**
 
+# 附录
+
+## 📖 相关文档
+
+- [可观测性指南 (Observability)](OBSERVABILITY.md)
+- [REST API 参考 (OpenAPI)](api/openapi.yaml)
+
+## 💻 示例代码 (Examples)
+
+- [所有示例概览](../examples/README.md)
+- [基础证书签发](../examples/basic_issuance.rs)
+- [高级续期调度器](../examples/advanced_scheduler.rs)
+- [自定义 API 服务](../examples/api_server_custom.rs)
+- [DNS-01 挑战实现](../examples/dns_01_challenge.rs)
+
+## 🛠️ 其它细节文档
+
+- [代码风格指南](../docs/CODING_STYLE.md)
+- [提交规范](../docs/COMMIT_CONVENTIONS.md)
+- [版本控制策略](../docs/VERSION_CONTROL.md)

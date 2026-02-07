@@ -1,48 +1,91 @@
 /// REST API server implementation
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 
 use super::account::{create_account, deactivate_account, get_account, update_account};
 use super::auth::api_key_auth;
 use super::certificate::{
     get_certificate, list_certificates, renew_certificate, revoke_certificate,
 };
-use super::health::{health_handler, HealthCheck};
-use super::order::{create_order, get_order, list_orders};
-use super::webhook::{webhook_handler, WebhookHandler};
+use super::health::{HealthCheck, health_handler};
+use super::order::{create_order, get_order, list_orders, trigger_full_renewal};
+use super::webhook::{WebhookHandler, webhook_handler};
+use crate::AcmeClient;
+use crate::config::Config;
 use crate::error::Result;
 use crate::notifications::WebhookManager;
-use crate::AcmeClient;
+use crate::orchestrator::OrchestrationStatus;
+use crate::scheduler::RenewalScheduler;
+// Use the trait
+use crate::storage::StorageBackend;
+
+/// Information about an asynchronous task
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskInfo {
+    pub status: OrchestrationStatus,
+    pub domains: Vec<String>,
+}
 
 /// Server state
 #[derive(Clone)]
 pub struct AppState {
+    /// Global configuration
+    pub config: Arc<Config>,
     /// ACME client
     pub client: Option<Arc<AcmeClient>>,
+    /// Storage backend
+    pub storage: Option<Arc<dyn StorageBackend>>,
     /// Health check
     pub health: Arc<HealthCheck>,
     /// Webhook handler
     pub webhook: Arc<WebhookHandler>,
+    /// Async tasks tracker
+    pub tasks: Arc<RwLock<HashMap<String, TaskInfo>>>,
+    /// Authorized API keys
+    pub api_keys: Arc<Vec<String>>,
+    /// Renewal scheduler
+    pub scheduler: Option<Arc<dyn RenewalScheduler>>, // Use dyn trait
 }
 
 /// Start the API server
 pub async fn start_server(
     addr: SocketAddr,
+    config: Arc<Config>,
     client: Option<Arc<AcmeClient>>,
+    storage: Option<Arc<dyn StorageBackend>>,
     webhook_manager: Arc<WebhookManager>,
+    scheduler: Option<Arc<dyn RenewalScheduler>>, // Use dyn trait
 ) -> Result<()> {
     let health = Arc::new(HealthCheck::new());
     let webhook = Arc::new(WebhookHandler::new(webhook_manager));
+    let tasks = Arc::new(RwLock::new(HashMap::new()));
+
+    // Load API keys from environment variable ACMEX_API_KEYS (comma separated)
+    let api_keys_str =
+        std::env::var("ACMEX_API_KEYS").unwrap_or_else(|_| "secret-admin-key".to_string());
+    let api_keys: Vec<String> = api_keys_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    let api_keys = Arc::new(api_keys);
 
     let state = AppState {
+        config,
         client,
+        storage,
         health: health.clone(),
         webhook,
+        tasks,
+        api_keys,
+        scheduler,
     };
 
     // Build router
@@ -57,6 +100,7 @@ pub async fn start_server(
         )
         // Order routes
         .route("/orders", get(list_orders).post(create_order))
+        .route("/orders/renew-all", post(trigger_full_renewal))
         .route("/orders/:id", get(get_order))
         // Certificate routes
         .route("/certificates", get(list_certificates))

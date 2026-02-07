@@ -17,6 +17,7 @@ use tracing::{debug, info};
 pub struct AlibabaCloudDnsProvider {
     access_key_id: String,
     access_key_secret: String,
+    #[allow(dead_code)]
     region: String,
     client: reqwest::Client,
 }

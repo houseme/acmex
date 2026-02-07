@@ -243,6 +243,10 @@ pub struct RenewalSettings {
     #[serde(default = "default_retry_delay")]
     pub retry_delay_secs: u64,
 
+    /// Concurrency level for renewals
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u32,
+
     /// Renewal hooks
     #[serde(default)]
     pub hooks: Option<RenewalHooks>,
@@ -453,6 +457,10 @@ fn default_retry_delay() -> u64 {
     300
 }
 
+fn default_concurrency() -> u32 {
+    5
+}
+
 fn default_metrics_listen() -> String {
     "127.0.0.1:9090".to_string()
 }
@@ -538,6 +546,7 @@ impl Default for RenewalSettings {
             renew_before_days: default_renew_before_days(),
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay(),
+            concurrency: default_concurrency(),
             hooks: None,
         }
     }

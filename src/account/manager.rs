@@ -23,7 +23,7 @@ pub struct Account {
     pub contact: Vec<String>,
 
     /// Terms of service agreed
-    #[serde(rename = "termsOfServiceAgreed")]
+    #[serde(rename = "termsOfServiceAgreed", default)]
     pub terms_of_service_agreed: bool,
 
     /// Account creation date

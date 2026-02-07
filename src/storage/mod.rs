@@ -22,8 +22,27 @@ pub trait StorageBackend: Send + Sync {
     /// Delete a value by key
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// List keys by prefix
+    /// List all keys with a prefix
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+}
+
+#[async_trait]
+impl<T: StorageBackend + ?Sized> StorageBackend for std::sync::Arc<T> {
+    async fn store(&self, key: &str, value: &[u8]) -> Result<()> {
+        (**self).store(key, value).await
+    }
+
+    async fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        (**self).load(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        (**self).delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        (**self).list(prefix).await
+    }
 }
 
 pub use cert_store::CertificateStore;
