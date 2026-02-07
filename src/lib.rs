@@ -29,6 +29,7 @@
 
 // Module declarations
 pub mod account;
+pub mod challenge;
 pub mod error;
 pub mod order;
 pub mod protocol;
@@ -36,6 +37,10 @@ pub mod types;
 
 // Re-exports for convenience
 pub use account::{Account, AccountManager, KeyPair};
+pub use challenge::{
+    ChallengeSolver, ChallengeSolverRegistry, Dns01Solver, DnsProvider, Http01Solver,
+    MockDnsProvider,
+};
 pub use error::{AcmeError, Result};
 pub use order::{Authorization, Challenge, FinalizationRequest, NewOrderRequest, Order};
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
