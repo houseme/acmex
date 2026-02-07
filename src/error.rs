@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 /// Comprehensive error handling for the ACME client
 use thiserror::Error;
 
@@ -50,29 +51,41 @@ pub enum AcmeError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// Rate limited by server
-    #[error("Rate limited, retry after: {0:?}")]
-    RateLimited(Option<std::time::Duration>),
-
-    /// Invalid input provided
+    /// Invalid input error
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
-    /// Operation timeout
+    /// Operation timed out
     #[error("Timeout: {0}")]
     Timeout(String),
 
-    /// Not found error
+    /// Resource not found
     #[error("Not found: {0}")]
     NotFound(String),
 
-    /// Invalid configuration
+    /// Configuration error
     #[error("Configuration error: {0}")]
     Configuration(String),
 
     /// PEM encoding/decoding error
     #[error("PEM error: {0}")]
     Pem(String),
+
+    /// Rate limited by server
+    #[error("Rate limited, retry after: {0:?}")]
+    RateLimited(Option<std::time::Duration>),
+}
+
+/// RFC 7807 Problem Details for HTTP APIs
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProblemDetails {
+    #[serde(rename = "type")]
+    pub problem_type: String,
+    pub title: String,
+    pub status: u16,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 impl AcmeError {
@@ -145,6 +158,54 @@ impl AcmeError {
     /// Create a PEM error
     pub fn pem<S: Into<String>>(msg: S) -> Self {
         AcmeError::Pem(msg.into())
+    }
+
+    /// Convert AcmeError to RFC 7807 ProblemDetails
+    pub fn to_problem_details(&self) -> ProblemDetails {
+        match self {
+            Self::Protocol(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/protocol".into(),
+                title: "ACME Protocol Error".into(),
+                status: 400,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::Account(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/account".into(),
+                title: "Account Operation Failed".into(),
+                status: 403,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::Order { status, detail } => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/order".into(),
+                title: format!("Order Failed (Status: {})", status),
+                status: 400,
+                detail: detail.clone(),
+                instance: None,
+            },
+            Self::Storage(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/storage".into(),
+                title: "Storage Error".into(),
+                status: 500,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::Transport(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/transport".into(),
+                title: "Network Transport Error".into(),
+                status: 502,
+                detail: d.clone(),
+                instance: None,
+            },
+            _ => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/internal".into(),
+                title: "Internal Server Error".into(),
+                status: 500,
+                detail: self.to_string(),
+                instance: None,
+            },
+        }
     }
 }
 

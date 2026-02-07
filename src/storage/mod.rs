@@ -2,6 +2,8 @@ pub mod cert_store;
 pub mod encrypted;
 /// Storage backends for certificates and account data
 pub mod file;
+pub mod memory;
+pub mod migration;
 #[cfg(feature = "redis")]
 pub mod redis;
 
@@ -27,5 +29,7 @@ pub trait StorageBackend: Send + Sync {
 pub use cert_store::CertificateStore;
 pub use encrypted::EncryptedStorage;
 pub use file::FileStorage;
+pub use memory::MemoryStorage;
+pub use migration::StorageMigrator;
 #[cfg(feature = "redis")]
 pub use redis::RedisStorage;

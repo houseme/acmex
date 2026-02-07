@@ -3,11 +3,12 @@ use crate::account::{AccountManager, KeyPair};
 use crate::challenge::ChallengeSolverRegistry;
 use crate::error::Result;
 use crate::order::{CsrGenerator, NewOrderRequest, OrderManager};
-use crate::protocol::{DirectoryManager, NonceManager};
+use crate::protocol::{DirectoryManager, NonceManager, NoncePool};
 use crate::types::{ChallengeType, Contact, Identifier};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// Configuration for ACME client
 #[derive(Clone)]
@@ -54,11 +55,13 @@ impl AcmeConfig {
 }
 
 /// High-level ACME client
+#[derive(Clone)]
 pub struct AcmeClient {
     config: AcmeConfig,
     http_client: reqwest::Client,
     key_pair: Arc<KeyPair>,
     account_id: Option<String>,
+    nonce_pool: Option<Arc<NoncePool>>,
 }
 
 impl AcmeClient {
@@ -72,6 +75,7 @@ impl AcmeClient {
             http_client,
             key_pair,
             account_id: None,
+            nonce_pool: None,
         })
     }
 
@@ -84,6 +88,7 @@ impl AcmeClient {
             http_client,
             key_pair: Arc::new(key_pair),
             account_id: None,
+            nonce_pool: None,
         }
     }
 
@@ -254,6 +259,29 @@ impl AcmeClient {
             private_key_pem,
             domains,
         })
+    }
+
+    /// Enable and initialize nonce pool for better performance
+    pub async fn enable_nonce_pool(&mut self, min_size: usize, max_size: usize) -> Result<()> {
+        let dir_mgr = DirectoryManager::new(&self.config.directory_url, self.http_client.clone());
+        let directory = dir_mgr.get().await?;
+        let nonce_manager = NonceManager::new(&directory.new_nonce, self.http_client.clone());
+        let pool = NoncePool::new(nonce_manager, min_size, max_size);
+        pool.refill().await?;
+        self.nonce_pool = Some(Arc::new(pool));
+        Ok(())
+    }
+
+    async fn get_nonce(&self) -> Result<String> {
+        if let Some(pool) = &self.nonce_pool {
+            pool.get_nonce().await
+        } else {
+            let dir_mgr =
+                DirectoryManager::new(&self.config.directory_url, self.http_client.clone());
+            let directory = dir_mgr.get().await?;
+            let nonce_manager = NonceManager::new(&directory.new_nonce, self.http_client.clone());
+            nonce_manager.get_nonce().await
+        }
     }
 
     /// Get account ID

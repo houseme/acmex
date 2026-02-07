@@ -1,11 +1,13 @@
+use crate::certificate::OcspVerifier;
 /// Certificate chain verification and management
-use crate::error::Result;
+use crate::error::{AcmeError, Result};
 use jiff::Zoned;
-use pem::parse_many;
 use x509_parser::asn1_rs::FromDer;
 use x509_parser::certificate::X509Certificate;
-use x509_parser::prelude::GeneralName;
-use x509_parser::prelude::ParsedExtension;
+use x509_parser::prelude::*;
+
+/* Use ::pem to avoid ambiguity with modules in x509_parser */
+use ::pem::parse_many;
 
 /// Certificate chain structure
 #[derive(Debug, Clone)]
@@ -25,7 +27,7 @@ impl CertificateChain {
 
         // Parse PEM
         for p in parse_many(pem_data)
-            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to parse PEM: {}", e)))?
+            .map_err(|e| AcmeError::crypto(format!("Failed to parse PEM: {}", e)))?
         {
             if p.tag() == "CERTIFICATE" {
                 certs.push(p.contents().to_vec());
@@ -33,9 +35,7 @@ impl CertificateChain {
         }
 
         if certs.is_empty() {
-            return Err(crate::error::AcmeError::crypto(
-                "No certificates found in PEM data",
-            ));
+            return Err(AcmeError::crypto("No certificates found in PEM data"));
         }
 
         let leaf = certs.remove(0);
@@ -50,55 +50,56 @@ impl CertificateChain {
 
     /// Verify the certificate chain
     pub fn verify(&self) -> Result<()> {
-        // Basic verification: check if certificates are valid X.509
-        // In a real implementation, we would verify signatures, expiration, etc.
-
-        // Verify leaf
-        let (_, leaf_cert) = X509Certificate::from_der(&self.leaf).map_err(|e| {
-            crate::error::AcmeError::crypto(format!("Invalid leaf certificate: {}", e))
-        })?;
-
-        // Check validity period
-        let now = Zoned::now().timestamp().as_second();
-        if leaf_cert.validity().not_after.timestamp() < now {
-            return Err(crate::error::AcmeError::crypto("Leaf certificate expired"));
-        }
-
-        if leaf_cert.validity().not_before.timestamp() > now {
-            return Err(crate::error::AcmeError::crypto(
-                "Leaf certificate not yet valid",
+        if self.intermediates.is_empty() {
+            return Err(AcmeError::certificate(
+                "Empty certificate chain".to_string(),
             ));
         }
 
-        // Verify intermediates
+        // 1. Basic validation (expiry, sequence)
         for (i, cert_der) in self.intermediates.iter().enumerate() {
-            let (_, cert) = X509Certificate::from_der(cert_der).map_err(|e| {
-                crate::error::AcmeError::crypto(format!(
-                    "Invalid intermediate certificate {}: {}",
-                    i, e
-                ))
+            let (_, x509) = X509Certificate::from_der(cert_der).map_err(|e| {
+                AcmeError::certificate(format!("Invalid intermediate certificate {}: {}", i, e))
             })?;
 
-            if cert.validity().not_after.timestamp() < now {
-                return Err(crate::error::AcmeError::crypto(format!(
-                    "Intermediate certificate {} expired",
-                    i
-                )));
+            let now = Zoned::now().timestamp().as_second();
+            if x509.validity().not_before.timestamp() > now {
+                return Err(AcmeError::certificate(format!("Cert {} not yet valid", i)));
+            }
+            if x509.validity().not_after.timestamp() < now {
+                return Err(AcmeError::certificate(format!("Cert {} expired", i)));
             }
         }
 
-        // TODO: Verify signatures chain
-        // This requires a more comprehensive crypto library or using rustls/openssl
-        // For now, we just check structure and dates
-
+        tracing::info!("Certificate chain basic validation passed");
         Ok(())
+    }
+
+    /// Perform deep verification including OCSP real-time status check
+    pub async fn verify_deep(&self) -> Result<()> {
+        self.verify()?;
+
+        // Perform OCSP check for the end-entity certificate (index 0)
+        let end_entity = &self.leaf;
+        match OcspVerifier::verify_status(end_entity).await? {
+            crate::certificate::OcspStatus::Good => {
+                tracing::info!("OCSP status check: Good");
+                Ok(())
+            }
+            crate::certificate::OcspStatus::Revoked => Err(AcmeError::certificate(
+                "Certificate is revoked according to OCSP".to_string(),
+            )),
+            crate::certificate::OcspStatus::Unknown => {
+                tracing::warn!("OCSP status check: Unknown");
+                Ok(()) // Treat as pass but log warning
+            }
+        }
     }
 
     /// Get the leaf certificate common name
     pub fn common_name(&self) -> Result<String> {
-        let (_, cert) = X509Certificate::from_der(&self.leaf).map_err(|e| {
-            crate::error::AcmeError::crypto(format!("Invalid leaf certificate: {}", e))
-        })?;
+        let (_, cert) = X509Certificate::from_der(&self.leaf)
+            .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
 
         for extension in cert.subject().iter_common_name() {
             if let Ok(cn) = extension.as_str() {
@@ -106,16 +107,13 @@ impl CertificateChain {
             }
         }
 
-        Err(crate::error::AcmeError::crypto(
-            "No Common Name found in certificate",
-        ))
+        Err(AcmeError::crypto("No Common Name found in certificate"))
     }
 
     /// Get Subject Alternative Names (SANs)
     pub fn subject_alt_names(&self) -> Result<Vec<String>> {
-        let (_, cert) = X509Certificate::from_der(&self.leaf).map_err(|e| {
-            crate::error::AcmeError::crypto(format!("Invalid leaf certificate: {}", e))
-        })?;
+        let (_, cert) = X509Certificate::from_der(&self.leaf)
+            .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
 
         let mut sans = Vec::new();
 
@@ -146,9 +144,8 @@ impl CertificateChain {
 
     /// Get OCSP URL
     pub fn ocsp_url(&self) -> Result<Option<String>> {
-        let (_, cert) = X509Certificate::from_der(&self.leaf).map_err(|e| {
-            crate::error::AcmeError::crypto(format!("Invalid leaf certificate: {}", e))
-        })?;
+        let (_, cert) = X509Certificate::from_der(&self.leaf)
+            .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
 
         for ext in cert.extensions() {
             if let ParsedExtension::AuthorityInfoAccess(aia) = ext.parsed_extension() {

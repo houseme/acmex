@@ -40,6 +40,22 @@ pub async fn run() -> crate::error::Result<()> {
         Commands::Renew(args) => {
             commands::handle_renew(args.domains, args.force, args.storage_path).await?;
         }
+        Commands::Order(args) => match args.command {
+            crate::cli::args::OrderCommands::List => {
+                commands::handle_order_list().await?;
+            }
+            crate::cli::args::OrderCommands::Show { order_id } => {
+                commands::handle_order_show(order_id).await?;
+            }
+        },
+        Commands::Cert(args) => match args.command {
+            crate::cli::args::CertCommands::List => {
+                commands::handle_cert_list().await?;
+            }
+            crate::cli::args::CertCommands::Revoke { cert, reason, key } => {
+                commands::handle_cert_revoke(cert, reason, key).await?;
+            }
+        },
         Commands::Daemon(args) => {
             if let Some(config_path) = args.config {
                 tracing::info!("Loading config from: {}", config_path);

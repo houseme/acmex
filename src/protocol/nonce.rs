@@ -3,9 +3,10 @@ use crate::error::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Manager for ACME nonce with pooling
+/// Manager for ACME nonces
+#[derive(Debug, Clone)]
 pub struct NonceManager {
-    new_nonce_url: String,
+    nonce_url: String,
     http_client: reqwest::Client,
     nonce_pool: Arc<Mutex<Vec<String>>>,
 }
@@ -14,7 +15,7 @@ impl NonceManager {
     /// Create a new nonce manager
     pub fn new(new_nonce_url: impl Into<String>, http_client: reqwest::Client) -> Self {
         Self {
-            new_nonce_url: new_nonce_url.into(),
+            nonce_url: new_nonce_url.into(),
             http_client,
             nonce_pool: Arc::new(Mutex::new(Vec::new())),
         }
@@ -36,7 +37,7 @@ impl NonceManager {
     async fn fetch_nonce(&self) -> Result<String> {
         let response = self
             .http_client
-            .head(&self.new_nonce_url)
+            .head(&self.nonce_url)
             .send()
             .await
             .map_err(|e| {

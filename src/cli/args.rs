@@ -31,8 +31,55 @@ pub enum Commands {
     /// Account management
     Account(AccountArgs),
 
+    /// Order management
+    Order(OrderArgs),
+
+    /// Certificate management (Revocation, exploration)
+    Cert(CertArgs),
+
     /// Start API server
     Serve(ServeArgs),
+}
+
+#[derive(Parser)]
+pub struct OrderArgs {
+    #[command(subcommand)]
+    pub command: OrderCommands,
+}
+
+#[derive(Subcommand)]
+pub enum OrderCommands {
+    /// List all orders
+    List,
+    /// Show order details
+    Show {
+        #[arg(short, long)]
+        order_id: String,
+    },
+}
+
+#[derive(Parser)]
+pub struct CertArgs {
+    #[command(subcommand)]
+    pub command: CertCommands,
+}
+
+#[derive(Subcommand)]
+pub enum CertCommands {
+    /// List all managed certificates
+    List,
+    /// Revoke a certificate
+    Revoke {
+        /// Certificate path (PEM)
+        #[arg(short, long)]
+        cert: String,
+        /// Revocation reason (default: unspecified)
+        #[arg(short, long)]
+        reason: Option<String>,
+        /// Account key path
+        #[arg(short, long)]
+        key: String,
+    },
 }
 
 #[derive(Parser)]

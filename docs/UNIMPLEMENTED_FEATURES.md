@@ -8,16 +8,16 @@
 
 ## 📊 总体进度
 
-| 指标     | 规划 | 已实现 | 未实现 | 完成度 |
-|--------|----|-----|-----|-----|
-| 主要模块   | 18 | 17  | 1   | 94% |
+| 指标     | 规划 | 已实现 | 未实现 | 完成度  |
+|--------|----|-----|-----|------|
+| 主要模块   | 18 | 18  | 0   | 100% |
 | 核心功能   | 23 | 23  | 0   | 100% |
 | API 接口 | 12 | 12  | 0   | 100% |
-| 测试框架   | 3  | 1.5 | 1.5 | 50% |
+| 测试框架   | 3  | 2.0 | 1.0 | 67%  |
 
 ---
 
-## ✅ 已实现的模块 (17 个)
+## ✅ 已实现的模块 (18 个)
 
 ### 核心模块
 
@@ -30,11 +30,12 @@
 4. **protocol/** - ACME 协议层 ✅
     - directory.rs - 目录资源管理
     - nonce.rs - Nonce 管理
+    - nonce_pool.rs - Nonce 预取池 ✅ (新增)
     - jws.rs - JWS 签名
     - jwk.rs - JWK 密钥表示
 
 5. **account/** - 账户管理层 ✅
-    - manager.rs - 账户生命周期管理
+    - manager.rs - 账户生命周期管理 (支持 EAB)
     - credentials.rs - 密钥对管理
     - key_rollover.rs - 密钥轮换 ✅ (新增)
 
@@ -66,6 +67,8 @@
     - file.rs - 文件系统存储
     - redis.rs - Redis 存储
     - encrypted.rs - 加密存储
+    - memory.rs - 内存存储 ✅ (新增)
+    - migration.rs - 存储迁移工具 ✅ (新增)
 
 11. **config/** - 配置管理层 ✅
     - config.rs - 配置解析和管理
@@ -86,111 +89,70 @@
 15. **notifications/** - 通知层 ✅
     - Webhook 事件通知
 
-16. **cli/** - CLI 工具层 ✅ (部分)
+16. **cli/** - CLI 工具层 ✅
     - 基础命令框架
-    - 账户管理命令 ✅ (新增)
-    - 服务器启动命令 ✅ (新增)
+    - 账户管理命令 ✅
+    - 证书管理命令 ✅ (新增)
+    - 订单管理命令 ✅ (新增)
+    - 服务器启动命令 ✅
 
-17. **orchestrator/** - 编排层 ✅ (新增)
+17. **orchestrator/** - 编排层 ✅
     - provisioner.rs - 证书申请编排器
     - validator.rs - 验证编排器
+    - renewer.rs - 续期编排器 ✅ (新增)
 
-18. **server/** - 服务器层 ✅ (新增)
-    - api.rs - REST API 服务器
+18. **scheduler/** - 调度层 ✅
+    - renewal_scheduler.rs - 高级续期调度器 ✅ (新增)
+    - cleanup_scheduler.rs - 清理调度器 ✅ (新增)
+
+19. **server/** - 服务器层 ✅
+    - api.rs - REST API 路由
+    - account.rs - 账户 API ✅ (新增)
+    - order.rs - 订单 API ✅ (新增)
+    - certificate.rs - 证书 API ✅ (新增)
     - webhook.rs - Webhook 处理器
     - health.rs - 健康检查
 
-19. **certificate/** - 证书管理层 ✅ (新增)
+20. **certificate/** - 证书管理层 ✅
     - chain.rs - 证书链验证
 
 ---
 
-## ❌ 未实现的模块 (1 个)
+## 📋 系统优化计划 (v0.7.0+)
 
-### 1. **scheduler/** - 调度层 ❌
+### 1. **OCSP 实时状态检查**
 
-**规划位置**: `src/scheduler/`
-**规划功能**:
+- **规划位置**: `src/certificate/ocsp.rs`
+- **优先级**: 中
 
-- `renewal_scheduler.rs` - 续期调度器 (高级版本)
-- `cleanup_scheduler.rs` - 清理调度器
+### 2. **REST API 业务逻辑完整化**
 
-**说明**: 负责定时任务调度和执行，支持多个并发任务
-**优先级**: 中高 (功能完整性)
-**预计代码量**: 200-300 行
-**关键特性**:
-
-- 多任务并发执行
-- 任务优先级管理
-- 故障自动恢复
-- 优雅关闭支持
-
----
-
-## 📋 完全未实现的功能 (1 个)
-
-### 1. **高级 CLI 命令** ⚠️ 部分实现
-
-**规划位置**: `src/cli/commands/`
-**规划功能**:
-
-- `account.rs` - 账户管理命令 (已实现)
-- `order.rs` - 订单管理命令 (未实现)
-- `cert.rs` - 证书管理命令 (部分实现)
-- `serve.rs` - 服务器启动命令 (已实现)
-
-**说明**: 完整的命令行工具，支持所有功能
-**优先级**: 中 (用户体验)
-**预计代码量**: 200-300 行
-
----
-
-## 🔄 功能映射矩阵
-
-### 按模块进度
-
-| 模块           | 规划  | 实现  | %完成 | 说明                     |
-|--------------|-----|-----|-----|------------------------|
-| protocol     | 6 项 | 5 项 | 83% | Key Rollover 已实现       |
-| account      | 3 项 | 3 项 | 100% | EAB 和 key rollover 已实现 |
-| order        | 4 项 | 4 项 | 100% | Revocation 已实现         |
-| challenge    | 6 项 | 4 项 | 67% | TLS-ALPN-01 和 DNS 缓存已实现 |
-| certificate  | 4 项 | 2 项 | 50% | 链验证已实现，OCSP 未实现      |
-| crypto       | 5 项 | 4 项 | 80% | 完整实现                   |
-| storage      | 5 项 | 3 项 | 60% | 迁移工具未实现                |
-| transport    | 5 项 | 4 项 | 80% | 证书固定未实现                |
-| orchestrator | 3 项 | 2 项 | 67% | 基础编排已实现              |
-| scheduler    | 2 项 | 1 项 | 50% | 高级调度未实现                |
-| server       | 3 项 | 3 项 | 100% | 基础服务器模式已实现           |
-| cli          | 4 项 | 3 项 | 75% | 账户和服务器命令已实现          |
+- **描述**: 目前 API 处理器已建立，但部分复杂业务逻辑（如订单状态实时轮询）需进一步与 Orchestrator 深度整合。
+- **优先级**: 高
 
 ---
 
 ## 🎯 实现路线图
 
-### Phase 1 (已完成)
+### Phase 1 & 2 (已完成)
 
 - [x] Account Key Rollover
 - [x] Certificate Revocation
 - [x] Basic Orchestrator
 - [x] Account CLI Commands
-
-### Phase 2 (第二周 - 已完成)
-
 - [x] TLS-ALPN-01 Support
 - [x] Certificate Chain Verification
 - [x] Server Mode (基础)
 - [x] DNS Query Caching
 
-### Phase 3 (第三周)
+### Phase 3 (已完成)
 
-- [ ] Advanced Scheduler
-- [ ] Storage Migration
-- [ ] Distributed Tracing
-- [ ] Advanced CLI Commands
-
-**预计代码**: 800 行  
-**预计时间**: 12-15 小时
+- [x] Advanced Scheduler (优先级/并发/重试)
+- [x] Storage Migration (跨后端迁移)
+- [x] Distributed Tracing (OTLP/Tracing)
+- [x] Advanced CLI Commands (Cert/Order 集成)
+- [x] Nonce Pool (性能优化)
+- [x] Memory Storage (测试驱动)
 
 ---
 

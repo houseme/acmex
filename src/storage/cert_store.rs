@@ -13,6 +13,11 @@ impl<B: StorageBackend> CertificateStore<B> {
         Self { backend }
     }
 
+    /// Get the storage backend
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
     fn key_for_domains(domains: &[String]) -> String {
         let mut domains = domains.to_vec();
         domains.sort();

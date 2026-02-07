@@ -63,3 +63,7 @@ pub fn health_status(status: HealthStatus) -> (&'static str, u16) {
 
 /// Shared metrics type
 pub type SharedMetrics = Arc<MetricsRegistry>;
+
+pub mod events;
+
+pub use events::{AcmeEvent, EventAuditor};
