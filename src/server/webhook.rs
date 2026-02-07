@@ -1,5 +1,5 @@
 /// Webhook handler implementation
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -42,12 +42,13 @@ pub async fn webhook_handler(
     // For example, "renew_certificate" event could trigger a renewal
 
     match payload.event.as_str() {
-        "ping" => {
-            (StatusCode::OK, Json(serde_json::json!({"status": "pong"})))
-        },
+        "ping" => (StatusCode::OK, Json(serde_json::json!({"status": "pong"}))),
         _ => {
             tracing::warn!("Unknown webhook event: {}", payload.event);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Unknown event type"})))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Unknown event type"})),
+            )
         }
     }
 }

@@ -1,7 +1,7 @@
 /// JWS (JSON Web Signature) signing for ACME
 use crate::error::Result;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rcgen::KeyPair;
 use serde_json::Value;
 

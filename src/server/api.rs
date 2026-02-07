@@ -1,17 +1,17 @@
 /// REST API server implementation
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
-use super::health::{health_handler, HealthCheck};
-use super::webhook::{webhook_handler, WebhookHandler};
+use super::health::{HealthCheck, health_handler};
+use super::webhook::{WebhookHandler, webhook_handler};
+use crate::AcmeClient;
 use crate::error::Result;
 use crate::notifications::WebhookManager;
-use crate::AcmeClient;
 
 /// Server state
 #[derive(Clone)]
@@ -54,9 +54,9 @@ pub async fn start_server(
     tracing::info!("API server listening on {}", addr);
 
     // Start server
-    axum::serve(listener, app).await.map_err(|e| {
-        crate::error::AcmeError::transport(format!("Server error: {}", e))
-    })?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| crate::error::AcmeError::transport(format!("Server error: {}", e)))?;
 
     Ok(())
 }

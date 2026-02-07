@@ -70,7 +70,9 @@ pub async fn handle_update(key_path: String, email: String, prod: bool) -> Resul
     let account = account_mgr.register(vec![contact.clone()], true).await?;
 
     // 4. Update
-    let updated = account_mgr.update_contacts(&account.id, vec![contact]).await?;
+    let updated = account_mgr
+        .update_contacts(&account.id, vec![contact])
+        .await?;
 
     info!("Account updated: {}", updated.id);
     println!("✅ Account updated successfully");

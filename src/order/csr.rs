@@ -38,12 +38,14 @@ impl CsrGenerator {
         };
 
         // Build certificate params with domains
-        let params = CertificateParams::new(self.domains.clone())
-            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to create certificate params: {}", e)))?;
+        let params = CertificateParams::new(self.domains.clone()).map_err(|e| {
+            crate::error::AcmeError::crypto(format!("Failed to create certificate params: {}", e))
+        })?;
 
         // Generate CSR
-        let csr = params.serialize_request(key_pair)
-            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e)))?;
+        let csr = params.serialize_request(key_pair).map_err(|e| {
+            crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e))
+        })?;
 
         let csr_der = csr.der().to_vec();
         let private_key_pem = key_pair.serialize_pem();
@@ -58,11 +60,13 @@ impl CsrGenerator {
             crate::error::AcmeError::crypto(format!("Failed to generate key pair: {}", e))
         })?;
 
-        let params = CertificateParams::new(domains.clone())
-            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to create certificate params: {}", e)))?;
+        let params = CertificateParams::new(domains.clone()).map_err(|e| {
+            crate::error::AcmeError::crypto(format!("Failed to create certificate params: {}", e))
+        })?;
 
-        let csr = params.serialize_request(&key_pair)
-            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e)))?;
+        let csr = params.serialize_request(&key_pair).map_err(|e| {
+            crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e))
+        })?;
 
         let csr_der = csr.der().to_vec();
         let private_key_pem = key_pair.serialize_pem();

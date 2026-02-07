@@ -1,15 +1,15 @@
 /// Serve command implementation
 use crate::error::Result;
-use crate::notifications::{WebhookConfig, WebhookManager, WebhookFormat};
+use crate::notifications::{WebhookConfig, WebhookFormat, WebhookManager};
 use crate::server::start_server;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 /// Handle serve command
 pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<()> {
-    let addr: SocketAddr = addr.parse().map_err(|e| {
-        crate::error::AcmeError::configuration(format!("Invalid address: {}", e))
-    })?;
+    let addr: SocketAddr = addr
+        .parse()
+        .map_err(|e| crate::error::AcmeError::configuration(format!("Invalid address: {}", e)))?;
 
     // Load config if provided
     if let Some(path) = config_path {

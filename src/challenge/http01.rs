@@ -1,6 +1,6 @@
 /// HTTP-01 challenge implementation
 use async_trait::async_trait;
-use axum::{extract::Path, http::StatusCode, routing::get, Router};
+use axum::{Router, extract::Path, http::StatusCode, routing::get};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -87,7 +87,12 @@ impl ChallengeSolver for Http01Solver {
         ChallengeType::Http01
     }
 
-    async fn prepare(&mut self, challenge: &Challenge, _identifier: &Identifier, key_authorization: &str) -> Result<()> {
+    async fn prepare(
+        &mut self,
+        challenge: &Challenge,
+        _identifier: &Identifier,
+        key_authorization: &str,
+    ) -> Result<()> {
         // Store the key authorization
         let mut auth = self.key_authorization.write().await;
         *auth = Some(key_authorization.to_string());
@@ -154,7 +159,9 @@ mod tests {
         let identifier = Identifier::dns("example.com");
 
         let mut solver = Http01Solver::new("127.0.0.1:9999".parse().unwrap());
-        let result = solver.prepare(&challenge, &identifier, "test-token.test-auth").await;
+        let result = solver
+            .prepare(&challenge, &identifier, "test-token.test-auth")
+            .await;
 
         // This might fail if port 9999 is not available, so we just check the method exists
         let _ = result;

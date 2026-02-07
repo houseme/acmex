@@ -10,8 +10,8 @@ pub mod dns_cache;
 pub mod http01;
 pub mod tls_alpn01;
 
-pub use dns01::{Dns01Solver, DnsProvider, MockDnsProvider};
 pub use dns_cache::{CachingDnsResolver, DnsCache};
+pub use dns01::{Dns01Solver, DnsProvider, MockDnsProvider};
 pub use http01::Http01Solver;
 pub use tls_alpn01::TlsAlpn01Solver;
 
@@ -22,7 +22,12 @@ pub trait ChallengeSolver: Send + Sync {
     fn challenge_type(&self) -> ChallengeType;
 
     /// Prepare the challenge (e.g., set up DNS records or HTTP server)
-    async fn prepare(&mut self, challenge: &Challenge, identifier: &Identifier, key_authorization: &str) -> Result<()>;
+    async fn prepare(
+        &mut self,
+        challenge: &Challenge,
+        identifier: &Identifier,
+        key_authorization: &str,
+    ) -> Result<()>;
 
     /// Present the challenge to the ACME server (usually just marking as ready)
     async fn present(&self) -> Result<()>;

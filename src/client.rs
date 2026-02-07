@@ -189,7 +189,9 @@ impl AcmeClient {
             let key_auth = account_mgr.compute_key_authorization(&challenge.token)?;
 
             // Prepare challenge
-            solver.prepare(challenge, &auth.identifier, &key_auth).await?;
+            solver
+                .prepare(challenge, &auth.identifier, &key_auth)
+                .await?;
 
             // Present challenge
             solver.present().await?;

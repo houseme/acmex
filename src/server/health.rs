@@ -1,5 +1,5 @@
 /// Health check implementation
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -59,9 +59,15 @@ impl HealthCheck {
             .map(|(k, v)| (k.clone(), format!("{:?}", v)))
             .collect();
 
-        let overall_status = if components.values().any(|s| matches!(s, HealthStatus::Unhealthy)) {
+        let overall_status = if components
+            .values()
+            .any(|s| matches!(s, HealthStatus::Unhealthy))
+        {
             "unhealthy"
-        } else if components.values().any(|s| matches!(s, HealthStatus::Degraded)) {
+        } else if components
+            .values()
+            .any(|s| matches!(s, HealthStatus::Degraded))
+        {
             "degraded"
         } else {
             "healthy"

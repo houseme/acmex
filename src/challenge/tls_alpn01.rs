@@ -1,8 +1,8 @@
 /// TLS-ALPN-01 challenge implementation
 use async_trait::async_trait;
 use rcgen::CertificateParams;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -81,7 +81,7 @@ impl TlsAlpn01Solver {
 
         Ok((
             vec![CertificateDer::from(cert_der.to_vec())],
-            PrivateKeyDer::try_from(key_der.clone()).map_err(|_| {
+            PrivateKeyDer::try_from(key_der).map_err(|_| {
                 crate::error::AcmeError::crypto("Failed to parse private key".to_string())
             })?,
         ))

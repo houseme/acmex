@@ -2,8 +2,8 @@
 use crate::account::{Account, AccountManager, KeyPair};
 use crate::error::Result;
 use crate::protocol::{Jwk, JwsSigner};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
 /// Key Rollover manager
@@ -37,7 +37,8 @@ impl<'a> KeyRollover<'a> {
         let key_change_url = directory.key_change;
 
         // 2. Prepare new key information
-        let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.new_key_pair.public_key_bytes()));
+        let new_jwk =
+            Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.new_key_pair.public_key_bytes()));
 
         // 3. Create inner JWS (signed by NEW key)
         // The payload is the new key's JWK
@@ -83,27 +84,40 @@ impl<'a> KeyRollover<'a> {
             "signature": inner_jws_parts[2]
         });
 
-        let outer_jws = self.account_manager.get_signer().sign(&outer_header, &inner_jws_obj)?;
+        let outer_jws = self
+            .account_manager
+            .get_signer()
+            .sign(&outer_header, &inner_jws_obj)?;
 
         // 5. Send request
-        let response = self.account_manager.http_client
+        let response = self
+            .account_manager
+            .http_client
             .post(&key_change_url)
             .header("Content-Type", "application/jose+json")
             .body(outer_jws)
             .send()
             .await
-            .map_err(|e| crate::error::AcmeError::transport(format!("Failed to change key: {}", e)))?;
+            .map_err(|e| {
+                crate::error::AcmeError::transport(format!("Failed to change key: {}", e))
+            })?;
 
         // Cache nonce
         if let Some(nonce_header) = response.headers().get("replay-nonce") {
             if let Ok(nonce_str) = nonce_header.to_str() {
-                self.account_manager.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+                self.account_manager
+                    .nonce_manager
+                    .cache_nonce(nonce_str.to_string())
+                    .await;
             }
         }
 
         let status = response.status();
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(crate::error::AcmeError::account(format!(
                 "Failed to change key: HTTP {}: {}",
                 status, error_text

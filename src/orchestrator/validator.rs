@@ -1,7 +1,7 @@
+use super::Orchestrator;
 /// Domain validation orchestration
 use crate::config::Config;
 use crate::error::Result;
-use super::Orchestrator;
 use async_trait::async_trait;
 
 /// Orchestrator for validating domain control

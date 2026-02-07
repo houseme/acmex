@@ -2,8 +2,8 @@
 use crate::account::AccountManager;
 use crate::error::Result;
 use crate::types::RevocationReason;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
 /// Certificate revocation handler
@@ -60,24 +60,34 @@ impl<'a> CertificateRevocation<'a> {
 
         let jws = self.account_manager.signer.sign(&header, &payload)?;
 
-        let response = self.account_manager.http_client
+        let response = self
+            .account_manager
+            .http_client
             .post(&revoke_url)
             .header("Content-Type", "application/jose+json")
             .body(jws)
             .send()
             .await
-            .map_err(|e| crate::error::AcmeError::transport(format!("Failed to revoke certificate: {}", e)))?;
+            .map_err(|e| {
+                crate::error::AcmeError::transport(format!("Failed to revoke certificate: {}", e))
+            })?;
 
         // Cache nonce
         if let Some(nonce_header) = response.headers().get("replay-nonce") {
             if let Ok(nonce_str) = nonce_header.to_str() {
-                self.account_manager.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+                self.account_manager
+                    .nonce_manager
+                    .cache_nonce(nonce_str.to_string())
+                    .await;
             }
         }
 
         let status = response.status();
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(crate::error::AcmeError::order(
                 format!("Failed to revoke certificate: HTTP {}", status),
                 error_text,

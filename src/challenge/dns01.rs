@@ -1,7 +1,7 @@
 /// DNS-01 challenge implementation
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -107,7 +107,12 @@ impl ChallengeSolver for Dns01Solver {
         ChallengeType::Dns01
     }
 
-    async fn prepare(&mut self, challenge: &Challenge, _identifier: &Identifier, key_authorization: &str) -> Result<()> {
+    async fn prepare(
+        &mut self,
+        challenge: &Challenge,
+        _identifier: &Identifier,
+        key_authorization: &str,
+    ) -> Result<()> {
         // Compute DNS record value (base64url of SHA256 hash)
         use sha2::{Digest, Sha256};
 
@@ -212,7 +217,9 @@ mod tests {
         };
         let identifier = Identifier::dns("example.com");
 
-        let result = solver.prepare(&challenge, &identifier, "test-token.test-auth").await;
+        let result = solver
+            .prepare(&challenge, &identifier, "test-token.test-auth")
+            .await;
         assert!(result.is_ok());
     }
 }

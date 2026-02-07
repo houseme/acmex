@@ -1,11 +1,11 @@
 /// JSON Web Key (JWK) implementation for ACME
 use crate::error::Result;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// JSON Web Key representation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,9 +221,11 @@ mod tests {
             .expect("Failed to compute thumbprint");
         // The thumbprint will vary, just verify it's a valid base64url string
         assert!(!thumbprint.is_empty());
-        assert!(thumbprint
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            thumbprint
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]

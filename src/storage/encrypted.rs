@@ -19,7 +19,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         #[cfg(feature = "aws-lc-rs")]
         {
-            use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+            use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key".to_string()))?;
@@ -40,7 +40,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
-            use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+            use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key".to_string()))?;
@@ -76,7 +76,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(feature = "aws-lc-rs")]
         {
-            use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+            use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key".to_string()))?;
@@ -93,7 +93,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
-            use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+            use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key".to_string()))?;

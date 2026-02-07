@@ -3,8 +3,8 @@ use crate::account::AccountManager;
 use crate::error::Result;
 use crate::order::{Authorization, Challenge, NewOrderRequest, Order};
 use crate::protocol::{DirectoryManager, NonceManager};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 use std::time::Duration;
 
