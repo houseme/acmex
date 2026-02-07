@@ -27,6 +27,12 @@ pub enum Commands {
 
     /// Show certificate info
     Info(InfoArgs),
+
+    /// Account management
+    Account(AccountArgs),
+
+    /// Start API server
+    Serve(ServeArgs),
 }
 
 #[derive(Parser)]
@@ -39,7 +45,7 @@ pub struct ObtainArgs {
     #[arg(short, long)]
     pub email: String,
 
-    /// Challenge type (http-01, dns-01)
+    /// Challenge type (http-01, dns-01, tls-alpn-01)
     #[arg(short, long, default_value = "http-01")]
     pub challenge: String,
 
@@ -107,4 +113,89 @@ pub struct InfoArgs {
     /// Certificate file path
     #[arg(short, long, required = true)]
     pub cert: String,
+}
+
+#[derive(Parser)]
+pub struct AccountArgs {
+    #[command(subcommand)]
+    pub command: AccountCommands,
+}
+
+#[derive(Subcommand)]
+pub enum AccountCommands {
+    /// Register a new account
+    Register(AccountRegisterArgs),
+    /// Update account contacts
+    Update(AccountUpdateArgs),
+    /// Deactivate account
+    Deactivate(AccountDeactivateArgs),
+    /// Rotate account key
+    RotateKey(AccountRotateKeyArgs),
+}
+
+#[derive(Parser)]
+pub struct AccountRegisterArgs {
+    /// Contact email
+    #[arg(short, long, required = true)]
+    pub email: String,
+
+    /// Use production Let's Encrypt
+    #[arg(long, default_value_t = false)]
+    pub prod: bool,
+
+    /// Output account key path
+    #[arg(short, long, default_value = "account_key.pem")]
+    pub key_path: String,
+}
+
+#[derive(Parser)]
+pub struct AccountUpdateArgs {
+    /// Account key path
+    #[arg(short, long, required = true)]
+    pub key_path: String,
+
+    /// New contact email
+    #[arg(short, long, required = true)]
+    pub email: String,
+
+    /// Use production Let's Encrypt
+    #[arg(long, default_value_t = false)]
+    pub prod: bool,
+}
+
+#[derive(Parser)]
+pub struct AccountDeactivateArgs {
+    /// Account key path
+    #[arg(short, long, required = true)]
+    pub key_path: String,
+
+    /// Use production Let's Encrypt
+    #[arg(long, default_value_t = false)]
+    pub prod: bool,
+}
+
+#[derive(Parser)]
+pub struct AccountRotateKeyArgs {
+    /// Current account key path
+    #[arg(short, long, required = true)]
+    pub key_path: String,
+
+    /// New account key path (output)
+    #[arg(short, long, default_value = "account_key_new.pem")]
+    pub new_key_path: String,
+
+    /// Use production Let's Encrypt
+    #[arg(long, default_value_t = false)]
+    pub prod: bool,
+}
+
+#[derive(Parser)]
+pub struct ServeArgs {
+    /// Listen address
+    #[arg(short, long, default_value = "127.0.0.1:8080")]
+    pub addr: String,
+
+    /// Config file path
+    #[arg(short, long)]
+    pub config: Option<String>,
 }

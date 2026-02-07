@@ -58,6 +58,7 @@ impl KeyPair {
         &[]
     }
 }
+#[cfg(test)]
 mod tests {
     use super::*;
 

@@ -46,12 +46,12 @@ pub struct Account {
 /// Account manager for handling account lifecycle
 pub struct AccountManager<'a> {
     #[allow(dead_code)]
-    key_pair: &'a KeyPair,
-    signer: JwsSigner<'a>,
-    jwk: Jwk,
-    nonce_manager: &'a NonceManager,
-    directory_manager: &'a DirectoryManager,
-    http_client: &'a reqwest::Client,
+    pub(crate) key_pair: &'a KeyPair,
+    pub(crate) signer: JwsSigner<'a>,
+    pub(crate) jwk: Jwk,
+    pub(crate) nonce_manager: &'a NonceManager,
+    pub(crate) directory_manager: &'a DirectoryManager,
+    pub(crate) http_client: &'a reqwest::Client,
 }
 
 impl<'a> AccountManager<'a> {

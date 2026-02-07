@@ -1,5 +1,5 @@
 /// CLI commands implementation
-use crate::cli::args::{Cli, Commands};
+use crate::cli::args::{Cli, Commands, AccountCommands};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -57,6 +57,25 @@ pub async fn run() -> crate::error::Result<()> {
         }
         Commands::Info(args) => {
             commands::handle_info(args.cert)?;
+        }
+        Commands::Account(args) => {
+            match args.command {
+                AccountCommands::Register(a) => {
+                    commands::handle_register(a.email, a.prod, a.key_path).await?;
+                }
+                AccountCommands::Update(a) => {
+                    commands::handle_update(a.key_path, a.email, a.prod).await?;
+                }
+                AccountCommands::Deactivate(a) => {
+                    commands::handle_deactivate(a.key_path, a.prod).await?;
+                }
+                AccountCommands::RotateKey(a) => {
+                    commands::handle_rotate_key(a.key_path, a.new_key_path, a.prod).await?;
+                }
+            }
+        }
+        Commands::Serve(args) => {
+            commands::handle_serve(args.addr, args.config).await?;
         }
     }
 

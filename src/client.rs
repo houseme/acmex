@@ -189,7 +189,7 @@ impl AcmeClient {
             let key_auth = account_mgr.compute_key_authorization(&challenge.token)?;
 
             // Prepare challenge
-            solver.prepare(challenge, &key_auth).await?;
+            solver.prepare(challenge, &auth.identifier, &key_auth).await?;
 
             // Present challenge
             solver.present().await?;
@@ -237,6 +237,15 @@ impl AcmeClient {
         })?;
 
         let cert_pem = order_mgr.download_certificate(&certificate_url).await?;
+
+        // Verify certificate chain
+        if let Ok(chain) = crate::certificate::CertificateChain::from_pem(cert_pem.as_bytes()) {
+            if let Err(e) = chain.verify() {
+                tracing::warn!("Certificate chain verification failed: {}", e);
+            } else {
+                tracing::info!("Certificate chain verified successfully");
+            }
+        }
 
         Ok(CertificateBundle {
             certificate_pem: cert_pem,

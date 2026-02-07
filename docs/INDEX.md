@@ -1,6 +1,6 @@
 # 📚 AcmeX 项目文档索引
 
-**项目版本**: v0.4.0  
+**项目版本**: v0.5.0  
 **最后更新**: 2026-02-07  
 **文档语言**: 中文
 
@@ -12,7 +12,8 @@
 
 1. 先读 → [项目主要介绍](./MAIN_README.md)
 2. 再看 → [5 分钟快速开始](../README.md)
-3. 查阅 → [v0.4.0 使用指南](./V0.4.0_USAGE_GUIDE.md)
+3. 查阅 → [v0.5.0 功能指南](./V0.5.0_FEATURES_GUIDE.md) - ⭐ 推荐
+4. 学习 → [v0.4.0 使用指南](./V0.4.0_USAGE_GUIDE.md)
 
 ### 📖 我想学习详细内容
 
@@ -20,16 +21,20 @@
 2. **v0.2.0** → [挑战验证完成报告](./V0.2.0_COMPLETION_REPORT.md)
 3. **v0.3.0** → [证书签发完成报告](./V0.3.0_COMPLETION_REPORT.md)
 4. **v0.4.0** → [企业功能完成报告](./V0.4.0_COMPLETION_REPORT.md)
+5. **v0.5.0** → [v0.5.0 完成报告](./V0.5.0_COMPLETION_REPORT.md) - ⭐ 最新
 
 ### 💻 我想写代码
 
 1. [CHALLENGE_EXAMPLES.md](./CHALLENGE_EXAMPLES.md) - 挑战验证示例
 2. [INTEGRATION_EXAMPLES.md](./INTEGRATION_EXAMPLES.md) - 集成示例
-3. [V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md) - 功能使用指南
+3. [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md) - v0.5.0 功能指南
 4. [V0.3.0_INTEGRATION_EXAMPLES.md](./V0.3.0_INTEGRATION_EXAMPLES.md) - v0.3.0 示例
 
 ### 🔍 我想深入某个功能
 
+- **多 CA 支持** → [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md#-多ca支持)
+- **新 DNS 提供商** → [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md#-dns-提供商扩展)
+- **Webhook 通知** → [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md#-webhook-通知系统)
 - HTTP-01 验证 → [HTTP-01_IMPLEMENTATION.md](./HTTP-01_IMPLEMENTATION.md)
 - DNS-01 验证 → [DNS-01_IMPLEMENTATION.md](./DNS-01_IMPLEMENTATION.md)
 - 自动续期 → [V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md#-自动续期系统)
@@ -39,14 +44,15 @@
 ### 📊 我想了解项目全貌
 
 1. [FINAL_PROJECT_SUMMARY.md](./FINAL_PROJECT_SUMMARY.md) - 最终项目总结
-2. [COMPLETE_CHECKLIST.md](./COMPLETE_CHECKLIST.md) - 完整文件清单
-3. [DELIVERABLES_CHECKLIST.md](./DELIVERABLES_CHECKLIST.md) - 交付清单
+2. [V0.5.0_FINAL_STATUS.md](./V0.5.0_FINAL_STATUS.md) - v0.5.0 最终状态
+3. [COMPLETE_CHECKLIST.md](./COMPLETE_CHECKLIST.md) - 完整文件清单
+4. [DELIVERABLES_CHECKLIST.md](./DELIVERABLES_CHECKLIST.md) - 交付清单
 
 ---
 
 ## 📑 文档分类
 
-### 📖 版本报告 (4 个)
+### 📖 版本报告 (5 个)
 
 按时间顺序阅读，了解项目演进：
 
@@ -74,7 +80,15 @@
     - Prometheus 监控
     - CLI 工具骨架
 
-### 💡 使用指南 (3 个)
+5. **[V0.5.0_COMPLETION_REPORT.md](./V0.5.0_COMPLETION_REPORT.md)** ⭐ 最新 (800+ 行)
+    - 多 CA 支持 (4 个 CA)
+    - 5 个新 DNS 提供商
+    - Webhook 通知系统
+    - Feature gates 灵活编译
+    - 配置管理增强
+    - temp-env 安全测试
+
+### 💡 使用指南和特性 (4 个)
 
 实战代码和最佳实践：
 
@@ -84,7 +98,14 @@
     - 使用场景分类
     - 快速命令参考
 
-2. **[V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md)** (800+ 行)
+2. **[V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md)** ⭐ 推荐 (470+ 行)
+    - 多 CA 使用指南
+    - Feature gates 使用说明
+    - 9 个 DNS 提供商配置
+    - Webhook 通知配置
+    - 安全测试实践
+
+3. **[V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md)** (800+ 行)
     - DNS 提供商详细用法
     - 自动续期系统使用
     - 存储后端选择和配置
@@ -92,12 +113,13 @@
     - CLI 工具命令大全
     - Feature flags 使用
 
-3. **[V0.3.0_INTEGRATION_EXAMPLES.md](./V0.3.0_INTEGRATION_EXAMPLES.md)** (600+ 行)
+4. **[V0.3.0_INTEGRATION_EXAMPLES.md](./V0.3.0_INTEGRATION_EXAMPLES.md)** (600+ 行)
     - HTTP-01 完整示例
     - DNS-01 完整示例
     - 手动订单流程
     - 自定义 DNS 提供商
     - 批量操作示例
+    - 错误处理示例
     - 错误处理示例
 
 ### 🔬 技术文档 (4 个)
@@ -126,7 +148,7 @@
     - 多提供商配置
     - 企业部署模式
 
-### 📋 项目总结 (3 个)
+### 📋 项目总结 (5 个)
 
 总结和索引：
 
@@ -138,15 +160,25 @@
     - 学习价值和应用场景
     - 下一步规划
 
-2. **[COMPLETE_CHECKLIST.md](./COMPLETE_CHECKLIST.md)**
+2. **[V0.5.0_FINAL_STATUS.md](./V0.5.0_FINAL_STATUS.md)**
+    - v0.5.0 最终状态总结
+    - 功能完成情况统计
+    - 编译状态和修复指南
+    - 后续工作计划
+
+3. **[V0.5.0_IMPLEMENTATION_REPORT.md](./V0.5.0_IMPLEMENTATION_REPORT.md)**
+    - v0.5.0 实现详细报告
+    - 每个功能的完成度
+    - 编译问题和解决方案
+    - 代码统计和质量指标
+
+4. **[COMPLETE_CHECKLIST.md](./COMPLETE_CHECKLIST.md)**
     - 文件完整清单
     - 代码行数统计
     - 功能映射表
-    - 依赖清单
-    - 测试覆盖
     - 快速导航
 
-3. **[DELIVERABLES_CHECKLIST.md](./DELIVERABLES_CHECKLIST.md)**
+5. **[DELIVERABLES_CHECKLIST.md](./DELIVERABLES_CHECKLIST.md)**
     - 交付物清单
     - 功能完成情况
     - 文档覆盖范围
@@ -285,11 +317,11 @@ cargo build --release \
 
 | 类别     | 数量       | 行数        |
 |--------|----------|-----------|
-| 版本报告   | 4 个      | 2000+     |
-| 使用指南   | 3 个      | 1800+     |
+| 版本报告   | 5 个      | 2500+     |
+| 使用指南   | 4 个      | 2200+     |
 | 技术文档   | 4 个      | 1200+     |
-| 项目总结   | 3 个      | 450+      |
-| **总计** | **14 个** | **5450+** |
+| 项目总结   | 5 个      | 800+      |
+| **总计** | **18 个** | **6700+** |
 
 ---
 
@@ -299,10 +331,11 @@ cargo build --release \
 
 1. [MAIN_README.md](./MAIN_README.md)
 2. [FINAL_PROJECT_SUMMARY.md](./FINAL_PROJECT_SUMMARY.md) 快速浏览
+3. [V0.5.0_FINAL_STATUS.md](./V0.5.0_FINAL_STATUS.md) - v0.5.0 亮点
 
 ### 第二级 (了解功能 - 2 小时)
 
-1. 版本报告系列 (v0.1.0 → v0.4.0)
+1. 版本报告系列 (v0.1.0 → v0.5.0)
 2. 对应的使用指南
 
 ### 第三级 (深入学习 - 4-6 小时)
@@ -313,7 +346,7 @@ cargo build --release \
 
 ### 第四级 (生产部署 - 8+ 小时)
 
-1. 完整的 v0.4.0 文档
+1. 完整的 v0.5.0 功能指南
 2. 企业部署示例
 3. 最佳实践指南
 4. 性能优化建议
@@ -322,26 +355,53 @@ cargo build --release \
 
 ## 🎯 最常提问
 
-**Q: 如何快速开始？**  
-A: 读 [MAIN_README.md](./MAIN_README.md) 然后查看 CHALLENGE_EXAMPLES.md
+**Q: v0.5.0 新增了什么？**  
+A: 读 [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md) 了解新功能
 
-**Q: 如何使用 CloudFlare DNS?**  
-A: 查看 [V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md#cloudflare-dns-01)
+**Q: 如何使用多 CA？**  
+A: 查看 [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md#-多ca支持)
 
-**Q: 如何启用自动续期？**  
-A: 查看 [V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md#基础续期示例)
+**Q: 如何使用新的 DNS 提供商？**  
+A: 查看 [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md#-dns-提供商扩展)
 
-**Q: 如何加密存储证书？**  
-A: 查看 [V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md#加密存储)
+**Q: 如何配置 Webhook 通知？**  
+A: 查看 [V0.5.0_FEATURES_GUIDE.md](./V0.5.0_FEATURES_GUIDE.md#-webhook-通知系统)
 
-**Q: 如何使用 CLI 工具？**  
-A: 查看 [V0.4.0_USAGE_GUIDE.md](./V0.4.0_USAGE_GUIDE.md#cli-工具使用)
+**Q: Feature gates 有什么用？**  
+A: 查看 copilot-instructions.md 中的 Feature Gates 系统部分
 
 ---
 
-**文档版本**: v0.4.0  
+## 📊 架构分析与缺口补完
+
+### 架构规划 vs 实现对比
+
+- [ARCHITECTURE_COMPARISON_REPORT.md](./ARCHITECTURE_COMPARISON_REPORT.md) ⭐ 全面对比分析
+    - 规划：18 个模块，8000+ 行代码
+    - 实现：14 个模块，6200+ 行代码 (v0.5.0)
+    - 缺口：4 个模块，1800+ 行代码
+    - **完成度：78%**
+
+### 未实现功能清单
+
+- [UNIMPLEMENTED_FEATURES.md](./UNIMPLEMENTED_FEATURES.md) - 详细功能规格
+    - 4 个完全未实现的模块
+    - 10 个部分未实现的功能
+    - 优先级分类和工作量估计
+    - 3 阶段实现路线图 (v0.6.0, v0.7.0, v1.0.0)
+
+### v0.6.0 实现指南
+
+- [V0.6.0_IMPLEMENTATION_ROADMAP.md](./V0.6.0_IMPLEMENTATION_ROADMAP.md) - 详细步骤指南
+    - 每个功能的具体实现步骤
+    - 代码框架模板
+    - 时间和难度估计
+    - 完整的检查清单
+
+---
+
+**文档版本**: v0.5.0  
 **最后更新**: 2026-02-07  
 **维护者**: houseme
 
 🎉 **祝您使用 AcmeX 愉快！**
-

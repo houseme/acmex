@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use super::ChallengeSolver;
 use crate::error::Result;
 use crate::order::Challenge;
-use crate::types::ChallengeType;
+use crate::types::{ChallengeType, Identifier};
 
 /// DNS provider trait for managing DNS records
 #[async_trait]
@@ -107,7 +107,7 @@ impl ChallengeSolver for Dns01Solver {
         ChallengeType::Dns01
     }
 
-    async fn prepare(&mut self, challenge: &Challenge, key_authorization: &str) -> Result<()> {
+    async fn prepare(&mut self, challenge: &Challenge, _identifier: &Identifier, key_authorization: &str) -> Result<()> {
         // Compute DNS record value (base64url of SHA256 hash)
         use sha2::{Digest, Sha256};
 
@@ -210,8 +210,9 @@ mod tests {
             updated: None,
             error: None,
         };
+        let identifier = Identifier::dns("example.com");
 
-        let result = solver.prepare(&challenge, "test-token.test-auth").await;
+        let result = solver.prepare(&challenge, &identifier, "test-token.test-auth").await;
         assert!(result.is_ok());
     }
 }

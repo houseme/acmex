@@ -1,15 +1,19 @@
 use crate::error::Result;
 use crate::order::Challenge;
-use crate::types::ChallengeType;
+use crate::types::{ChallengeType, Identifier};
 /// Challenge solver trait and registry
 use async_trait::async_trait;
 
 // Re-export challenge types
 pub mod dns01;
+pub mod dns_cache;
 pub mod http01;
+pub mod tls_alpn01;
 
 pub use dns01::{Dns01Solver, DnsProvider, MockDnsProvider};
+pub use dns_cache::{CachingDnsResolver, DnsCache};
 pub use http01::Http01Solver;
+pub use tls_alpn01::TlsAlpn01Solver;
 
 /// Trait for implementing different challenge types
 #[async_trait]
@@ -18,7 +22,7 @@ pub trait ChallengeSolver: Send + Sync {
     fn challenge_type(&self) -> ChallengeType;
 
     /// Prepare the challenge (e.g., set up DNS records or HTTP server)
-    async fn prepare(&mut self, challenge: &Challenge, key_authorization: &str) -> Result<()>;
+    async fn prepare(&mut self, challenge: &Challenge, identifier: &Identifier, key_authorization: &str) -> Result<()>;
 
     /// Present the challenge to the ACME server (usually just marking as ready)
     async fn present(&self) -> Result<()>;

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use super::ChallengeSolver;
 use crate::error::Result;
 use crate::order::Challenge;
-use crate::types::ChallengeType;
+use crate::types::{ChallengeType, Identifier};
 
 /// HTTP-01 challenge solver
 pub struct Http01Solver {
@@ -87,7 +87,7 @@ impl ChallengeSolver for Http01Solver {
         ChallengeType::Http01
     }
 
-    async fn prepare(&mut self, challenge: &Challenge, key_authorization: &str) -> Result<()> {
+    async fn prepare(&mut self, challenge: &Challenge, _identifier: &Identifier, key_authorization: &str) -> Result<()> {
         // Store the key authorization
         let mut auth = self.key_authorization.write().await;
         *auth = Some(key_authorization.to_string());
@@ -151,9 +151,10 @@ mod tests {
             updated: None,
             error: None,
         };
+        let identifier = Identifier::dns("example.com");
 
         let mut solver = Http01Solver::new("127.0.0.1:9999".parse().unwrap());
-        let result = solver.prepare(&challenge, "test-token.test-auth").await;
+        let result = solver.prepare(&challenge, &identifier, "test-token.test-auth").await;
 
         // This might fail if port 9999 is not available, so we just check the method exists
         let _ = result;

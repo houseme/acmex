@@ -2,7 +2,7 @@
 
 **项目名称**: AcmeX  
 **项目描述**: 企业级 ACME v2 客户端库和工具集  
-**当前版本**: v0.4.0  
+**当前版本**: v0.5.0  
 **Rust 版本**: 1.93.0 (Edition 2024)  
 **MSRV**: 1.92.0
 
@@ -10,18 +10,22 @@
 
 ## 🎯 项目概览
 
-AcmeX 是一个完整的 ACME v2 (RFC 8555) 协议实现库，专为自动化 TLS 证书管理设计。支持 HTTP-01、DNS-01、TLS-ALPN-01 等多种验证方式，集成了
-4 个 DNS 提供商，提供自动续期、多种存储后端、Prometheus 监控和 CLI 工具。
+AcmeX 是一个完整的 ACME v2 (RFC 8555) 协议实现库，专为自动化 TLS 证书管理设计。支持 HTTP-01、DNS-01、TLS-ALPN-01
+等多种验证方式，集成了 9 个 DNS 提供商，支持多个证书颁发机构，提供自动续期、多种存储后端、Prometheus 监控、Webhook 通知和 CLI
+工具。
 
 ### 核心特性
 
-- ✅ 完整 ACME v2 协议实现
+- ✅ 完整 ACME v2 协议实现 (RFC 8555)
 - ✅ 3 种验证方式 (HTTP-01, DNS-01, TLS-ALPN-01)
-- ✅ 4 个内置 DNS 提供商 (CloudFlare, DigitalOcean, Linode, Route53)
+- ✅ 9 个 DNS 提供商 (CloudFlare, DigitalOcean, Linode, Route53, Azure, Google, Alibaba, GoDaddy, Tencent)
+- ✅ 4 个证书颁发机构 (Let's Encrypt, Google Trust Services, ZeroSSL, Custom)
 - ✅ RenewalScheduler 自动续期系统
 - ✅ 3 种存储后端 (File, Redis, Encrypted AES-256-GCM)
+- ✅ Webhook 事件通知系统 (JSON, Slack, Discord)
 - ✅ Prometheus 监控指标
-- ✅ CLI 工具框架
+- ✅ CLI 工具框架 (obtain, renew, daemon, info)
+- ✅ Feature gates 灵活编译
 - ✅ 生产级质量
 
 ---
@@ -33,57 +37,33 @@ AcmeX 是一个完整的 ACME v2 (RFC 8555) 协议实现库，专为自动化 TL
 ```
 src/
 ├── lib.rs                     # 库根，模块导出
-├── main.rs                    # CLI 入口 (可选)
+├── main.rs                    # CLI 入口
+├── ca.rs                      # 多CA支持 (v0.5.0新增)
+├── config.rs                  # 配置管理 (v0.5.0增强)
 ├── account/                   # 账户管理
-│   ├── mod.rs
-│   ├── account.rs            # Account 实现
-│   └── credentials.rs        # KeyPair 包装
 ├── challenge/                 # 挑战验证框架
-│   ├── mod.rs
-│   ├── http01.rs
-│   ├── dns01.rs
-│   └── dns.rs
 ├── client/                    # 主要客户端
-│   ├── mod.rs
-│   └── acme_client.rs
 ├── order/                     # 订单管理
-│   ├── mod.rs
-│   ├── order.rs
-│   ├── csr.rs
-│   └── objects.rs
 ├── protocol/                  # ACME 协议
-│   ├── mod.rs
-│   ├── directory.rs
-│   ├── nonce.rs
-│   └── jws.rs
-├── dns/                       # DNS 提供商
-│   ├── mod.rs
-│   └── providers/
-│       ├── cloudflare.rs
-│       ├── digitalocean.rs
-│       ├── linode.rs
-│       └── route53.rs
+├── dns/                       # DNS 提供商 (v0.5.0扩展到9个)
+│   ├── cloudflare.rs
+│   ├── route53.rs
+│   ├── digitalocean.rs
+│   ├── linode.rs
+│   ├── azure.rs (新增)
+│   ├── google.rs (新增)
+│   ├── alibaba.rs (新增)
+│   ├── godaddy.rs (新增)
+│   └── tencent.rs (新增)
 ├── storage/                   # 证书存储
-│   ├── mod.rs
-│   ├── file.rs
-│   ├── redis.rs
-│   ├── encrypted.rs
-│   └── cert_store.rs
 ├── renewal/                   # 自动续期
-│   └── mod.rs
+├── notifications/             # Webhook通知 (v0.5.0新增)
 ├── metrics/                   # Prometheus 指标
-│   └── mod.rs
 ├── cli/                       # CLI 工具
-│   ├── mod.rs
-│   ├── args.rs
-│   └── commands/
-│       ├── obtain.rs
-│       ├── renew.rs
-│       ├── daemon.rs
-│       └── info.rs
+├── crypto/                    # 加密模块
+├── transport/                 # HTTP传输
 ├── error.rs                   # 错误类型
-├── types.rs                   # 公共类型
-└── cache.rs                   # 缓存 (计划)
+└── types.rs                   # 公共类型
 ```
 
 ### 文档组织
@@ -106,6 +86,89 @@ docs/
 ├── INTEGRATION_EXAMPLES.md           # 集成示例
 ├── FINAL_PROJECT_SUMMARY.md         # 项目总结
 └── ...其他文档
+```
+
+---
+
+## 🆕 v0.5.0 新增功能
+
+### 多证书颁发机构 (Multi-CA Support)
+
+- Let's Encrypt (默认)
+- Google Trust Services (feature: `google-ca`)
+- ZeroSSL (feature: `zerossl-ca`)
+- 自定义 CA 端点支持
+
+### DNS 提供商扩展
+
+- 新增 5 个提供商：Azure, Google Cloud, Alibaba Cloud, GoDaddy, Tencent Cloud
+- 总计支持 9 个全球 DNS 提供商
+- 所有提供商支持 feature gates 灵活编译
+
+### Webhook 通知系统
+
+- 事件驱动架构，支持 10+ 事件类型
+- 多格式支持：JSON, Slack, Discord
+- 自动重试和智能错误处理
+- WebhookManager 管理多个端点
+
+### 配置管理增强
+
+- TOML 配置文件支持
+- 环境变量动态替换 (`${VAR}` 语法)
+- 运行时验证和默认值管理
+- 多层级配置结构
+
+### 测试环保
+
+- 使用 `temp-env` 替代 unsafe env 赋值
+- 完整的测试覆盖
+- 安全的环境变量处理
+
+---
+
+## 🎯 Feature Gates 系统
+
+### DNS 提供商 Features
+
+```toml
+dns-cloudflare = []        # CloudFlare DNS
+dns-route53 = []           # AWS Route53
+dns-digitalocean = []      # DigitalOcean
+dns-linode = []            # Linode
+dns-azure = []             # Azure DNS (新增)
+dns-google = []            # Google Cloud DNS (新增)
+dns-alibaba = []           # Alibaba Cloud DNS (新增)
+dns-godaddy = []           # GoDaddy DNS (新增)
+dns-tencent = []           # Tencent Cloud DNS (新增)
+```
+
+### CA Features
+
+```toml
+google-ca = []             # Google Trust Services
+zerossl-ca = []            # ZeroSSL
+```
+
+### 其他 Features
+
+```toml
+redis = []                 # Redis 存储支持
+metrics = []               # Prometheus 监控
+cli = []                   # CLI 工具
+```
+
+### 使用示例
+
+```bash
+# 最小化编译
+cargo build --release
+
+# 完整功能
+cargo build --release --all-features
+
+# 自定义组合
+cargo build --features "dns-cloudflare,dns-azure,google-ca"
 ```
 
 ---
@@ -546,9 +609,8 @@ use crate::types::ChallengeType;
 
 ---
 
-**项目版本**: v0.4.0  
+**项目版本**: v0.5.0  
 **最后更新**: 2026-02-07  
 **维护者**: houseme
 
 🚀 **欢迎使用 Copilot 为 AcmeX 贡献代码！**
-

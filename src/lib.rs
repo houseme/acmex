@@ -29,43 +29,65 @@
 
 // Module declarations
 pub mod account;
+pub mod ca;
+pub mod certificate;
 pub mod challenge;
 pub mod cli;
 pub mod client;
+pub mod config;
 pub mod crypto;
 pub mod dns;
 pub mod error;
 pub mod metrics;
+pub mod notifications;
+pub mod orchestrator;
 pub mod order;
 pub mod protocol;
 pub mod renewal;
+pub mod server;
 pub mod storage;
 pub mod transport;
 pub mod types;
 
 // Re-exports for convenience
-pub use account::{Account, AccountManager, KeyPair};
+pub use account::{Account, AccountManager, KeyPair, KeyRollover};
+pub use ca::{CAConfig, CertificateAuthority, Environment};
+pub use certificate::CertificateChain;
 pub use challenge::{
-    ChallengeSolver, ChallengeSolverRegistry, Dns01Solver, DnsProvider, Http01Solver,
-    MockDnsProvider,
+    CachingDnsResolver, ChallengeSolver, ChallengeSolverRegistry, Dns01Solver, DnsCache,
+    DnsProvider, Http01Solver, MockDnsProvider, TlsAlpn01Solver,
 };
 pub use client::{AcmeClient, AcmeConfig, CertificateBundle};
+pub use config::{AcmeSettings, ChallengeSettings, Config, RenewalSettings, StorageSettings};
+#[cfg(feature = "dns-alibaba")]
+pub use dns::AlibabaCloudDnsProvider;
+#[cfg(feature = "dns-azure")]
+pub use dns::AzureDnsProvider;
 #[cfg(feature = "dns-cloudflare")]
 pub use dns::CloudFlareDnsProvider;
 #[cfg(feature = "dns-digitalocean")]
 pub use dns::DigitalOceanDnsProvider;
+#[cfg(feature = "dns-godaddy")]
+pub use dns::GodaddyDnsProvider;
+#[cfg(feature = "dns-google")]
+pub use dns::GoogleCloudDnsProvider;
 #[cfg(feature = "dns-linode")]
 pub use dns::LinodeDnsProvider;
 #[cfg(feature = "dns-route53")]
 pub use dns::Route53DnsProvider;
+#[cfg(feature = "dns-tencent")]
+pub use dns::TencentCloudDnsProvider;
 pub use error::{AcmeError, Result};
 pub use metrics::{HealthStatus, MetricsRegistry};
+pub use notifications::{EventType, WebhookClient, WebhookConfig, WebhookEvent, WebhookManager};
+pub use orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator};
 pub use order::{
-    parse_certificate_chain, verify_certificate_domains, Authorization, Challenge, CsrGenerator, FinalizationRequest,
+    parse_certificate_chain, verify_certificate_domains, Authorization, CertificateRevocation, Challenge, CsrGenerator, FinalizationRequest,
     NewOrderRequest, Order, OrderManager,
 };
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
 pub use renewal::{RenewalHook, RenewalScheduler};
+pub use server::{start_server, HealthCheck, WebhookHandler};
 #[cfg(feature = "redis")]
 pub use storage::RedisStorage;
 pub use storage::{EncryptedStorage, FileStorage};
@@ -76,9 +98,10 @@ pub use types::{
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
-        account::{Account, AccountManager, KeyPair}, crypto::{Base64Encoding, Sha256Hash},
+        account::{Account, AccountManager, KeyPair, KeyRollover}, certificate::CertificateChain, crypto::{Base64Encoding, Sha256Hash},
         error::{AcmeError, Result},
-        order::{Authorization, Challenge, FinalizationRequest, NewOrderRequest, Order},
+        orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator},
+        order::{Authorization, CertificateRevocation, Challenge, FinalizationRequest, NewOrderRequest, Order},
         protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager},
         transport::HttpClient,
         types::{

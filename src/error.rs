@@ -147,3 +147,11 @@ impl AcmeError {
         AcmeError::Pem(msg.into())
     }
 }
+
+// From trait implementations for error conversion
+
+impl From<std::time::SystemTimeError> for AcmeError {
+    fn from(err: std::time::SystemTimeError) -> Self {
+        AcmeError::Protocol(format!("SystemTime error: {}", err))
+    }
+}

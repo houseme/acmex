@@ -1,6 +1,18 @@
 /// DNS provider implementations
 pub mod providers;
 
+// New providers - with feature gates
+#[cfg(feature = "dns-alibaba")]
+pub use providers::AlibabaCloudDnsProvider;
+#[cfg(feature = "dns-azure")]
+pub use providers::AzureDnsProvider;
+#[cfg(feature = "dns-godaddy")]
+pub use providers::GodaddyDnsProvider;
+#[cfg(feature = "dns-google")]
+pub use providers::GoogleCloudDnsProvider;
+#[cfg(feature = "dns-tencent")]
+pub use providers::TencentCloudDnsProvider;
+
 #[cfg(feature = "dns-cloudflare")]
 pub use providers::CloudFlareDnsProvider;
 #[cfg(feature = "dns-digitalocean")]

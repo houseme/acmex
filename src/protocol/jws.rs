@@ -24,7 +24,7 @@ impl<'a> JwsSigner<'a> {
         let header_encoded = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
         let payload_encoded = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
 
-        let signing_input = format!("{}.{}", header_encoded, payload_encoded);
+        let _signing_input = format!("{}.{}", header_encoded, payload_encoded);
 
         // Sign using rcgen's KeyPair
         // rcgen doesn't provide a direct sign method, so we use serialize_pem
@@ -45,7 +45,7 @@ impl<'a> JwsSigner<'a> {
         let header_encoded = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
         let payload_encoded = URL_SAFE_NO_PAD.encode(b""); // Empty base64
 
-        let signing_input = format!("{}.{}", header_encoded, payload_encoded);
+        let _signing_input = format!("{}.{}", header_encoded, payload_encoded);
         // rcgen::KeyPair doesn't expose a sign method
         // Use placeholder for now
         let signature_encoded = URL_SAFE_NO_PAD.encode(b"");

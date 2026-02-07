@@ -1,0 +1,132 @@
+# AcmeX v0.5.0 配置文件示例
+# 支持多个证书颁发机构(CA)和特性门控
+
+[acme]
+# 证书颁发机构: letsencrypt (默认), google, zerossl, custom
+ca = "letsencrypt"
+
+# CA 环境: production (默认) 或 staging
+ca_environment = "production"
+
+# 自定义CA URL (仅当 ca = "custom" 时需要)
+# ca_custom_url = "https://ca.example.com/acme/directory"
+
+# 目录URL (可选，若不设置将根据 ca 和 ca_environment 自动生成)
+# directory = "https://acme-v02.api.letsencrypt.org/directory"
+
+# 联系信息
+contact = ["mailto:admin@example.com"]
+
+# 同意 ToS
+tos_agreed = true
+
+[storage]
+# 存储后端: file (默认), redis, encrypted
+backend = "file"
+
+[storage.file]
+path = ".acmex/certs"
+
+[challenge]
+# 挑战类型: http-01, dns-01 (默认), tls-alpn-01
+challenge_type = "dns-01"
+
+# DNS-01 配置
+[challenge.dns01]
+# DNS提供商 (需启用对应的feature)
+provider = "cloudflare"
+# provider = "azure"     # 需启用 dns-azure feature
+# provider = "google"    # 需启用 dns-google feature
+# provider = "alibaba"   # 需启用 dns-alibaba feature
+# provider = "godaddy"   # 需启用 dns-godaddy feature
+# provider = "tencent"   # 需启用 dns-tencent feature
+
+# API 凭证 (支持 ${VAR} 环境变量替换)
+api_token = "${CF_API_TOKEN}"
+zone_id = "${CF_ZONE_ID}"
+
+# DNS 传播超时 (秒)
+propagation_timeout_secs = 300
+
+[renewal]
+# 检查间隔 (秒)
+check_interval = 3600
+
+# 过期前多少天续期
+renew_before_days = 30
+
+# 最大重试次数
+max_retries = 3
+
+# 重试延迟 (秒)
+retry_delay_secs = 300
+
+# 续期钩子
+[renewal.hooks]
+# 续期前执行的脚本
+# before = "/usr/local/bin/before-renewal.sh"
+
+# 续期成功后执行的脚本
+# after = "/usr/local/bin/after-renewal.sh"
+
+# 续期失败时执行的脚本
+# on_error = "/usr/local/bin/renewal-error.sh"
+
+[metrics]
+# 启用 Prometheus 指标
+enabled = true
+listen_addr = "127.0.0.1:9090"
+prefix = "acmex"
+
+# Webhook 通知配置
+[[notifications.webhooks]]
+name = "slack"
+url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+events = ["renewal_success", "renewal_failed"]
+format = "slack"
+timeout_secs = 30
+
+[[notifications.webhooks]]
+name = "discord"
+url = "https://discord.com/api/webhooks/YOUR/WEBHOOK/URL"
+events = ["renewal_success"]
+format = "discord"
+timeout_secs = 30
+
+[[notifications.webhooks]]
+name = "custom"
+url = "https://api.example.com/acme/notifications"
+events = ["renewal_success", "renewal_failed", "certificate_expired"]
+format = "json"
+auth_token = "${CUSTOM_API_TOKEN}"
+timeout_secs = 30
+
+# 邮件通知配置
+# [[notifications.email]]
+# smtp_host = "smtp.gmail.com"
+# smtp_port = 587
+# from = "acme@example.com"
+# to = ["admin@example.com", "ops@example.com"]
+# events = ["renewal_failed", "certificate_expired"]
+# username = "${GMAIL_USERNAME}"
+# password = "${GMAIL_PASSWORD}"
+
+[cli]
+# 输出格式: text (默认), json, csv
+output_format = "text"
+
+# 启用彩色输出
+colors = true
+
+# 日志级别: trace, debug, info (默认), warn, error
+log_level = "info"
+
+# 日志文件路径 (可选)
+# log_file = "/var/log/acmex/acmex.log"
+
+# 日志文件最大大小 (MB)
+log_max_size = 100
+
+# 保留的日志文件数
+log_backup_count = 10
+
