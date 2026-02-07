@@ -1,96 +1,73 @@
-# GitHub Copilot 项目指导
+# GitHub Copilot Instructions for AcmeX
 
-**项目名称**: AcmeX  
-**项目描述**: 企业级 ACME v2 客户端库和工具集  
-**当前版本**: v0.7.0-dev (Phase 4 Ready)  
-**Rust 版本**: 1.93.0 (Edition 2024)  
-**MSRV**: 1.92.0
+**Project**: AcmeX (Enterprise ACME v2 Client & Server)  
+**Version**: v0.7.0 (Phase 5: Testing & Documentation)  
+**Stack**: Rust 1.93+ (Edition 2024), Tokio, Axum, Reqwest, Jiff, AWS-LC-RS.
 
 ---
 
-## 🎯 项目概览
+## 🎯 Project Context
 
-AcmeX 是一个完整的 ACME v2 (RFC 8555) 协议实现库，专为自动化 TLS 证书管理设计。
+AcmeX is a high-performance, modular ACME v2 implementation. It supports automated certificate lifecycle management with a focus on enterprise features like OCSP verification, multi-provider DNS-01 challenges, and a RESTful management API.
 
-### 核心特性 (v0.7.0 已强化)
-
-- ✅ **完整协议支持**: 涵盖 JWS, Nonce Pool, EAB, Key Rollover。
-- ✅ **多挑战类型**: HTTP-01, DNS-01, TLS-ALPN-01。
-- ✅ **广阔 DNS 生态**: 集成 11 个提供商 (CloudFlare, AWS, Ali, Tencent, Huawei, CloudNS 等)。
-- ✅ **高性能 Nonce 管理**: 具备预取与缓存能力的 `NoncePool`。
-- ✅ **企业级服务器**: Axum 驱动的核心 API，支持 `X-API-Key` 认证。
-- ✅ **异步任务架构**: 202 Accepted 响应模型，支持后台进度追踪。
-- ✅ **OCSP 实时验证**: 自动解析 AIA 扩展并查询撤销状态。
-- ✅ **灵活存储与审计**: 支持 4 种后端并具备事件审计日志 (`EventAuditor`)。
+### Core Architecture Layers
+1.  **Protocol (`src/protocol/`)**: RFC 8555 implementation, JWS, NoncePool.
+2.  **Orchestration (`src/orchestrator/`)**: Async state machines for provisioning and renewal.
+3.  **Server (`src/server/`)**: Axum API with `X-API-Key` auth and background task tracking.
+4.  **Storage (`src/storage/`)**: Abstracted backends (File, Redis, Memory).
+5.  **DNS Providers (`src/dns/providers/`)**: 10+ integrated providers (Cloudflare, Route53, Huawei, Alibaba, etc.).
 
 ---
 
-## 📁 核心架构
+## 🛠️ Development Guidelines
 
-- `src/orchestrator/`: 编排层 (Provisioner, Validator, Renewer)，支持状态汇报。
-- `src/scheduler/`: 调度层 (Priority, Concurrency, Retry)。
-- `src/server/`: API 服务器层 (Auth, Routes, Tasks Tracker)。
-- `src/protocol/nonce_pool.rs`: 预取 Nonce 优化请求往返。
-- `src/certificate/ocsp.rs`: OCSP 验证工具。
+### 1. Async Task Pattern (202 Accepted)
+When implementing management APIs that trigger ACME workflows:
+- **Do not** wait for the ACME process to finish in the handler.
+- **Do** generate a unique `task_id`.
+- **Do** spawn a `tokio::spawn` task.
+- **Do** return `StatusCode::ACCEPTED` with the `task_id`.
+- **Example**: See `src/server/api/order.rs`.
 
----
+### 2. Error Handling
+- Use `AcmeError` for internal errors.
+- Convert to HTTP responses using `AcmeError::to_problem_details()` (RFC 7807).
+- Always provide meaningful context in error variants.
 
-## 🚀 Phase 5 (v0.7.0+) 目标：测试与文档强化
+### 3. Feature Gating & Dependencies
+- Keep the core library lightweight.
+- Use feature flags for:
+    - Specific DNS providers (e.g., `dns-huawei`).
+    - Storage backends (e.g., `redis`).
+    - Crypto backends (`aws-lc-rs` vs `ring`).
+- Use `jiff` for all time-related logic.
 
-### 1. 自动化测试体系
-
-- 实现基于 `mockito` 的 ACME 服务端模拟桩。
-- 覆盖 DNS-01 (Route53, Huawei, Alibaba) 的端到端集成测试。
-- 压力测试：并发 100+ 证书申请任务的性能表现。
-
-### 2. 文档与开发者体验
-
-- 完整补全 `docs/` 下的各模块开发者手册。
-- 提供 OpenTelemetry + Prometheus 的 Grafana 仪表盘配置示例。
-- 编写 API 生成的 OpenAPI (Swagger) 定义文件。
-
-### 3. 发布准备
-
-- 修复所有编译警告与 Clippy 建议。
-- 确保集成测试在 GitHub Actions 中 100% 通过。
-
----
-
-## 🛠️ 代码规范与最佳实践 (v0.7.0 专用)
-
-### 1. 异步任务处理
-
-- API 处理器 **不应** 阻塞。始终使用 `rand::rng().sample_iter(...)` 生成 `task_id`。
-- 始终将任务状态更新至 `AppState::tasks` 以供前端轮询。
-
-### 2. 错误处理与审计
-
-- 始终调用 `AcmeError::to_problem_details()`。
-- 关键业务行为必须调用 `EventAuditor::track_event`。
-
-### 3. 特征门控 (Feature Gating)
-
-- 新增组件或 Provider 必须在 `Cargo.toml` 中定义独立 feature 并在 `mod.rs` 中使用 `#[cfg(feature = "...")]`。
+### 4. Security & Audit
+- Protect management endpoints with `X-API-Key`.
+- Log significant events via `EventAuditor`.
+- Use `OcspVerifier` to check certificate revocation status in real-time.
 
 ---
 
-## 🎯 Copilot 调用提示 (v0.7.0 进阶)
+## 🤖 Copilot Interaction Patterns
 
-### API 扩展
+### Requesting Code Generation
+- **DNS Provider**: "Implement a new `DnsProvider` for [Provider Name] following the pattern in `src/dns/providers/cloudflare.rs`."
+- **API Endpoint**: "Create an Axum handler for [Action] that follows the 202 Accepted task pattern and updates `AppState`."
+- **Tests**: "Write an integration test for the `OrderOrchestrator` using a mock ACME server."
 
-```
-"在 src/server/order.rs 中重构 list_orders，使其返回 AppState 中所有任务的 TaskInfo。"
-"在 src/server/auth.rs 中实现基于环境变量动态加载 API Keys 的逻辑。"
-```
-
-### 挑战实现
-
-```
-"为 HuaweiCloudDnsProvider 增加基于 reqwest::Client 的真实 POST 请求逻辑，实现 TXT 记录的物理删除。"
-```
+### Code Style Preferences
+- Prefer `impl IntoResponse` for Axum handlers.
+- Use `tracing::info!/error!` for logging.
+- Ensure all new traits are `Send + Sync`.
+- Follow Rust 2024 edition idioms (e.g., improved `impl Trait` handling).
 
 ---
 
-**项目版本**: v0.7.0-dev  
-**最后更新**: 2026-02-08  
-**维护者**: houseme
+## 📅 Current Focus: Phase 5 (v0.7.0)
+- **Testing**: Enhancing integration tests and adding mock-based unit tests for DNS providers.
+- **Documentation**: Completing OpenAPI specs and developer guides in `docs/`.
+- **Stability**: Fixing Clippy lints and ensuring 100% feature-gate compatibility.
+
+**Last Updated**: 2026-02-08  
+**Status**: v0.7.0-beta Development

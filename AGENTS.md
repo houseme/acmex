@@ -1,78 +1,69 @@
-# AcmeX Agent Guide
+# AcmeX Agent Guide (v0.7.0)
 
-This guide provides essential context and patterns for AI agents working on the AcmeX codebase.
+This guide provides a comprehensive overview of the AcmeX project architecture, patterns, and development standards for AI agents and contributors.
 
-## 🏗 Big Picture Architecture
+## 🏗 Architecture Overview
 
-- **Orchestration Layer (`src/orchestrator/`)**: Coordination of high-level ACME workflows. Use `Orchestrator` trait
-  with `execute()`, `status()`, and `cancel()`.
-- **Scheduling Layer (`src/scheduler/`)**: Task management with priority, concurrency (via semaphores), and retry logic.
-- **Protocol Layer (`src/protocol/`)**: Low-level ACME (RFC 8555) implementation. Features `NoncePool` for optimized
-  performance.
-- **Server Layer (`src/server/`)**: Axum-based REST API. Features `/api` nested routes, `X-API-Key` auth, and *
-  *asynchronous task execution**.
-- **Storage Tier (`src/storage/`)**: Pluggable backends (File, Redis, Memory) with `StorageMigrator`.
-- **Certificate Tier (`src/certificate/`)**: Chain verification logic and real-time **OCSP verification** via
-  `OcspVerifier`.
+AcmeX is designed as a modular, enterprise-grade ACME v2 (RFC 8555) client and server ecosystem.
 
-## 🛠 Critical Workflows & Commands
+### 1. Layered Design
+- **Application Layer (`src/cli/`, `src/server/`)**: Entry points for CLI users and REST API consumers.
+- **Orchestration Layer (`src/orchestrator/`)**: High-level workflow management (Provisioning, Validation, Renewal). Uses the `Orchestrator` trait for state-machine-like execution.
+- **Scheduling Layer (`src/scheduler/`)**: Manages task execution, priorities, and concurrency limits using semaphores.
+- **Protocol Layer (`src/protocol/`)**: Low-level ACME implementation (JWS, Nonce management, Directory, Objects).
+- **Storage Tier (`src/storage/`)**: Pluggable backends (File, Redis, Memory, Encrypted) with migration support.
+- **Certificate Tier (`src/certificate/`)**: Chain verification, CSR generation, and real-time OCSP status checking.
 
-- **Build with Enterprise Features**: `cargo build --all-features`
-- **Check Compilation**: `cargo check --all-features`
-- **Server Execution**: `acmex serve --addr 0.0.0.0:8080 --config config.toml`
-- **API Check**:
-    - Public: `GET /health`
-    - Management (Requires `X-API-Key`): `GET /api/orders`, `GET /api/certificates`
+### 2. Core Components
+- **`AcmeClient`**: The primary interface for interacting with ACME servers. It is `Clone`-friendly and thread-safe.
+- **`NoncePool`**: Optimized nonce management with pre-fetching and caching to minimize round-trips.
+- **`Orchestrator` Trait**: Defines `execute()`, `status()`, and `cancel()` for long-running tasks.
+- **`AppState`**: Shared state in the Axum server, containing the task tracker, metrics, and client instances.
 
-## 💎 Project Patterns
+## 💎 Critical Design Patterns
 
-### 1. Asynchronous API Execution (202 Accepted)
-
-Most management APIs spawning long-running ACME tasks follow this pattern:
-
-- **Handler**: Generates a 16-char random `task_id`.
-- **State**: Inserts a `TaskInfo` into `state.tasks`.
-- **Execution**: Spawns a `tokio::spawn` background task calling an `Orchestrator`.
-- **Response**: Returns `StatusCode::ACCEPTED` with the `task_id`.
-- **Polling**: Users query `GET /api/orders/:id` to check `OrchestrationStatus`.
+### 1. Asynchronous Task Execution (Post-Task-Polling)
+To handle long-running ACME operations without blocking HTTP requests:
+1. **Request**: User hits an endpoint (e.g., `POST /api/orders`).
+2. **Acceptance**: Server generates a `task_id`, spawns a background `tokio::spawn` task, and returns `202 Accepted`.
+3. **Tracking**: The task updates its status in `AppState.tasks`.
+4. **Polling**: User queries `GET /api/orders/:id` to check progress.
 
 ### 2. Standardized Error Reporting (RFC 7807)
+All API errors must be converted to `ProblemDetails` using `AcmeError::to_problem_details()`. This ensures consistent, machine-readable error responses.
 
-Use `AcmeError::to_problem_details()` to convert internal errors into standard JSON responses. Handler return types
-should be `impl IntoResponse` calling `.into_response()`.
+### 3. Feature Gating
+AcmeX uses extensive feature flags to keep the binary lean:
+- **Crypto**: `aws-lc-rs` (default) or `ring`.
+- **Storage**: `redis` is optional.
+- **DNS Providers**: Each provider (e.g., `dns-cloudflare`, `dns-route53`) is gated.
 
-### 3. Audit Logging
+### 4. Observability & Audit
+- **Metrics**: Use `MetricsRegistry` for Prometheus-compatible counters and histograms.
+- **Audit Logs**: Trigger `EventAuditor::track_event(AcmeEvent::...)` for all significant state changes (e.g., account creation, certificate issuance).
+- **Tracing**: Use `tracing::instrument` for structured logging across async boundaries.
 
-Always trigger `EventAuditor::track_event(AcmeEvent::...)` for significant state changes (Account created, Order
-created, Certificate revoked).
+## 🛠 Development Workflows
 
-### 4. OCSP Status Integration
+### Adding a New DNS Provider
+1. Create `src/dns/providers/your_provider.rs`.
+2. Implement the `DnsProvider` trait.
+3. Register the provider in `src/dns/providers/mod.rs` with appropriate `#[cfg(feature = "...")]`.
+4. Add the feature flag to `Cargo.toml`.
 
-Integrate `OcspVerifier::verify_status(cert_der)` into certificate-related handlers to provide real-time revocation
-data.
+### Adding a New API Endpoint
+1. Define the handler in `src/server/api/`.
+2. Ensure it uses `AppState` and follows the 202 Accepted pattern if it's a long-running task.
+3. Register the route in `src/server/api.rs`.
+4. Update the `X-API-Key` middleware if the endpoint requires authentication.
 
-### 5. Feature Gating
+## ✍️ Coding Standards
+- **Async**: Use `#[async_trait]` for traits. Prefer `tokio` primitives.
+- **Time**: Use the `jiff` library for all timestamp operations.
+- **Safety**: Use `zeroize` for sensitive data in memory.
+- **Testing**: Write unit tests for logic and integration tests (in `tests/`) for ACME flows using mock servers.
 
-All DNS providers and optional backends (Redis) MUST be feature-gated in `Cargo.toml` and `src/dns/providers/mod.rs`.
-
-### 6. Timestamping
-
-Uniformly use the `jiff` library. Compare timestamps using `.timestamp().as_second()`.
-
-## 🔗 Key Integration Points
-
-- **New DNS-01 Provider**: Add to `src/dns/providers/`, register in `mod.rs`, and implement `DnsProvider`.
-- **New API Handler**: Add to `src/server/`, register route in `src/server/api.rs`, and adhere to the `AppState` /
-  `TaskInfo` pattern.
-- **Metrics**: Use `MetricsRegistry` for Prometheus counters and `EventAuditor` for audit trails.
-
-## ✍️ Coding Conventions
-
-- **Async Traits**: Use `#[async_trait]` and ensure traits are `Send + Sync`.
-- **Cloning**: `AcmeClient` implements `Clone`. Clone it for use inside `tokio::spawn` tasks.
-- **Dependencies**:
-    - Crypto: `aws-lc-rs` (Primary).
-    - HTTP: `reqwest` (Client) / `axum` (Server).
-    - Serialization: `serde` / `serde_json`.
-
-See `.github/copilot-instructions.md` for current v0.7.0 development roadmap.
+## 🔗 Reference Documentation
+- `docs/ARCHITECTURE.md`: Detailed system design.
+- `docs/V0.7.0_PLANNING.md`: Current roadmap and feature status.
+- `docs/OBSERVABILITY.md`: Metrics and logging configuration.
