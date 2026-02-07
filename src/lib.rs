@@ -30,6 +30,7 @@
 // Module declarations
 pub mod account;
 pub mod challenge;
+pub mod client;
 pub mod error;
 pub mod order;
 pub mod protocol;
@@ -41,8 +42,12 @@ pub use challenge::{
     ChallengeSolver, ChallengeSolverRegistry, Dns01Solver, DnsProvider, Http01Solver,
     MockDnsProvider,
 };
+pub use client::{AcmeClient, AcmeConfig, CertificateBundle};
 pub use error::{AcmeError, Result};
-pub use order::{Authorization, Challenge, FinalizationRequest, NewOrderRequest, Order};
+pub use order::{
+    parse_certificate_chain, verify_certificate_domains, Authorization, Challenge, CsrGenerator,
+    FinalizationRequest, NewOrderRequest, Order, OrderManager,
+};
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
 pub use types::{
     AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,

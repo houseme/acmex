@@ -1,8 +1,8 @@
 [package]
 name = "acmex"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.82.0"
+rust-version = "1.92.0"
 description = "A comprehensive ACME v2 client for obtaining TLS certificates"
 license = "MIT OR Apache-2.0"
 authors = ["houseme <housemecn@gmail.com>"]
@@ -17,20 +17,23 @@ categories = ["web-programming", "api-bindings", "asynchronous", "cryptography",
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 base64 = "0.22"
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2.19", features = ["serde"] }
 hickory-resolver = "0.25"
 pem = "3.0"
+rcgen = "0.13"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2", "gzip"] }
+rustls-pemfile = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+x509-parser = "0.16"
 
 # 加密后端 - 优先使用 aws-lc-rs
 [dependencies.aws-lc-rs]
-version = "0.1"
+version = "1.15.4"
 optional = true
 features = ["fips"]
 

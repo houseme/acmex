@@ -1,4 +1,8 @@
-/// Order management for ACME client
+pub mod csr;
+pub mod manager;
+/// Order and authorization management
 pub mod objects;
 
+pub use csr::{parse_certificate_chain, verify_certificate_domains, CsrGenerator};
+pub use manager::OrderManager;
 pub use objects::{Authorization, Challenge, FinalizationRequest, NewOrderRequest, Order};

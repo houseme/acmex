@@ -303,14 +303,21 @@ impl<'a> AccountManager<'a> {
         Ok(())
     }
 
-    /// Get JWK for this account
-    pub fn get_jwk(&self) -> &Jwk {
-        &self.jwk
+    /// Compute key authorization for a challenge token
+    /// Format: token.jwk_thumbprint
+    pub fn compute_key_authorization(&self, token: &str) -> Result<String> {
+        let thumbprint = self.jwk.thumbprint_sha256()?;
+        Ok(format!("{}.{}", token, thumbprint))
     }
 
     /// Get JWK thumbprint
     pub fn get_jwk_thumbprint(&self) -> Result<String> {
         self.jwk.thumbprint_sha256()
+    }
+
+    /// Get JWK for this account
+    pub fn get_jwk(&self) -> &Jwk {
+        &self.jwk
     }
 
     /// Get signer
