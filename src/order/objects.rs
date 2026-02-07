@@ -69,7 +69,7 @@ impl Authorization {
 
     /// Get status as AuthorizationStatus enum
     pub fn status_enum(&self) -> Option<AuthorizationStatus> {
-        AuthorizationStatus::from_str(&self.status)
+        self.status.parse().ok()
     }
 }
 
@@ -103,7 +103,7 @@ pub struct Order {
 impl Order {
     /// Get status as OrderStatus enum
     pub fn status_enum(&self) -> Option<OrderStatus> {
-        OrderStatus::from_str(&self.status)
+        self.status.parse().ok()
     }
 
     /// Check if order is ready for finalization

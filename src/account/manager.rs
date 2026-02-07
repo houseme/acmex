@@ -62,7 +62,7 @@ impl<'a> AccountManager<'a> {
         directory_manager: &'a DirectoryManager,
         http_client: &'a reqwest::Client,
     ) -> Result<Self> {
-        let signer = JwsSigner::new(key_pair.inner());
+        let signer = JwsSigner::new(&key_pair.0);
         let jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(key_pair.public_key_bytes()));
 
         Ok(Self {

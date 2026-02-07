@@ -1,8 +1,7 @@
 /// HTTP-01 challenge implementation
 use async_trait::async_trait;
 use axum::{extract::Path, http::StatusCode, routing::get, Router};
-use std::net::{SocketAddr, TcpListener};
-use std::path::Path;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -72,10 +71,10 @@ impl Http01Solver {
 async fn handle_challenge(
     Path(token): Path<String>,
     axum::extract::State(key_auth): axum::extract::State<Arc<RwLock<Option<String>>>>,
-) -> Result<String, StatusCode> {
+) -> std::result::Result<String, StatusCode> {
     let auth = key_auth.read().await;
     if let Some(ref auth_str) = *auth {
-        if auth_str.starts_with(&token) {
+        if auth_str.contains(&token) {
             return Ok(auth_str.clone());
         }
     }

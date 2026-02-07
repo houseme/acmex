@@ -5,6 +5,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use sha2::{Digest, Sha256};
 
 /// JSON Web Key representation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -168,9 +169,11 @@ impl Jwk {
     /// Compute SHA-256 thumbprint from required members
     fn compute_thumbprint(&self, required: &Value) -> Result<String> {
         let json_str = required.to_string();
-        let digest = ring::digest::digest(&ring::digest::SHA256, json_str.as_bytes());
+        let mut hasher = Sha256::new();
+        hasher.update(json_str.as_bytes());
+        let digest = hasher.finalize();
 
-        Ok(URL_SAFE_NO_PAD.encode(digest.as_ref()))
+        Ok(URL_SAFE_NO_PAD.encode(digest))
     }
 
     /// Convert to JSON value for embedding in JWS header

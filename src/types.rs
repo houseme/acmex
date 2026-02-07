@@ -206,14 +206,17 @@ impl ChallengeType {
             ChallengeType::TlsAlpn01 => "tls-alpn-01",
         }
     }
+}
 
-    /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ChallengeType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "http-01" => Some(ChallengeType::Http01),
-            "dns-01" => Some(ChallengeType::Dns01),
-            "tls-alpn-01" => Some(ChallengeType::TlsAlpn01),
-            _ => None,
+            "http-01" => Ok(ChallengeType::Http01),
+            "dns-01" => Ok(ChallengeType::Dns01),
+            "tls-alpn-01" => Ok(ChallengeType::TlsAlpn01),
+            _ => Err(format!("Unknown challenge type: {}", s)),
         }
     }
 }
@@ -243,21 +246,24 @@ pub enum OrderStatus {
     Deactivated,
 }
 
-impl OrderStatus {
-    /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for OrderStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "pending" => Some(OrderStatus::Pending),
-            "ready" => Some(OrderStatus::Ready),
-            "processing" => Some(OrderStatus::Processing),
-            "valid" => Some(OrderStatus::Valid),
-            "invalid" => Some(OrderStatus::Invalid),
-            "expired" => Some(OrderStatus::Expired),
-            "deactivated" => Some(OrderStatus::Deactivated),
-            _ => None,
+            "pending" => Ok(OrderStatus::Pending),
+            "ready" => Ok(OrderStatus::Ready),
+            "processing" => Ok(OrderStatus::Processing),
+            "valid" => Ok(OrderStatus::Valid),
+            "invalid" => Ok(OrderStatus::Invalid),
+            "expired" => Ok(OrderStatus::Expired),
+            "deactivated" => Ok(OrderStatus::Deactivated),
+            _ => Err(format!("Unknown order status: {}", s)),
         }
     }
+}
 
+impl OrderStatus {
     /// Get string representation
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -293,19 +299,22 @@ pub enum AuthorizationStatus {
     Expired,
 }
 
-impl AuthorizationStatus {
-    /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for AuthorizationStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "pending" => Some(AuthorizationStatus::Pending),
-            "valid" => Some(AuthorizationStatus::Valid),
-            "invalid" => Some(AuthorizationStatus::Invalid),
-            "deactivated" => Some(AuthorizationStatus::Deactivated),
-            "expired" => Some(AuthorizationStatus::Expired),
-            _ => None,
+            "pending" => Ok(AuthorizationStatus::Pending),
+            "valid" => Ok(AuthorizationStatus::Valid),
+            "invalid" => Ok(AuthorizationStatus::Invalid),
+            "deactivated" => Ok(AuthorizationStatus::Deactivated),
+            "expired" => Ok(AuthorizationStatus::Expired),
+            _ => Err(format!("Unknown authorization status: {}", s)),
         }
     }
+}
 
+impl AuthorizationStatus {
     /// Get string representation
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -344,15 +353,12 @@ mod tests {
     #[test]
     fn test_challenge_type() {
         assert_eq!(ChallengeType::Http01.as_str(), "http-01");
-        assert_eq!(
-            ChallengeType::from_str("dns-01"),
-            Some(ChallengeType::Dns01)
-        );
+        assert_eq!("dns-01".parse::<ChallengeType>(), Ok(ChallengeType::Dns01));
     }
 
     #[test]
     fn test_order_status() {
-        assert_eq!(OrderStatus::from_str("pending"), Some(OrderStatus::Pending));
+        assert_eq!("pending".parse::<OrderStatus>(), Ok(OrderStatus::Pending));
         assert_eq!(OrderStatus::Valid.as_str(), "valid");
     }
 }

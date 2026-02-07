@@ -30,10 +30,17 @@
 // Module declarations
 pub mod account;
 pub mod challenge;
+pub mod cli;
 pub mod client;
+pub mod crypto;
+pub mod dns;
 pub mod error;
+pub mod metrics;
 pub mod order;
 pub mod protocol;
+pub mod renewal;
+pub mod storage;
+pub mod transport;
 pub mod types;
 
 // Re-exports for convenience
@@ -43,12 +50,25 @@ pub use challenge::{
     MockDnsProvider,
 };
 pub use client::{AcmeClient, AcmeConfig, CertificateBundle};
+#[cfg(feature = "dns-cloudflare")]
+pub use dns::CloudFlareDnsProvider;
+#[cfg(feature = "dns-digitalocean")]
+pub use dns::DigitalOceanDnsProvider;
+#[cfg(feature = "dns-linode")]
+pub use dns::LinodeDnsProvider;
+#[cfg(feature = "dns-route53")]
+pub use dns::Route53DnsProvider;
 pub use error::{AcmeError, Result};
+pub use metrics::{HealthStatus, MetricsRegistry};
 pub use order::{
-    parse_certificate_chain, verify_certificate_domains, Authorization, Challenge, CsrGenerator,
-    FinalizationRequest, NewOrderRequest, Order, OrderManager,
+    parse_certificate_chain, verify_certificate_domains, Authorization, Challenge, CsrGenerator, FinalizationRequest,
+    NewOrderRequest, Order, OrderManager,
 };
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
+pub use renewal::{RenewalHook, RenewalScheduler};
+#[cfg(feature = "redis")]
+pub use storage::RedisStorage;
+pub use storage::{EncryptedStorage, FileStorage};
 pub use types::{
     AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,
 };
@@ -56,58 +76,15 @@ pub use types::{
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
-        account::{Account, AccountManager, KeyPair},
+        account::{Account, AccountManager, KeyPair}, crypto::{Base64Encoding, Sha256Hash},
         error::{AcmeError, Result},
         order::{Authorization, Challenge, FinalizationRequest, NewOrderRequest, Order},
         protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager},
+        transport::HttpClient,
         types::{
             AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,
         },
+        AcmeClient,
         AcmeConfig,
     };
-}
-
-/// ACME client configuration builder
-pub struct AcmeConfig {
-    /// Directory URL for the ACME server
-    pub directory_url: String,
-
-    /// Contacts for account registration
-    pub contacts: Vec<Contact>,
-
-    /// Terms of service agreed flag
-    pub terms_of_service_agreed: bool,
-}
-
-impl AcmeConfig {
-    /// Create a new configuration with the given directory URL
-    pub fn new(directory_url: impl Into<String>) -> Self {
-        Self {
-            directory_url: directory_url.into(),
-            contacts: Vec::new(),
-            terms_of_service_agreed: false,
-        }
-    }
-
-    /// Add a contact to the configuration
-    pub fn with_contact(mut self, contact: Contact) -> Self {
-        self.contacts.push(contact);
-        self
-    }
-
-    /// Set terms of service agreed flag
-    pub fn with_tos_agreed(mut self, agreed: bool) -> Self {
-        self.terms_of_service_agreed = agreed;
-        self
-    }
-
-    /// Let's Encrypt staging directory
-    pub fn lets_encrypt_staging() -> Self {
-        Self::new("https://acme-staging-v02.api.letsencrypt.org/directory")
-    }
-
-    /// Let's Encrypt production directory
-    pub fn lets_encrypt() -> Self {
-        Self::new("https://acme-v02.api.letsencrypt.org/directory")
-    }
 }

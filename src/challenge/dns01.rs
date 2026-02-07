@@ -1,5 +1,7 @@
 /// DNS-01 challenge implementation
 use async_trait::async_trait;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -24,6 +26,7 @@ pub trait DnsProvider: Send + Sync {
 /// Mock DNS provider for testing
 pub struct MockDnsProvider {
     records: Arc<RwLock<std::collections::HashMap<String, String>>>,
+    counter: Arc<RwLock<u64>>,
 }
 
 impl MockDnsProvider {
@@ -31,6 +34,7 @@ impl MockDnsProvider {
     pub fn new() -> Self {
         Self {
             records: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            counter: Arc::new(RwLock::new(0)),
         }
     }
 }
@@ -45,7 +49,9 @@ impl Default for MockDnsProvider {
 impl DnsProvider for MockDnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
         let mut records = self.records.write().await;
-        let record_id = format!("mock-record-{}", uuid::Uuid::new_v4());
+        let mut counter = self.counter.write().await;
+        *counter += 1;
+        let record_id = format!("mock-record-{}", counter);
         records.insert(format!("{}/{}", domain, record_id), value.to_string());
         tracing::debug!("Mock DNS record created: {} = {}", domain, value);
         Ok(record_id)
@@ -103,8 +109,12 @@ impl ChallengeSolver for Dns01Solver {
 
     async fn prepare(&mut self, challenge: &Challenge, key_authorization: &str) -> Result<()> {
         // Compute DNS record value (base64url of SHA256 hash)
-        let digest = ring::digest::digest(&ring::digest::SHA256, key_authorization.as_bytes());
-        let record_value = base64::encode_config(digest.as_ref(), base64::URL_SAFE_NO_PAD);
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(key_authorization.as_bytes());
+        let digest = hasher.finalize();
+        let record_value = URL_SAFE_NO_PAD.encode(&digest[..]);
 
         // Create the DNS record
         let domain = format!("_acme-challenge.{}", self.domain);

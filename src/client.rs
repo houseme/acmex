@@ -1,10 +1,11 @@
 /// High-level ACME client for certificate issuance
 use crate::account::{AccountManager, KeyPair};
-use crate::challenge::{ChallengeSolver, ChallengeSolverRegistry};
+use crate::challenge::ChallengeSolverRegistry;
 use crate::error::Result;
 use crate::order::{CsrGenerator, NewOrderRequest, OrderManager};
 use crate::protocol::{DirectoryManager, NonceManager};
-use crate::types::{Contact, Identifier};
+use crate::types::{ChallengeType, Contact, Identifier};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,9 +158,10 @@ impl AcmeClient {
                 .challenges
                 .iter()
                 .find(|c| {
-                    solver_registry
-                        .get(c.challenge_type.parse().unwrap_or_default())
-                        .is_some()
+                    c.challenge_type
+                        .parse::<ChallengeType>()
+                        .map(|ct| solver_registry.get(ct).is_some())
+                        .unwrap_or(false)
                 })
                 .ok_or_else(|| {
                     crate::error::AcmeError::challenge(
@@ -169,8 +171,14 @@ impl AcmeClient {
                 })?;
 
             // Get solver
-            let challenge_type = challenge.challenge_type.parse().unwrap_or_default();
-            let solver = solver_registry.get(challenge_type).ok_or_else(|| {
+            let challenge_type: ChallengeType = challenge.challenge_type.parse().map_err(|_| {
+                crate::error::AcmeError::challenge(
+                    challenge.challenge_type.clone(),
+                    "Unsupported challenge type".to_string(),
+                )
+            })?;
+
+            let solver = solver_registry.get_mut(challenge_type).ok_or_else(|| {
                 crate::error::AcmeError::challenge(
                     challenge.challenge_type.clone(),
                     "Solver not found".to_string(),
@@ -180,9 +188,8 @@ impl AcmeClient {
             // Compute key authorization
             let key_auth = account_mgr.compute_key_authorization(&challenge.token)?;
 
-            // Prepare challenge (mutable borrow)
-            // Note: This is a conceptual example - actual implementation would need proper mutable access
-            // solver.prepare(challenge, &key_auth).await?;
+            // Prepare challenge
+            solver.prepare(challenge, &key_auth).await?;
 
             // Present challenge
             solver.present().await?;
@@ -210,10 +217,10 @@ impl AcmeClient {
         let (csr_der, private_key_pem) = csr_gen.generate()?;
 
         // Finalize order
-        order = order_mgr.finalize_order(&order.finalize, &csr_der).await?;
+        let _order = order_mgr.finalize_order(&order.finalize, &csr_der).await?;
 
         // Poll until valid
-        order = order_mgr
+        let order = order_mgr
             .poll_order(&order_url, 30, Duration::from_secs(2))
             .await?;
 
@@ -250,7 +257,7 @@ impl AcmeClient {
 }
 
 /// Certificate bundle containing certificate and private key
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CertificateBundle {
     /// Certificate chain in PEM format
     pub certificate_pem: String,

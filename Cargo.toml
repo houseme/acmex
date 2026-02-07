@@ -1,6 +1,6 @@
 [package]
 name = "acmex"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.92.0"
 description = "A comprehensive ACME v2 client for obtaining TLS certificates"
@@ -17,19 +17,24 @@ categories = ["web-programming", "api-bindings", "asynchronous", "cryptography",
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
 base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
 jiff = { version = "0.2.19", features = ["serde"] }
 hickory-resolver = "0.25"
 pem = "3.0"
-rcgen = "0.13"
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2", "gzip"] }
-rustls-pemfile = "2.0"
+prometheus = "0.14"
+rand = "0.10.0-rc.9"
+rcgen = { version = "0.14", features = ["crypto", "aws_lc_rs", "pem"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "http2", "gzip"] }
+rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.11.0-rc.5"
 thiserror = "2.0"
-tokio = { version = "1.40", features = ["full"] }
+toml = "0.9.11"
+tokio = { version = "1.49", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 # 加密后端 - 优先使用 aws-lc-rs
 [dependencies.aws-lc-rs]
@@ -51,7 +56,7 @@ version = "1.4"
 
 # Redis 可选支持
 [dependencies.redis]
-version = "0.26"
+version = "1.0.3"
 features = ["tokio-comp", "connection-manager", "aio"]
 optional = true
 
@@ -63,8 +68,17 @@ redis = ["dep:redis"]
 google-ca = []
 zerossl-ca = []
 
+dns-cloudflare = []
+dns-route53 = []
+dns-digitalocean = []
+dns-linode = []
+
+metrics = []
+cli = []
+
 [dev-dependencies]
 tempfile = "3.8"
 tokio-test = "0.4"
 mockito = "1.4"
+hex = "0.4.3"
 

@@ -4,6 +4,13 @@ use crate::types::ChallengeType;
 /// Challenge solver trait and registry
 use async_trait::async_trait;
 
+// Re-export challenge types
+pub mod dns01;
+pub mod http01;
+
+pub use dns01::{Dns01Solver, DnsProvider, MockDnsProvider};
+pub use http01::Http01Solver;
+
 /// Trait for implementing different challenge types
 #[async_trait]
 pub trait ChallengeSolver: Send + Sync {
@@ -45,6 +52,18 @@ impl ChallengeSolverRegistry {
     /// Get a solver for the given challenge type
     pub fn get(&self, challenge_type: ChallengeType) -> Option<&dyn ChallengeSolver> {
         self.solvers.get(&challenge_type).map(|s| s.as_ref())
+    }
+
+    /// Get a mutable solver for the given challenge type
+    pub fn get_mut(
+        &mut self,
+        challenge_type: ChallengeType,
+    ) -> Option<&mut (dyn ChallengeSolver + '_)> {
+        if let Some(solver) = self.solvers.get_mut(&challenge_type) {
+            Some(solver.as_mut())
+        } else {
+            None
+        }
     }
 
     /// Get all registered challenge types

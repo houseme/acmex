@@ -29,3 +29,5 @@ src/
 └── metrics/                # 监控指标（Prometheus）
     └── prometheus.rs       # 指标注册与采集
 ```
+
+> Rust MSRV: `1.92.0` (对应 `Cargo.toml` 的 `rust-version = "1.92.0"`)

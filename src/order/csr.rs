@@ -1,8 +1,6 @@
 /// Certificate Signing Request (CSR) generation
 use crate::error::Result;
-use rcgen::{
-    Certificate, CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256,
-};
+use rcgen::{CertificateParams, KeyPair};
 
 /// CSR generator for ACME certificates
 pub struct CsrGenerator {
@@ -27,39 +25,27 @@ impl CsrGenerator {
 
     /// Generate CSR and return (CSR DER, Private Key PEM)
     pub fn generate(&self) -> Result<(Vec<u8>, String)> {
-        // Generate or use provided key
-        let key_pair = if let Some(ref key) = self.private_key {
-            key.clone()
-        } else {
-            KeyPair::generate(&PKCS_ECDSA_P256_SHA256).map_err(|e| {
-                crate::error::AcmeError::crypto(format!("Failed to generate key pair: {}", e))
-            })?
+        // Get or generate key pair
+        let generated_key;
+        let key_pair = match self.private_key.as_ref() {
+            Some(key) => key,
+            None => {
+                generated_key = KeyPair::generate().map_err(|e| {
+                    crate::error::AcmeError::crypto(format!("Failed to generate key pair: {}", e))
+                })?;
+                &generated_key
+            }
         };
 
-        // Build certificate params
-        let mut params = CertificateParams::new(self.domains.clone());
+        // Build certificate params with domains
+        let params = CertificateParams::new(self.domains.clone())
+            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to create certificate params: {}", e)))?;
 
-        // Set distinguished name (CN is first domain)
-        let mut dn = DistinguishedName::new();
-        if let Some(first_domain) = self.domains.first() {
-            dn.push(DnType::CommonName, first_domain.clone());
-        }
-        params.distinguished_name = dn;
+        // Generate CSR
+        let csr = params.serialize_request(key_pair)
+            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e)))?;
 
-        // Set key pair
-        params.key_pair = Some(key_pair.clone());
-
-        // Create certificate (only for CSR generation)
-        let cert = Certificate::from_params(params).map_err(|e| {
-            crate::error::AcmeError::crypto(format!("Failed to create certificate: {}", e))
-        })?;
-
-        // Generate CSR DER
-        let csr_der = cert.serialize_request_der().map_err(|e| {
-            crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e))
-        })?;
-
-        // Get private key PEM
+        let csr_der = csr.der().to_vec();
         let private_key_pem = key_pair.serialize_pem();
 
         tracing::info!("CSR generated for domains: {:?}", self.domains);
@@ -67,14 +53,21 @@ impl CsrGenerator {
     }
 
     /// Generate CSR with a new key and return all components
-    pub fn generate_with_key() -> Result<(Vec<u8>, KeyPair, String)> {
-        let key_pair = KeyPair::generate(&PKCS_ECDSA_P256_SHA256).map_err(|e| {
+    pub fn generate_with_key(domains: Vec<String>) -> Result<(Vec<u8>, KeyPair, String)> {
+        let key_pair = KeyPair::generate().map_err(|e| {
             crate::error::AcmeError::crypto(format!("Failed to generate key pair: {}", e))
         })?;
 
+        let params = CertificateParams::new(domains.clone())
+            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to create certificate params: {}", e)))?;
+
+        let csr = params.serialize_request(&key_pair)
+            .map_err(|e| crate::error::AcmeError::crypto(format!("Failed to generate CSR: {}", e)))?;
+
+        let csr_der = csr.der().to_vec();
         let private_key_pem = key_pair.serialize_pem();
 
-        Ok((vec![], key_pair, private_key_pem))
+        Ok((csr_der, key_pair, private_key_pem))
     }
 }
 
@@ -108,12 +101,13 @@ pub fn verify_certificate_domains(cert_der: &[u8], expected_domains: &[String]) 
     })?;
 
     // Get SANs (Subject Alternative Names)
+    let empty_vec = vec![];
     let sans = cert
         .subject_alternative_name()
         .ok()
         .and_then(|ext| ext)
         .map(|ext| &ext.value.general_names)
-        .unwrap_or(&vec![]);
+        .unwrap_or(&empty_vec);
 
     let mut cert_domains = Vec::new();
     for san in sans {
