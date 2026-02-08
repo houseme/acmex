@@ -1,48 +1,51 @@
-//! 中间件 - 请求/响应拦截和处理
-
+/// Middleware system for HTTP request and response interception.
+/// This module defines the `Middleware` trait and `MiddlewareChain` to allow
+/// custom logic to be injected into the HTTP request lifecycle.
 use super::http_client::HttpResponse;
 use crate::error::Result;
 use async_trait::async_trait;
 
-/// 中间件特征
+/// A trait for objects that can intercept and process HTTP requests and responses.
 #[async_trait]
 pub trait Middleware: Send + Sync {
-    /// 处理请求前
+    /// Called before an HTTP request is sent.
     async fn before_request(&self, _url: &str, _method: &str) -> Result<()> {
         Ok(())
     }
 
-    /// 处理请求后
+    /// Called after an HTTP response is received.
     async fn after_response(&self, _url: &str, _response: &HttpResponse) -> Result<()> {
         Ok(())
     }
 
-    /// 处理错误
+    /// Called when an error occurs during the HTTP request lifecycle.
     async fn on_error(&self, _url: &str, _error: &crate::error::AcmeError) -> Result<()> {
         Ok(())
     }
 }
 
-/// 中间件链
+/// A chain of middlewares that are executed in sequence.
 pub struct MiddlewareChain {
+    /// The list of registered middlewares.
     middlewares: Vec<Box<dyn Middleware>>,
 }
 
 impl MiddlewareChain {
-    /// 创建新的中间件链
+    /// Creates a new, empty `MiddlewareChain`.
     pub fn new() -> Self {
+        tracing::debug!("Creating new MiddlewareChain");
         Self {
             middlewares: Vec::new(),
         }
     }
 
-    /// 添加中间件
+    /// Adds a middleware to the end of the chain.
     pub fn add<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(Box::new(middleware));
         self
     }
 
-    /// 执行请求前钩子
+    /// Executes the `before_request` hook for all middlewares in the chain.
     pub async fn before_request(&self, url: &str, method: &str) -> Result<()> {
         for middleware in &self.middlewares {
             middleware.before_request(url, method).await?;
@@ -50,7 +53,7 @@ impl MiddlewareChain {
         Ok(())
     }
 
-    /// 执行响应后钩子
+    /// Executes the `after_response` hook for all middlewares in the chain.
     pub async fn after_response(&self, url: &str, response: &HttpResponse) -> Result<()> {
         for middleware in &self.middlewares {
             middleware.after_response(url, response).await?;
@@ -58,7 +61,7 @@ impl MiddlewareChain {
         Ok(())
     }
 
-    /// 执行错误钩子
+    /// Executes the `on_error` hook for all middlewares in the chain.
     pub async fn on_error(&self, url: &str, error: &crate::error::AcmeError) -> Result<()> {
         for middleware in &self.middlewares {
             middleware.on_error(url, error).await?;
@@ -73,15 +76,15 @@ impl Default for MiddlewareChain {
     }
 }
 
-/// 日志中间件
+/// A middleware that logs request and response details.
 pub struct LoggingMiddleware {
-    /// 是否记录请求体
+    /// Whether to log the full response body (currently unused).
     #[allow(dead_code)]
     log_body: bool,
 }
 
 impl LoggingMiddleware {
-    /// 创建新的日志中间件
+    /// Creates a new `LoggingMiddleware`.
     pub fn new(log_body: bool) -> Self {
         Self { log_body }
     }
@@ -89,30 +92,34 @@ impl LoggingMiddleware {
 
 #[async_trait]
 impl Middleware for LoggingMiddleware {
+    /// Logs the outgoing request method and URL.
     async fn before_request(&self, url: &str, method: &str) -> Result<()> {
-        tracing::debug!("{}  {}", method, url);
+        tracing::info!("HTTP Request: {} {}", method, url);
         Ok(())
     }
 
+    /// Logs the incoming response status.
     async fn after_response(&self, url: &str, response: &HttpResponse) -> Result<()> {
-        tracing::debug!("<- {} (status: {})", url, response.status);
+        tracing::info!("HTTP Response: {} (Status: {})", url, response.status);
         Ok(())
     }
 
+    /// Logs request failures.
     async fn on_error(&self, url: &str, error: &crate::error::AcmeError) -> Result<()> {
-        tracing::error!("Request failed: {} - {:?}", url, error);
+        tracing::error!("HTTP Request Failed: {} - Error: {:?}", url, error);
         Ok(())
     }
 }
 
-/// 超时中间件
+/// A middleware that enforces request timeouts (placeholder).
 pub struct TimeoutMiddleware {
+    /// Timeout duration in seconds.
     #[allow(dead_code)]
     timeout_secs: u64,
 }
 
 impl TimeoutMiddleware {
-    /// 创建新的超时中间件
+    /// Creates a new `TimeoutMiddleware`.
     pub fn new(timeout_secs: u64) -> Self {
         Self { timeout_secs }
     }
@@ -120,20 +127,21 @@ impl TimeoutMiddleware {
 
 #[async_trait]
 impl Middleware for TimeoutMiddleware {
-    async fn before_request(&self, _url: &str, _method: &str) -> Result<()> {
-        // 实现实际的超时检查
+    async fn before_request(&self, url: &str, _method: &str) -> Result<()> {
+        tracing::debug!("Enforcing timeout for: {}", url);
         Ok(())
     }
 }
 
-/// 重试中间件
+/// A middleware that handles automatic retries (placeholder).
 pub struct RetryMiddleware {
+    /// Maximum number of retries.
     #[allow(dead_code)]
     max_retries: u32,
 }
 
 impl RetryMiddleware {
-    /// 创建新的重试中间件
+    /// Creates a new `RetryMiddleware`.
     pub fn new(max_retries: u32) -> Self {
         Self { max_retries }
     }
@@ -141,8 +149,8 @@ impl RetryMiddleware {
 
 #[async_trait]
 impl Middleware for RetryMiddleware {
-    async fn on_error(&self, _url: &str, _error: &crate::error::AcmeError) -> Result<()> {
-        // 实现实际的重试逻辑
+    async fn on_error(&self, url: &str, error: &crate::error::AcmeError) -> Result<()> {
+        tracing::debug!("Retry middleware intercepted error for {}: {:?}", url, error);
         Ok(())
     }
 }

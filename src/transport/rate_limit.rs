@@ -1,30 +1,33 @@
-//! 速率限制 - 防止请求超限
-
+/// Rate limiting and concurrency control for network requests.
+/// This module provides a token bucket-based rate limiter and a concurrent
+/// request limiter to ensure compliance with ACME server limits.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-/// 速率限制器 - 基于令牌桶算法
+/// A rate limiter based on the token bucket algorithm.
+/// It controls the rate of requests by requiring a token for each operation.
 pub struct RateLimiter {
-    /// 最大令牌数
+    /// Maximum number of tokens the bucket can hold.
     max_tokens: u32,
-    /// 令牌补充速率 (令牌/秒)
+    /// Rate at which tokens are added to the bucket (tokens per second).
     refill_rate: u32,
-    /// 当前令牌数
+    /// Current number of tokens in the bucket.
     tokens: Arc<Mutex<f64>>,
-    /// 最后更新时间
+    /// Timestamp of the last token refill.
     last_update: Arc<AtomicU64>,
 }
 
 impl RateLimiter {
-    /// 创建新的速率限制器
+    /// Creates a new `RateLimiter` with the specified capacity and refill rate.
     pub fn new(max_tokens: u32, refill_rate: u32) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
 
+        tracing::debug!("Initializing RateLimiter (max: {}, rate: {}/s)", max_tokens, refill_rate);
         Self {
             max_tokens,
             refill_rate,
@@ -33,38 +36,40 @@ impl RateLimiter {
         }
     }
 
-    /// 每秒 10 个请求的限制器
+    /// Creates a rate limiter that allows a specific number of requests per second.
     pub fn per_second(rate: u32) -> Self {
         Self::new(rate * 10, rate)
     }
 
-    /// 尝试获取令牌
+    /// Attempts to acquire the specified number of tokens. Returns `true` if successful.
     pub async fn acquire(&self, tokens: u32) -> bool {
         let mut current = self.tokens.lock().await;
 
-        // 更新令牌
+        // Refill tokens based on elapsed time
         self.refill(&mut current);
 
         if *current >= tokens as f64 {
             *current -= tokens as f64;
+            tracing::debug!("Token acquired (remaining: {:.2})", *current);
             true
         } else {
+            tracing::warn!("Rate limit exceeded: not enough tokens (available: {:.2})", *current);
             false
         }
     }
 
-    /// 等待直到可以获取令牌
+    /// Blocks until the specified number of tokens can be acquired.
     pub async fn wait_for_token(&self, tokens: u32) {
+        tracing::debug!("Waiting for {} tokens...", tokens);
         loop {
             if self.acquire(tokens).await {
                 return;
             }
-
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
-    /// 补充令牌
+    /// Internal helper to refill the token bucket based on elapsed time.
     fn refill(&self, tokens: &mut f64) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -81,54 +86,59 @@ impl RateLimiter {
         self.last_update.store(now, Ordering::Relaxed);
     }
 
-    /// 获取当前令牌数 (近似值)
+    /// Returns the current number of tokens in the bucket (approximate).
     pub async fn current_tokens(&self) -> f64 {
         *self.tokens.lock().await
     }
 }
 
-/// 请求限制器 - 限制并发请求数
+/// A limiter that restricts the number of concurrent requests.
 pub struct RequestLimiter {
-    /// 最大并发请求
+    /// Maximum number of concurrent requests allowed.
     max_concurrent: u32,
-    /// 当前请求数
+    /// Current number of active requests.
     current: Arc<AtomicU64>,
 }
 
 impl RequestLimiter {
-    /// 创建新的请求限制器
+    /// Creates a new `RequestLimiter` with the specified concurrency limit.
     pub fn new(max_concurrent: u32) -> Self {
+        tracing::debug!("Initializing RequestLimiter (max concurrent: {})", max_concurrent);
         Self {
             max_concurrent,
             current: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// 检查是否可以开始新请求
+    /// Returns true if a new request can be started.
     pub fn can_request(&self) -> bool {
         let current = self.current.load(Ordering::Acquire);
         current < self.max_concurrent as u64
     }
 
-    /// 开始请求
+    /// Attempts to start a new request. Returns a `RequestGuard` on success.
     pub fn start_request(&self) -> Result<RequestGuard, &'static str> {
         if self.can_request() {
-            self.current.fetch_add(1, Ordering::Release);
+            let prev = self.current.fetch_add(1, Ordering::Release);
+            tracing::debug!("Request started (active: {})", prev + 1);
             Ok(RequestGuard {
                 limiter: Arc::new(self.clone()),
             })
         } else {
+            tracing::warn!("Concurrency limit reached: {}", self.max_concurrent);
             Err("Maximum concurrent requests exceeded")
         }
     }
 
-    /// 获取当前请求数
+    /// Returns the current number of active requests.
     pub fn current_requests(&self) -> u64 {
         self.current.load(Ordering::Acquire)
     }
 
+    /// Internal helper to decrement the active request count.
     fn finish_request(&self) {
-        self.current.fetch_sub(1, Ordering::Release);
+        let prev = self.current.fetch_sub(1, Ordering::Release);
+        tracing::debug!("Request finished (active: {})", prev - 1);
     }
 }
 
@@ -141,8 +151,9 @@ impl Clone for RequestLimiter {
     }
 }
 
-/// 请求守卫 - 自动管理请求生命周期
+/// A guard that automatically decrements the active request count when dropped.
 pub struct RequestGuard {
+    /// Reference to the parent limiter.
     limiter: Arc<RequestLimiter>,
 }
 
@@ -160,13 +171,13 @@ mod tests {
     async fn test_rate_limiter() {
         let limiter = RateLimiter::new(10, 10);
 
-        // 应该成功获取 5 个令牌
+        // Should succeed
         assert!(limiter.acquire(5).await);
 
-        // 应该成功获取 5 个令牌
+        // Should succeed
         assert!(limiter.acquire(5).await);
 
-        // 应该失败 (没有足够的令牌)
+        // Should fail (no tokens left)
         assert!(!limiter.acquire(1).await);
     }
 
