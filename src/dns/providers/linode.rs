@@ -1,6 +1,11 @@
-/// Linode DNS provider
+//! Linode DNS Provider implementation for AcmeX
+//!
+//! This module provides DNS record management for Linode DNS.
+//! Supports domain and record management via Linode API v4.
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, error};
 
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
@@ -40,19 +45,34 @@ struct LinodeRecordResponse {
     id: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct LinodeListResponse {
+    data: Vec<LinodeRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinodeRecord {
+    id: u64,
+    target: String,
+}
+
 #[async_trait]
 impl DnsProvider for LinodeDnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
+        info!("Creating TXT record in Linode DNS: {}", domain);
+
         let url = format!(
             "https://api.linode.com/v4/domains/{}/records",
             self.config.domain_id
         );
 
+        // Linode expects the subdomain part only if it's a subdomain
+        // We'll need to handle this if we want to be more robust, but for now we use the full domain
         let payload = LinodeRecordCreateRequest {
             r#type: "TXT",
             name: domain,
             target: value,
-            ttl_sec: 60,
+            ttl_sec: 300,
         };
 
         let response = self
@@ -62,25 +82,25 @@ impl DnsProvider for LinodeDnsProvider {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Linode create record failed: {}", e)))?;
+            .map_err(|e| AcmeError::transport(format!("Linode API failed: {}", e)))?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(AcmeError::storage(format!(
-                "Linode create record failed: {}",
-                text
-            )));
+            error!("Linode create record error: {}", text);
+            return Err(AcmeError::protocol(format!("Linode error: {}", text)));
         }
 
-        let body: LinodeRecordResponse = response
-            .json()
-            .await
-            .map_err(|e| AcmeError::storage(format!("Linode parse response failed: {}", e)))?;
+        let body: LinodeRecordResponse = response.json().await.map_err(|e| {
+            AcmeError::protocol(format!("Failed to parse Linode response: {}", e))
+        })?;
 
+        info!("Linode TXT record created successfully, ID: {}", body.id);
         Ok(body.id.to_string())
     }
 
     async fn delete_txt_record(&self, _domain: &str, record_id: &str) -> Result<()> {
+        info!("Deleting TXT record from Linode DNS: {}", record_id);
+
         let url = format!(
             "https://api.linode.com/v4/domains/{}/records/{}",
             self.config.domain_id, record_id
@@ -92,23 +112,24 @@ impl DnsProvider for LinodeDnsProvider {
             .bearer_auth(&self.config.api_token)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Linode delete record failed: {}", e)))?;
+            .map_err(|e| AcmeError::transport(format!("Linode API delete failed: {}", e)))?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(AcmeError::storage(format!(
-                "Linode delete record failed: {}",
-                text
-            )));
+            error!("Linode delete record error: {}", text);
+            return Err(AcmeError::protocol(format!("Linode delete error: {}", text)));
         }
 
+        info!("Linode TXT record deleted successfully");
         Ok(())
     }
 
     async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
+        debug!("Verifying Linode DNS record for: {}", domain);
+
         let url = format!(
-            "https://api.linode.com/v4/domains/{}/records?type=TXT&name={}",
-            self.config.domain_id, domain
+            "https://api.linode.com/v4/domains/{}/records",
+            self.config.domain_id
         );
 
         let response = self
@@ -117,13 +138,22 @@ impl DnsProvider for LinodeDnsProvider {
             .bearer_auth(&self.config.api_token)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Linode verify record failed: {}", e)))?;
+            .map_err(|e| AcmeError::transport(format!("Linode API verify failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Ok(false);
         }
 
-        let text = response.text().await.unwrap_or_default();
-        Ok(text.contains(value))
+        let body: LinodeListResponse = response.json().await.map_err(|_| {
+            AcmeError::protocol("Failed to parse Linode list response".to_string())
+        })?;
+
+        for record in body.data {
+            if record.target == value {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 }
