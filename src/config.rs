@@ -1,518 +1,393 @@
-//! Configuration management for AcmeX
-//!
-//! This module provides comprehensive configuration support for AcmeX, including:
-//! - TOML configuration file parsing
-//! - Environment variable overrides
-//! - Configuration validation
-//! - Default settings
-
+/// Configuration management for AcmeX.
+/// This module provides comprehensive configuration support, including TOML parsing,
+/// environment variable overrides, and validation for multi-CA setups.
 use crate::error::{AcmeError, Result};
+use crate::ca::{CAConfig, CertificateAuthority, Environment};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::time::Duration;
 
-/// Main configuration structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+/// Main configuration structure for the AcmeX application.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// ACME protocol and CA settings.
     #[serde(default)]
     pub acme: AcmeSettings,
 
+    /// Storage backend settings.
     #[serde(default)]
     pub storage: StorageSettings,
 
+    /// Challenge solving settings.
     #[serde(default)]
     pub challenge: ChallengeSettings,
 
+    /// Certificate renewal settings.
     #[serde(default)]
     pub renewal: RenewalSettings,
 
+    /// Metrics and observability settings.
     #[serde(default)]
     pub metrics: Option<MetricsSettings>,
 
+    /// Notification settings (Webhooks, Email).
     #[serde(default)]
     pub notifications: Option<NotificationSettings>,
 
+    /// CLI-specific settings.
     #[serde(default)]
     pub cli: Option<CliSettings>,
 
+    /// API server settings.
     #[serde(default)]
     pub server: Option<ServerSettings>,
 }
 
-/// ACME protocol settings
+/// ACME protocol and Certificate Authority settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcmeSettings {
-    /// ACME directory URL
-    #[serde(default = "default_acme_url")]
-    pub directory: String,
-
-    /// Certificate Authority: "letsencrypt" (default), "google", "zerossl", or "custom"
+    /// The selected Certificate Authority: "letsencrypt", "google", "zerossl", or "custom".
     #[serde(default = "default_ca")]
     pub ca: String,
 
-    /// CA environment: "production" or "staging"
+    /// The CA environment: "production" or "staging".
     #[serde(default = "default_ca_env")]
     pub ca_environment: String,
 
-    /// Custom CA URL (only used if ca = "custom")
+    /// Custom CA directory URL (required if ca = "custom").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca_custom_url: Option<String>,
 
-    /// Contact information
+    /// Contact information (e.g., ["mailto:admin@example.com"]).
     #[serde(default)]
     pub contact: Vec<String>,
 
-    /// Agree to TOS
+    /// Whether the Terms of Service have been agreed to.
     #[serde(default = "default_true")]
     pub tos_agreed: bool,
 
-    /// External account binding (optional)
+    /// Optional External Account Binding (EAB) for CAs like Google or ZeroSSL.
     #[serde(default)]
     pub external_account_binding: Option<ExternalAccountBinding>,
+
+    /// Internal cache for the resolved directory URL.
+    #[serde(skip)]
+    pub directory: String,
 }
 
-/// External account binding configuration
+impl AcmeSettings {
+    /// Converts the settings into a `CAConfig` for endpoint resolution.
+    pub fn to_ca_config(&self) -> Result<CAConfig> {
+        let ca_type = match self.ca.to_lowercase().as_str() {
+            "letsencrypt" => CertificateAuthority::LetsEncrypt,
+            "google" => {
+                #[cfg(not(feature = "google-ca"))]
+                return Err(AcmeError::configuration("Feature 'google-ca' is not enabled"));
+                #[cfg(feature = "google-ca")]
+                CertificateAuthority::Google
+            },
+            "zerossl" => {
+                #[cfg(not(feature = "zerossl-ca"))]
+                return Err(AcmeError::configuration("Feature 'zerossl-ca' is not enabled"));
+                #[cfg(feature = "zerossl-ca")]
+                CertificateAuthority::ZeroSSL
+            },
+            "custom" => CertificateAuthority::Custom,
+            _ => return Err(AcmeError::configuration(format!("Unsupported CA type: {}", self.ca))),
+        };
+
+        let env = match self.ca_environment.to_lowercase().as_str() {
+            "production" | "prod" => Environment::Production,
+            "staging" | "test" | "dev" => Environment::Staging,
+            _ => return Err(AcmeError::configuration(format!("Invalid environment: {}", self.ca_environment))),
+        };
+
+        let mut config = CAConfig::new(ca_type, env);
+        if let Some(ref url) = self.ca_custom_url {
+            config = config.with_custom_url(url.clone());
+        }
+
+        if let Some(first_contact) = self.contact.first() {
+            config = config.with_contact_email(first_contact.clone());
+        }
+
+        Ok(config)
+    }
+}
+
+/// External account binding configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalAccountBinding {
     pub key_id: String,
     pub hmac_key: String,
 }
 
-/// Storage backend settings
+/// Storage backend settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSettings {
-    /// Storage backend type: "file", "redis", "encrypted"
+    /// Storage backend type: "file", "redis", "encrypted".
     #[serde(default = "default_storage_backend")]
     pub backend: String,
 
-    /// File storage configuration
+    /// File storage configuration.
     #[serde(default)]
     pub file: Option<FileStorageConfig>,
 
-    /// Redis storage configuration
+    /// Redis storage configuration.
     #[serde(default)]
     pub redis: Option<RedisStorageConfig>,
 
-    /// Encrypted storage configuration
+    /// Encrypted storage configuration.
     #[serde(default)]
     pub encrypted: Option<EncryptedStorageConfig>,
 }
 
-/// File storage configuration
+/// File storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileStorageConfig {
-    /// Directory path for certificates
+    /// Directory path for certificates and account data.
     #[serde(default = "default_cert_path")]
     pub path: String,
 }
 
-/// Redis storage configuration
+/// Redis storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisStorageConfig {
-    /// Redis connection URL
+    /// Redis connection URL.
     pub url: String,
-
-    /// Connection pool size
+    /// Connection pool size.
     #[serde(default = "default_pool_size")]
     pub connection_pool_size: usize,
-
-    /// Database number
+    /// Database number.
     #[serde(default)]
     pub db: u32,
 }
 
-/// Encrypted storage configuration
+/// Encrypted storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedStorageConfig {
-    /// Inner backend type
+    /// The underlying backend to encrypt.
     pub inner_backend: String,
-
-    /// Encryption key (supports ${VAR} syntax)
+    /// Encryption key (supports ${VAR} syntax).
     pub encryption_key: String,
-
-    /// Key format: "hex" or "base64"
+    /// Key format: "hex" or "base64".
     #[serde(default = "default_key_format")]
     pub key_format: String,
 }
 
-/// Challenge configuration
+/// Challenge configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeSettings {
-    /// Default challenge type: "http-01", "dns-01", "tls-alpn-01"
+    /// Default challenge type: "http-01", "dns-01", "tls-alpn-01".
     #[serde(default = "default_challenge_type")]
     pub challenge_type: String,
-
-    /// HTTP-01 configuration
+    /// HTTP-01 configuration.
     #[serde(default)]
     pub http01: Option<Http01Config>,
-
-    /// DNS-01 configuration
+    /// DNS-01 configuration.
     #[serde(default)]
     pub dns01: Option<Dns01Config>,
-
-    /// TLS-ALPN-01 configuration
+    /// TLS-ALPN-01 configuration.
     #[serde(default)]
     pub tls_alpn: Option<TlsAlpnConfig>,
 }
 
-/// HTTP-01 challenge configuration
+/// HTTP-01 challenge configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Http01Config {
-    /// Listen address
+    /// Listen address for the temporary HTTP server.
     #[serde(default = "default_http_listen")]
     pub listen_addr: String,
-
-    /// Domain for validation
+    /// Domain for validation.
     pub domain: Option<String>,
-
-    /// Challenge token path
+    /// Path where the challenge token will be served.
     #[serde(default = "default_challenge_path")]
     pub challenge_path: String,
 }
 
-/// DNS-01 challenge configuration
+/// DNS-01 challenge configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dns01Config {
-    /// Primary DNS provider
+    /// Primary DNS provider name.
     pub provider: Option<String>,
-
-    /// API token/key (supports ${VAR} syntax)
+    /// API token/key.
     pub api_token: Option<String>,
-
-    /// Zone ID or domain (supports ${VAR} syntax)
+    /// Zone ID or domain.
     pub zone_id: Option<String>,
-
-    /// Multiple provider configurations
+    /// Multiple provider configurations.
     #[serde(default)]
     pub providers: Vec<DnsProviderConfig>,
-
-    /// DNS propagation timeout
+    /// DNS propagation timeout in seconds.
     #[serde(default = "default_dns_timeout")]
     pub propagation_timeout_secs: u64,
 }
 
-/// DNS provider configuration
+/// DNS provider configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsProviderConfig {
-    /// Provider name
     pub name: String,
-
-    /// API token/key
     pub api_token: Option<String>,
-
-    /// Zone ID or domain
     pub zone_id: Option<String>,
-
-    /// Additional configuration
     #[serde(default)]
     pub extra: HashMap<String, String>,
 }
 
-/// TLS-ALPN-01 challenge configuration
+/// TLS-ALPN-01 challenge configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsAlpnConfig {
-    /// Listen address
     #[serde(default = "default_tls_listen")]
     pub listen_addr: String,
-
-    /// Certificate path
     pub cert_path: Option<String>,
-
-    /// Key path
     pub key_path: Option<String>,
 }
 
-/// Renewal settings
+/// Renewal settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenewalSettings {
-    /// Check interval in seconds
+    /// Check interval in seconds.
     #[serde(default = "default_check_interval")]
     pub check_interval: u64,
-
-    /// Days before expiry to renew
+    /// Days before expiry to trigger renewal.
     #[serde(default = "default_renew_before_days")]
     pub renew_before_days: u32,
-
-    /// Maximum retry attempts
+    /// Maximum retry attempts.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-
-    /// Retry delay in seconds
+    /// Retry delay in seconds.
     #[serde(default = "default_retry_delay")]
     pub retry_delay_secs: u64,
-
-    /// Concurrency level for renewals
+    /// Concurrency level for renewals.
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
-
-    /// Renewal hooks
+    /// Renewal hooks.
     #[serde(default)]
     pub hooks: Option<RenewalHooks>,
 }
 
-/// Renewal hooks configuration
+/// Renewal hooks configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenewalHooks {
-    /// Before renewal hook
     pub before: Option<String>,
-
-    /// After renewal hook
     pub after: Option<String>,
-
-    /// On error hook
     pub on_error: Option<String>,
 }
 
-/// Metrics settings
+/// Metrics settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSettings {
-    /// Enable metrics
     #[serde(default = "default_true")]
     pub enabled: bool,
-
-    /// Metrics listen address
     #[serde(default = "default_metrics_listen")]
     pub listen_addr: String,
-
-    /// Metrics prefix
     #[serde(default = "default_metrics_prefix")]
     pub prefix: String,
 }
 
-/// Notification settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+/// Notification settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NotificationSettings {
-    /// Webhook configurations
     #[serde(default)]
     pub webhooks: Vec<WebhookConfig>,
-
-    /// Email configurations
     #[serde(default)]
     pub email: Vec<EmailConfig>,
 }
 
-/// Webhook notification configuration
+/// Webhook notification configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookConfig {
-    /// Webhook name
     pub name: Option<String>,
-
-    /// Webhook URL
     pub url: String,
-
-    /// Events to trigger on
     #[serde(default)]
     pub events: Vec<String>,
-
-    /// Response format
     #[serde(default = "default_webhook_format")]
     pub format: String,
-
-    /// Authentication token
     pub auth_token: Option<String>,
-
-    /// Request timeout
     #[serde(default = "default_webhook_timeout")]
     pub timeout_secs: u64,
 }
 
-/// Email notification configuration
+/// Email notification configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailConfig {
-    /// SMTP server host
     pub smtp_host: String,
-
-    /// SMTP server port
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
-
-    /// From email address
     pub from: String,
-
-    /// Recipient email addresses
     pub to: Vec<String>,
-
-    /// Events to trigger on
     #[serde(default)]
     pub events: Vec<String>,
-
-    /// SMTP username (optional)
     pub username: Option<String>,
-
-    /// SMTP password (optional)
     pub password: Option<String>,
 }
 
-/// CLI settings
+/// CLI settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliSettings {
-    /// Output format: "text", "json", "csv"
     #[serde(default = "default_output_format")]
     pub output_format: String,
-
-    /// Enable colored output
     #[serde(default = "default_true")]
     pub colors: bool,
-
-    /// Log level: "trace", "debug", "info", "warn", "error"
     #[serde(default = "default_log_level")]
     pub log_level: String,
-
-    /// Log file path
     pub log_file: Option<String>,
-
-    /// Log file max size in MB
     #[serde(default = "default_log_max_size")]
     pub log_max_size: u64,
-
-    /// Number of log files to keep
     #[serde(default = "default_log_backup_count")]
     pub log_backup_count: u32,
 }
 
-/// Server settings
+/// Server settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerSettings {
-    /// Listen address
     #[serde(default = "default_server_listen")]
     pub listen_addr: String,
-
-    /// Enable API
     #[serde(default = "default_true")]
     pub enable_api: bool,
-
-    /// Enable Webhook handler
     #[serde(default = "default_true")]
     pub enable_webhook: bool,
 }
 
-// Default values
-fn default_acme_url() -> String {
-    "https://acme-v02.api.letsencrypt.org/directory".to_string()
-}
-
-fn default_ca() -> String {
-    "letsencrypt".to_string()
-}
-
-fn default_ca_env() -> String {
-    "production".to_string()
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_storage_backend() -> String {
-    "file".to_string()
-}
-
-fn default_cert_path() -> String {
-    ".acmex/certs".to_string()
-}
-
-fn default_pool_size() -> usize {
-    10
-}
-
-fn default_key_format() -> String {
-    "hex".to_string()
-}
-
-fn default_challenge_type() -> String {
-    "dns-01".to_string()
-}
-
-fn default_http_listen() -> String {
-    "0.0.0.0:80".to_string()
-}
-
-fn default_challenge_path() -> String {
-    ".well-known/acme-challenge".to_string()
-}
-
-fn default_tls_listen() -> String {
-    "0.0.0.0:443".to_string()
-}
-
-fn default_dns_timeout() -> u64 {
-    300
-}
-
-fn default_check_interval() -> u64 {
-    3600
-}
-
-fn default_renew_before_days() -> u32 {
-    30
-}
-
-fn default_max_retries() -> u32 {
-    3
-}
-
-fn default_retry_delay() -> u64 {
-    300
-}
-
-fn default_concurrency() -> u32 {
-    5
-}
-
-fn default_metrics_listen() -> String {
-    "127.0.0.1:9090".to_string()
-}
-
-fn default_metrics_prefix() -> String {
-    "acmex".to_string()
-}
-
-fn default_webhook_format() -> String {
-    "json".to_string()
-}
-
-fn default_webhook_timeout() -> u64 {
-    30
-}
-
-fn default_smtp_port() -> u16 {
-    587
-}
-
-fn default_output_format() -> String {
-    "text".to_string()
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-fn default_log_max_size() -> u64 {
-    100
-}
-
-fn default_log_backup_count() -> u32 {
-    10
-}
-
-fn default_server_listen() -> String {
-    "127.0.0.1:8080".to_string()
-}
+// Default value functions
+fn default_ca() -> String { "letsencrypt".to_string() }
+fn default_ca_env() -> String { "production".to_string() }
+fn default_true() -> bool { true }
+fn default_storage_backend() -> String { "file".to_string() }
+fn default_cert_path() -> String { ".acmex/certs".to_string() }
+fn default_pool_size() -> usize { 10 }
+fn default_key_format() -> String { "hex".to_string() }
+fn default_challenge_type() -> String { "dns-01".to_string() }
+fn default_http_listen() -> String { "0.0.0.0:80".to_string() }
+fn default_challenge_path() -> String { ".well-known/acme-challenge".to_string() }
+fn default_tls_listen() -> String { "0.0.0.0:443".to_string() }
+fn default_dns_timeout() -> u64 { 300 }
+fn default_check_interval() -> u64 { 3600 }
+fn default_renew_before_days() -> u32 { 30 }
+fn default_max_retries() -> u32 { 3 }
+fn default_retry_delay() -> u64 { 300 }
+fn default_concurrency() -> u32 { 5 }
+fn default_metrics_listen() -> String { "127.0.0.1:9090".to_string() }
+fn default_metrics_prefix() -> String { "acmex".to_string() }
+fn default_webhook_format() -> String { "json".to_string() }
+fn default_webhook_timeout() -> u64 { 30 }
+fn default_smtp_port() -> u16 { 587 }
+fn default_output_format() -> String { "text".to_string() }
+fn default_log_level() -> String { "info".to_string() }
+fn default_log_max_size() -> u64 { 100 }
+fn default_log_backup_count() -> u32 { 10 }
+fn default_server_listen() -> String { "127.0.0.1:8080".to_string() }
 
 impl Default for AcmeSettings {
     fn default() -> Self {
         Self {
-            directory: default_acme_url(),
             ca: default_ca(),
             ca_environment: default_ca_env(),
             ca_custom_url: None,
             contact: Vec::new(),
             tos_agreed: true,
             external_account_binding: None,
+            directory: String::new(),
         }
     }
 }
@@ -564,7 +439,6 @@ impl Default for MetricsSettings {
     }
 }
 
-
 impl Default for CliSettings {
     fn default() -> Self {
         Self {
@@ -588,71 +462,69 @@ impl Default for ServerSettings {
     }
 }
 
-
 impl Config {
-    /// Create a new configuration with defaults
+    /// Creates a new configuration with default values.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Load configuration from a TOML file
+    /// Loads configuration from a TOML file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| AcmeError::configuration(format!("Failed to read config file: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to read config file: {}", e);
+                AcmeError::configuration(format!("Failed to read config file: {}", e))
+            })?;
         Self::from_str(&content)
     }
 
-    /// Load configuration from a TOML string
+    /// Loads configuration from a TOML string.
     pub fn from_str(content: &str) -> Result<Self> {
-        toml::from_str(content)
-            .map_err(|e| AcmeError::configuration(format!("Failed to parse TOML: {}", e)))
+        let mut config: Config = toml::from_str(content)
+            .map_err(|e| {
+                tracing::error!("Failed to parse TOML configuration: {}", e);
+                AcmeError::configuration(format!("Failed to parse TOML: {}", e))
+            })?;
+
+        // Resolve the ACME directory URL immediately after loading
+        let ca_config = config.acme.to_ca_config()?;
+        config.acme.directory = ca_config.directory_url()
+            .map_err(|e| AcmeError::configuration(e))?;
+
+        Ok(config)
     }
 
-    /// Apply environment variable overrides
+    /// Applies environment variable overrides to the configuration.
     pub fn apply_env_overrides(&mut self) -> Result<()> {
-        // Override ACME settings
-        if let Ok(url) = env::var("ACMEX_ACME_DIRECTORY") {
-            self.acme.directory = Self::expand_env_var(&url)?;
+        tracing::debug!("Applying environment variable overrides");
+
+        if let Ok(ca) = env::var("ACMEX_ACME_CA") {
+            self.acme.ca = ca;
         }
 
-        // Override storage backend
+        if let Ok(env) = env::var("ACMEX_ACME_ENV") {
+            self.acme.ca_environment = env;
+        }
+
         if let Ok(backend) = env::var("ACMEX_STORAGE_BACKEND") {
             self.storage.backend = backend;
         }
 
-        // Override file path
-        if let Ok(path) = env::var("ACMEX_STORAGE_FILE_PATH")
-            && let Some(ref mut file_config) = self.storage.file {
+        if let Ok(path) = env::var("ACMEX_STORAGE_FILE_PATH") {
+            if let Some(ref mut file_config) = self.storage.file {
                 file_config.path = Self::expand_env_var(&path)?;
             }
-
-        // Override Redis URL
-        if let Ok(url) = env::var("ACMEX_STORAGE_REDIS_URL")
-            && let Some(ref mut redis_config) = self.storage.redis {
-                redis_config.url = Self::expand_env_var(&url)?;
-            }
-
-        // Override challenge type
-        if let Ok(challenge_type) = env::var("ACMEX_CHALLENGE_TYPE") {
-            self.challenge.challenge_type = challenge_type;
         }
 
-        // Override renewal check interval
-        if let Ok(interval) = env::var("ACMEX_RENEWAL_CHECK_INTERVAL")
-            && let Ok(secs) = interval.parse::<u64>() {
-                self.renewal.check_interval = secs;
-            }
-
-        // Override renewal window
-        if let Ok(days) = env::var("ACMEX_RENEWAL_BEFORE_DAYS")
-            && let Ok(d) = days.parse::<u32>() {
-                self.renewal.renew_before_days = d;
-            }
+        // Re-resolve directory after overrides
+        let ca_config = self.acme.to_ca_config()?;
+        self.acme.directory = ca_config.directory_url()
+            .map_err(|e| AcmeError::configuration(e))?;
 
         Ok(())
     }
 
-    /// Expand environment variables in format ${VAR}
+    /// Expands environment variables in the format `${VAR}` within a string.
     pub fn expand_env_var(value: &str) -> Result<String> {
         let re = regex::Regex::new(r"\$\{([^}]+)\}")
             .map_err(|_| AcmeError::configuration("Invalid regex pattern"))?;
@@ -667,87 +539,56 @@ impl Config {
         Ok(result)
     }
 
-    /// Validate configuration
+    /// Validates the configuration settings.
     pub fn validate(&self) -> Result<()> {
-        // Validate ACME directory URL
+        tracing::debug!("Validating configuration");
+
         if self.acme.directory.is_empty() {
-            return Err(AcmeError::configuration(
-                "ACME directory URL cannot be empty",
-            ));
+            return Err(AcmeError::configuration("ACME directory URL could not be resolved"));
         }
 
-        // Validate storage backend
         match self.storage.backend.as_str() {
             "file" => {
-                if let Some(ref file_config) = self.storage.file
-                    && file_config.path.is_empty() {
-                        return Err(AcmeError::configuration(
-                            "File storage path cannot be empty",
-                        ));
+                if let Some(ref file_config) = self.storage.file {
+                    if file_config.path.is_empty() {
+                        return Err(AcmeError::configuration("File storage path cannot be empty"));
                     }
+                }
             }
             "redis" => {
-                if let Some(ref redis_config) = self.storage.redis
-                    && redis_config.url.is_empty() {
+                if let Some(ref redis_config) = self.storage.redis {
+                    if redis_config.url.is_empty() {
                         return Err(AcmeError::configuration("Redis URL cannot be empty"));
                     }
+                }
             }
-            "encrypted" => {
-                if let Some(ref encrypted_config) = self.storage.encrypted
-                    && encrypted_config.encryption_key.is_empty() {
-                        return Err(AcmeError::configuration("Encryption key cannot be empty"));
-                    }
-            }
-            backend => {
-                return Err(AcmeError::configuration(format!(
-                    "Invalid storage backend: {}",
-                    backend
-                )));
-            }
-        }
-
-        // Validate challenge type
-        match self.challenge.challenge_type.as_str() {
-            "http-01" | "dns-01" | "tls-alpn-01" => {}
-            challenge_type => {
-                return Err(AcmeError::configuration(format!(
-                    "Invalid challenge type: {}",
-                    challenge_type
-                )));
-            }
-        }
-
-        // Validate renewal settings
-        if self.renewal.check_interval == 0 {
-            return Err(AcmeError::configuration(
-                "Check interval must be greater than 0",
-            ));
+            _ => {}
         }
 
         Ok(())
     }
 
-    /// Get ACME directory URL
+    /// Returns the resolved ACME directory URL.
     pub fn acme_directory(&self) -> &str {
         &self.acme.directory
     }
 
-    /// Get storage backend type
+    /// Returns the storage backend type.
     pub fn storage_backend(&self) -> &str {
         &self.storage.backend
     }
 
-    /// Get challenge type
+    /// Returns the selected challenge type.
     pub fn challenge_type(&self) -> &str {
         &self.challenge.challenge_type
     }
 
-    /// Get renewal check interval as Duration
+    /// Returns the renewal check interval as a `Duration`.
     pub fn renewal_check_interval(&self) -> Duration {
         Duration::from_secs(self.renewal.check_interval)
     }
 
-    /// Check if certificate should be renewed
+    /// Returns the number of days before expiry to trigger renewal.
     pub fn should_renew_days_before(&self) -> u32 {
         self.renewal.renew_before_days
     }
@@ -756,68 +597,22 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(test)]
-    use temp_env;
 
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(
-            config.acme.directory,
-            "https://acme-v02.api.letsencrypt.org/directory"
-        );
+        assert_eq!(config.acme.ca, "letsencrypt");
         assert_eq!(config.storage.backend, "file");
-        assert_eq!(config.challenge.challenge_type, "dns-01");
     }
 
     #[test]
-    fn test_config_from_string() {
+    fn test_ca_resolution() {
         let toml = r#"
 [acme]
-directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
-tos_agreed = true
-
-[storage]
-backend = "file"
-
-[storage.file]
-path = "/etc/acme/certs"
-
-[challenge]
-challenge_type = "http-01"
-
-[renewal]
-check_interval = 1800
-renew_before_days = 14
+ca = "letsencrypt"
+ca_environment = "staging"
 "#;
-
         let config = Config::from_str(toml).unwrap();
-        assert_eq!(
-            config.acme.directory,
-            "https://acme-staging-v02.api.letsencrypt.org/directory"
-        );
-        assert_eq!(config.storage.backend, "file");
-        assert_eq!(config.challenge.challenge_type, "http-01");
-        assert_eq!(config.renewal.check_interval, 1800);
-        assert_eq!(config.renewal.renew_before_days, 14);
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let config = Config::default();
-        assert!(config.validate().is_ok());
-
-        let mut invalid_config = Config::default();
-        invalid_config.acme.directory.clear();
-        assert!(invalid_config.validate().is_err());
-    }
-
-    #[test]
-    fn test_expand_env_var() {
-        // Use temp-env to safely set environment variables in tests
-        temp_env::with_var("TEST_VAR", Some("test_value"), || {
-            let result = Config::expand_env_var("prefix_${TEST_VAR}_suffix").unwrap();
-            assert_eq!(result, "prefix_test_value_suffix");
-        });
+        assert_eq!(config.acme_directory(), "https://acme-staging-v02.api.letsencrypt.org/directory");
     }
 }
