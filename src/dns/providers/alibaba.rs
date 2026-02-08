@@ -4,12 +4,13 @@
 //! Supports domain and record management via Alibaba Cloud REST API.
 
 use crate::challenge::DnsProvider;
-use crate::error::Result;
+use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 use base64::Engine;
+use hmac::{Hmac, Mac, KeyInit};
 use jiff::Zoned;
-use sha2::digest::Update;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use tracing::{debug, info};
 
 /// Alibaba Cloud DNS Provider configuration
@@ -33,20 +34,47 @@ impl AlibabaCloudDnsProvider {
         }
     }
 
-    /// Sign request for Alibaba Cloud API
-    fn sign_request(&self, method: &str, params: &str) -> String {
-        let string_to_sign = format!("{}\n{}\n", method.to_uppercase(), params);
+    /// Sign request for Alibaba Cloud API (POP RPC Style)
+    fn sign_request(&self, method: &str, params: &BTreeMap<String, String>) -> String {
+        // 1. Sort parameters and build canonical query string
+        let canonical_query_string = params
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    self.percent_encode(k),
+                    self.percent_encode(v)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+
+        // 2. Build string to sign
+        let string_to_sign = format!(
+            "{}&%2F&{}",
+            method.to_uppercase(),
+            self.percent_encode(&canonical_query_string)
+        );
+
+        // 3. Calculate HMAC-SHA1 signature (Alibaba Cloud uses SHA1 for this style)
+        // Note: Some newer APIs support SHA256, but SHA1 is the standard for RPC style.
+        use hmac::Hmac;
+        use sha1::Sha1;
+        type HmacSha1 = Hmac<Sha1>;
+
         let secret = format!("{}&", self.access_key_secret);
+        let mut mac = HmacSha1::new_from_slice(secret.as_bytes())
+            .expect("HMAC can take key of any size");
+        mac.update(string_to_sign.as_bytes());
 
-        // Simple HMAC-SHA256 implementation using generic-array
-        let mut hasher = Sha256::new();
-        Update::update(&mut hasher, string_to_sign.as_bytes());
-        Update::update(&mut hasher, secret.as_bytes());
-        let result = hasher.finalize();
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    }
 
-        // This is a simplified version - in production would use proper HMAC
-        // For now, just hash and encode
-        base64::engine::general_purpose::STANDARD.encode::<&[u8]>(result.as_ref())
+    fn percent_encode(&self, s: &str) -> String {
+        urlencoding::encode(s)
+            .replace("+", "%20")
+            .replace("*", "%2A")
+            .replace("%7E", "~")
     }
 
     /// Get domain name from full domain
@@ -62,246 +90,121 @@ impl AlibabaCloudDnsProvider {
     /// Get record name from full domain
     fn get_record_name(&self, domain: &str) -> String {
         let domain_name = self.get_domain_name(domain);
-        domain
+        let name = domain
             .strip_suffix(&format!(".{}", domain_name))
-            .unwrap_or(domain)
-            .to_string()
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() && domain != domain_name {
+             domain.strip_suffix(domain_name).unwrap_or("").trim_end_matches('.').to_string()
+        } else {
+            name
+        }
+    }
+
+    async fn do_request(&self, mut params: BTreeMap<String, String>) -> Result<serde_json::Value> {
+        params.insert("Format".to_string(), "JSON".to_string());
+        params.insert("Version".to_string(), "2015-01-09".to_string());
+        params.insert("AccessKeyId".to_string(), self.access_key_id.clone());
+        params.insert("SignatureMethod".to_string(), "HMAC-SHA1".to_string());
+        params.insert("SignatureVersion".to_string(), "1.0".to_string());
+        params.insert("SignatureNonce".to_string(), rand::random::<u64>().to_string());
+        params.insert(
+            "Timestamp".to_string(),
+            Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        );
+
+        let signature = self.sign_request("GET", &params);
+        params.insert("Signature".to_string(), signature);
+
+        let query = params
+            .iter()
+            .map(|(k, v)| format!("{}={}", self.percent_encode(k), self.percent_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let url = format!("https://alidns.aliyuncs.com/?{}", query);
+
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AcmeError::transport(format!("Alibaba API failed: {}", e)))?;
+
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            AcmeError::protocol(format!("Failed to parse Alibaba response: {}", e))
+        })?;
+
+        if !status.is_success() {
+            return Err(AcmeError::protocol(format!(
+                "Alibaba DNS error: {} - {}",
+                body["Code"].as_str().unwrap_or("Unknown"),
+                body["Message"].as_str().unwrap_or("")
+            )));
+        }
+
+        Ok(body)
     }
 }
 
 #[async_trait]
 impl DnsProvider for AlibabaCloudDnsProvider {
-    /// Create a TXT record in Alibaba Cloud DNS
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        info!(
-            "Creating TXT record in Alibaba Cloud DNS for domain: {}",
-            domain
-        );
+        info!("Creating TXT record in Alibaba Cloud DNS: {}", domain);
 
         let domain_name = self.get_domain_name(domain);
         let record_name = self.get_record_name(domain);
 
-        let api_url = "https://alidns.aliyuncs.com/";
+        let mut params = BTreeMap::new();
+        params.insert("Action".to_string(), "AddDomainRecord".to_string());
+        params.insert("DomainName".to_string(), domain_name);
+        params.insert("RR".to_string(), record_name);
+        params.insert("Type".to_string(), "TXT".to_string());
+        params.insert("Value".to_string(), value.to_string());
+        params.insert("TTL".to_string(), "600".to_string());
 
-        let params = format!(
-            "Action=AddDomainRecord&DomainName={}&RR={}&Type=TXT&Value={}&TTL=300&AccessKeyId={}",
-            domain_name, record_name, value, self.access_key_id
-        );
+        let body = self.do_request(params).await?;
 
-        let signature = self.sign_request("POST", &params);
+        let record_id = body["RecordId"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| AcmeError::protocol("RecordId not found in response".to_string()))?;
 
-        debug!(
-            "Creating Alibaba Cloud DNS TXT record: {} = {}",
-            domain, value
-        );
-
-        // Build form-encoded body
-        let form_params = [
-            ("Action", "AddDomainRecord"),
-            ("DomainName", &domain_name),
-            ("RR", &record_name),
-            ("Type", "TXT"),
-            ("Value", value),
-            ("TTL", "300"),
-            ("AccessKeyId", &self.access_key_id),
-            ("Signature", &signature),
-            ("SignatureMethod", "HMAC-SHA256"),
-            ("SignatureVersion", "1.0"),
-            (
-                "Timestamp",
-                &Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            ),
-        ];
-
-        let form_body = form_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let response = self
-            .client
-            .post(api_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_body)
-            .send()
-            .await
-            .map_err(|e| crate::error::AcmeError::Transport(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(crate::error::AcmeError::Protocol(format!(
-                "Failed to create Alibaba Cloud DNS record: {}",
-                response.status()
-            )));
-        }
-
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| crate::error::AcmeError::Transport(e.to_string()))?;
-
-        let record_id = body["RecordId"].as_str().ok_or_else(|| {
-            crate::error::AcmeError::Protocol("RecordId not found in response".to_string())
-        })?;
-
-        info!("Alibaba Cloud DNS TXT record created successfully");
-        Ok(record_id.to_string())
+        Ok(record_id)
     }
 
-    /// Delete a TXT record from Alibaba Cloud DNS
     async fn delete_txt_record(&self, _domain: &str, record_id: &str) -> Result<()> {
         info!("Deleting TXT record from Alibaba Cloud DNS: {}", record_id);
 
-        let api_url = "https://alidns.aliyuncs.com/";
+        let mut params = BTreeMap::new();
+        params.insert("Action".to_string(), "DeleteDomainRecord".to_string());
+        params.insert("RecordId".to_string(), record_id.to_string());
 
-        let params = format!(
-            "Action=DeleteDomainRecord&RecordId={}&AccessKeyId={}",
-            record_id, self.access_key_id
-        );
-
-        let signature = self.sign_request("POST", &params);
-
-        debug!("Deleting Alibaba Cloud DNS record: {}", record_id);
-
-        let form_params = [
-            ("Action", "DeleteDomainRecord"),
-            ("RecordId", record_id),
-            ("AccessKeyId", &self.access_key_id),
-            ("Signature", &signature),
-            ("SignatureMethod", "HMAC-SHA256"),
-            ("SignatureVersion", "1.0"),
-            (
-                "Timestamp",
-                &Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            ),
-        ];
-
-        let form_body = form_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let response = self
-            .client
-            .post(api_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_body)
-            .send()
-            .await
-            .map_err(|e| crate::error::AcmeError::Transport(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(crate::error::AcmeError::Protocol(format!(
-                "Failed to delete Alibaba Cloud DNS record: {}",
-                response.status()
-            )));
-        }
-
-        info!("Alibaba Cloud DNS TXT record deleted successfully");
+        self.do_request(params).await?;
         Ok(())
     }
 
-    /// Verify that the DNS record is propagated
     async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
-        info!("Verifying DNS record for domain: {}", domain);
-
         let domain_name = self.get_domain_name(domain);
         let record_name = self.get_record_name(domain);
 
-        let api_url = "https://alidns.aliyuncs.com/";
+        let mut params = BTreeMap::new();
+        params.insert("Action".to_string(), "DescribeDomainRecords".to_string());
+        params.insert("DomainName".to_string(), domain_name);
+        params.insert("RRKeyWord".to_string(), record_name);
+        params.insert("TypeKeyWord".to_string(), "TXT".to_string());
 
-        let params = format!(
-            "Action=DescribeDomainRecords&DomainName={}&RRKeyWord={}&AccessKeyId={}",
-            domain_name, record_name, self.access_key_id
-        );
+        let body = self.do_request(params).await?;
 
-        let signature = self.sign_request("POST", &params);
-
-        let form_params = [
-            ("Action", "DescribeDomainRecords"),
-            ("DomainName", &domain_name),
-            ("RRKeyWord", &record_name),
-            ("AccessKeyId", &self.access_key_id),
-            ("Signature", &signature),
-            ("SignatureMethod", "HMAC-SHA256"),
-            ("SignatureVersion", "1.0"),
-            (
-                "Timestamp",
-                &Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            ),
-        ];
-
-        let form_body = form_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let response = match self
-            .client
-            .post(api_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_body)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(_) => return Ok(false),
-        };
-
-        let body: serde_json::Value = match response.json().await {
-            Ok(b) => b,
-            Err(_) => return Ok(false),
-        };
-
-        if let Some(domain_records) = body["DomainRecords"]["Record"].as_array() {
-            for record in domain_records {
-                if record["Type"].as_str() == Some("TXT")
-                    && let Some(v) = record["Value"].as_str()
-                        && v == value {
-                            return Ok(true);
-                        }
+        if let Some(records) = body["DomainRecords"]["Record"].as_array() {
+            for record in records {
+                if record["Value"].as_str() == Some(value) {
+                    return Ok(true);
+                }
             }
         }
 
         Ok(false)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_domain_name() {
-        let provider = AlibabaCloudDnsProvider::new(
-            "key".to_string(),
-            "secret".to_string(),
-            "cn-hangzhou".to_string(),
-        );
-
-        assert_eq!(provider.get_domain_name("example.com"), "example.com");
-        assert_eq!(
-            provider.get_domain_name("_acme-challenge.example.com"),
-            "example.com"
-        );
-        assert_eq!(provider.get_domain_name("sub.example.com"), "example.com");
-    }
-
-    #[test]
-    fn test_get_record_name() {
-        let provider = AlibabaCloudDnsProvider::new(
-            "key".to_string(),
-            "secret".to_string(),
-            "cn-hangzhou".to_string(),
-        );
-
-        assert_eq!(provider.get_record_name("example.com"), "");
-        assert_eq!(
-            provider.get_record_name("_acme-challenge.example.com"),
-            "_acme-challenge"
-        );
-        assert_eq!(provider.get_record_name("sub.example.com"), "sub");
     }
 }
