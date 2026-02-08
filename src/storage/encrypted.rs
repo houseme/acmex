@@ -1,9 +1,10 @@
+use super::StorageBackend;
+use crate::error::{AcmeError, Result};
 /// Encrypted storage wrapper.
 /// This module provides a transparent encryption layer for any `StorageBackend`,
 /// using AES-256-GCM to protect sensitive data at rest.
 use async_trait::async_trait;
-use super::StorageBackend;
-use crate::error::{AcmeError, Result};
+use rand::Rng;
 
 /// A storage wrapper that encrypts data before storing it in the underlying backend.
 /// It uses AES-256-GCM with a unique 12-byte nonce for each entry.
@@ -27,15 +28,15 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(feature = "aws-lc-rs")]
         {
-            use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-            use rand::RngCore;
+            use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+            use rand::RngExt;
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
             let key = LessSafeKey::new(unbound);
 
             let mut nonce_bytes = [0u8; 12];
-            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            rand::rng().fill_bytes(&mut nonce_bytes);
             let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
             let mut in_out = plaintext.to_vec();
@@ -52,8 +53,8 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
-            use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
             use rand::RngCore;
+            use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
@@ -93,7 +94,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(feature = "aws-lc-rs")]
         {
-            use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+            use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
@@ -113,7 +114,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
-            use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+            use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
