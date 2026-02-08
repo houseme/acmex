@@ -1,24 +1,31 @@
-//! 重试策略 - 指数退避、线性退避等
-
+/// Retry strategies and policies for network requests.
+/// This module provides various algorithms for calculating retry delays,
+/// such as exponential backoff and linear backoff, to improve system resilience.
 use std::time::Duration;
 
-/// 重试策略枚举
+/// Enumeration of supported retry strategies.
 #[derive(Debug, Clone)]
 pub enum RetryStrategy {
-    /// 指数退避 (初始延迟，最大延迟，倍数)
+    /// Exponential backoff: delay increases exponentially with each attempt.
+    /// Formula: `initial_delay * multiplier ^ attempt`, capped at `max_delay`.
     ExponentialBackoff {
+        /// The delay for the first retry.
         initial_delay: Duration,
+        /// The maximum allowable delay between retries.
         max_delay: Duration,
+        /// The factor by which the delay increases each time.
         multiplier: f64,
     },
-    /// 线性退避 (初始延迟，增量)
+    /// Linear backoff: delay increases by a fixed increment with each attempt.
     LinearBackoff {
+        /// The delay for the first retry.
         initial_delay: Duration,
+        /// The amount to add to the delay for each subsequent attempt.
         increment: Duration,
     },
-    /// 固定延迟
+    /// Fixed delay: the same delay is used for every retry attempt.
     FixedDelay(Duration),
-    /// 不重试
+    /// No retry: requests are never retried.
     NoRetry,
 }
 
@@ -33,9 +40,9 @@ impl Default for RetryStrategy {
 }
 
 impl RetryStrategy {
-    /// 计算第 N 次重试的延迟
+    /// Calculates the delay duration for the specified attempt number (0-indexed).
     pub fn delay(&self, attempt: u32) -> Duration {
-        match self {
+        let d = match self {
             RetryStrategy::ExponentialBackoff {
                 initial_delay,
                 max_delay,
@@ -51,20 +58,23 @@ impl RetryStrategy {
             } => initial_delay.saturating_add(increment.saturating_mul(attempt)),
             RetryStrategy::FixedDelay(delay) => *delay,
             RetryStrategy::NoRetry => Duration::ZERO,
-        }
+        };
+
+        tracing::debug!("Calculated retry delay for attempt {}: {:?}", attempt, d);
+        d
     }
 }
 
-/// 重试策略配置
+/// Configuration for a retry policy, defining when and how to retry failed requests.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
-    /// 重试次数
+    /// The maximum number of retry attempts allowed.
     pub max_retries: u32,
-    /// 重试策略
+    /// The strategy used to calculate delays between retries.
     pub strategy: RetryStrategy,
-    /// 是否重试 4xx 错误
+    /// Whether to retry requests that failed with a 4xx client error.
     pub retry_on_client_error: bool,
-    /// 是否重试 5xx 错误
+    /// Whether to retry requests that failed with a 5xx server error.
     pub retry_on_server_error: bool,
 }
 
@@ -80,20 +90,29 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// 检查是否应该重试
+    /// Determines whether a request should be retried based on the status code and attempt count.
     pub fn should_retry(&self, status_code: u16, attempt: u32) -> bool {
         if attempt >= self.max_retries {
+            tracing::warn!("Maximum retry attempts ({}) reached", self.max_retries);
             return false;
         }
 
-        match status_code {
+        let retry = match status_code {
             400..=499 => self.retry_on_client_error,
             500..=599 => self.retry_on_server_error,
             _ => false,
+        };
+
+        if retry {
+            tracing::info!("Request failed with status {}, scheduling retry attempt {}", status_code, attempt + 1);
+        } else {
+            tracing::debug!("Request failed with status {}, no retry scheduled", status_code);
         }
+
+        retry
     }
 
-    /// 获取重试延迟
+    /// Returns the delay duration for the specified retry attempt.
     pub fn retry_delay(&self, attempt: u32) -> Duration {
         self.strategy.delay(attempt)
     }
