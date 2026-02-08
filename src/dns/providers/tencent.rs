@@ -6,10 +6,10 @@
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Tencent Cloud DNS Provider configuration
 #[derive(Debug, Clone)]
@@ -76,12 +76,16 @@ impl TencentCloudDnsProvider {
 
         // 3. Signature
         let hmac_sha256 = |key: &[u8], msg: &[u8]| -> Vec<u8> {
-            let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC can take key of any size");
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(key).expect("HMAC can take key of any size");
             mac.update(msg);
             mac.finalize().into_bytes().to_vec()
         };
 
-        let secret_date = hmac_sha256(format!("TC3{}", self.secret_key).as_bytes(), date.as_bytes());
+        let secret_date = hmac_sha256(
+            format!("TC3{}", self.secret_key).as_bytes(),
+            date.as_bytes(),
+        );
         let secret_service = hmac_sha256(&secret_date, service.as_bytes());
         let secret_signing = hmac_sha256(&secret_service, b"tc3_request");
         let signature = hex::encode(hmac_sha256(&secret_signing, string_to_sign.as_bytes()));
@@ -107,7 +111,11 @@ impl TencentCloudDnsProvider {
             .unwrap_or("")
             .to_string();
         if name.is_empty() && full_domain != domain {
-             full_domain.strip_suffix(&domain).unwrap_or("").trim_end_matches('.').to_string()
+            full_domain
+                .strip_suffix(&domain)
+                .unwrap_or("")
+                .trim_end_matches('.')
+                .to_string()
         } else {
             name
         }
@@ -129,7 +137,8 @@ impl DnsProvider for TencentCloudDnsProvider {
             "RecordLine": "默认",
             "Value": value,
             "TTL": 600
-        }).to_string();
+        })
+        .to_string();
 
         let service = "dnspod";
         let action = "CreateRecord";
@@ -138,10 +147,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let date = Zoned::now().strftime("%Y-%m-%d").to_string();
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
-            self.secret_id,
-            date,
-            service,
-            signature
+            self.secret_id, date, service, signature
         );
 
         let response = self
@@ -157,9 +163,10 @@ impl DnsProvider for TencentCloudDnsProvider {
             .await
             .map_err(|e| AcmeError::transport(format!("Tencent API failed: {}", e)))?;
 
-        let body: serde_json::Value = response.json().await.map_err(|e| {
-            AcmeError::protocol(format!("Failed to parse Tencent response: {}", e))
-        })?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AcmeError::protocol(format!("Failed to parse Tencent response: {}", e)))?;
 
         if let Some(err) = body["Response"]["Error"].as_object() {
             return Err(AcmeError::protocol(format!(
@@ -194,10 +201,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let date = Zoned::now().strftime("%Y-%m-%d").to_string();
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
-            self.secret_id,
-            date,
-            service,
-            signature
+            self.secret_id, date, service, signature
         );
 
         let response = self
@@ -214,7 +218,9 @@ impl DnsProvider for TencentCloudDnsProvider {
             .map_err(|e| AcmeError::transport(format!("Tencent API delete failed: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(AcmeError::protocol("Tencent DNS delete request failed".to_string()));
+            return Err(AcmeError::protocol(
+                "Tencent DNS delete request failed".to_string(),
+            ));
         }
 
         Ok(())
@@ -228,7 +234,8 @@ impl DnsProvider for TencentCloudDnsProvider {
             "Domain": domain_name,
             "Subdomain": record_name,
             "RecordType": "TXT"
-        }).to_string();
+        })
+        .to_string();
 
         let service = "dnspod";
         let action = "DescribeRecordList";
@@ -237,10 +244,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let date = Zoned::now().strftime("%Y-%m-%d").to_string();
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
-            self.secret_id,
-            date,
-            service,
-            signature
+            self.secret_id, date, service, signature
         );
 
         let response = self
@@ -256,9 +260,10 @@ impl DnsProvider for TencentCloudDnsProvider {
             .await
             .map_err(|e| AcmeError::transport(format!("Tencent API verify failed: {}", e)))?;
 
-        let body: serde_json::Value = response.json().await.map_err(|e| {
-            AcmeError::protocol(format!("Failed to parse Tencent response: {}", e))
-        })?;
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AcmeError::protocol(format!("Failed to parse Tencent response: {}", e)))?;
 
         if let Some(records) = body["Response"]["RecordList"].as_array() {
             for record in records {

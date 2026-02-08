@@ -27,7 +27,7 @@ prometheus = "0.14"
 rand = "0.10.0-rc.9"
 rcgen = { version = "0.14", features = ["crypto", "aws_lc_rs", "pem"], default-features = false }
 regex = "1.12"
-reqwest = { version = "0.13", features = ["json", "rustls", "http2", "gzip"] }
+reqwest = { version = "0.13", features = ["json", "gzip", "query", "form", "blocking"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }
@@ -47,7 +47,7 @@ opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic"] }
 urlencoding = "2.1"
 x509-parser = "0.18"
 
-# Encrypted backend - aws-lc-rs is preferred
+# 加密后端 - 优先使用 aws-lc-rs
 [dependencies.aws-lc-rs]
 version = "1.15.4"
 optional = true
@@ -57,7 +57,7 @@ features = ["fips"]
 version = "0.17"
 optional = true
 
-# DNS resolution
+# DNS 解析
 [dependencies.hickory-proto]
 version = "0.25"
 
@@ -70,11 +70,11 @@ optional = true
 version = "1.106"
 optional = true
 
-# HTTP server
+# HTTP 服务器
 [dependencies.hyper]
 version = "1.8"
 
-# Redis Optional Support
+# Redis 可选支持
 [dependencies.redis]
 version = "1.0.3"
 features = ["tokio-comp", "connection-manager", "aio"]

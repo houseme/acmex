@@ -104,13 +104,12 @@ impl GoogleCloudDnsProvider {
 
         if let Some(zones) = body["managedZones"].as_array() {
             for zone in zones {
-                if let Some(dns_name) = zone["dnsName"].as_str() {
-                    if dns_name == zone_dns_name {
+                if let Some(dns_name) = zone["dnsName"].as_str()
+                    && dns_name == zone_dns_name {
                         let name = zone["name"].as_str().unwrap_or_default().to_string();
                         debug!("Found managed zone: {} for DNS name: {}", name, dns_name);
                         return Ok(name);
                     }
-                }
             }
         }
 
@@ -175,7 +174,7 @@ impl DnsProvider for GoogleCloudDnsProvider {
         let zone_name = record_id; // We stored zone_name as record_id
 
         // To delete in GCP, we first need to fetch the current rrdatas to match exactly
-        let get_url = format!(
+        let _get_url = format!(
             "https://dns.googleapis.com/dns/v1/projects/{}/managedZones/{}/rrsets/{}",
             self.project_id, zone_name, record_name
         );
