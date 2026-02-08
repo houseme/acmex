@@ -1,39 +1,32 @@
-//! Multiple CA (Certificate Authority) support for AcmeX
-//!
-//! This module provides support for multiple certificate authorities:
-//! - Let's Encrypt (default)
-//! - Google Trust Services (feature: `google-ca`)
-//! - ZeroSSL (feature: `zerossl-ca`)
-//! - Custom CA endpoints
-
+/// Multiple Certificate Authority (CA) support for AcmeX.
+/// This module provides configuration and endpoint discovery for various ACME providers,
+/// including Let's Encrypt, Google Trust Services, and ZeroSSL.
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Supported Certificate Authorities
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+/// Supported Certificate Authorities.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
 pub enum CertificateAuthority {
-    /// Let's Encrypt (default)
+    /// Let's Encrypt (default).
     #[serde(rename = "letsencrypt")]
     #[default]
     LetsEncrypt,
 
-    /// Google Trust Services
+    /// Google Trust Services.
     #[cfg(feature = "google-ca")]
     #[serde(rename = "google")]
     Google,
 
-    /// ZeroSSL
+    /// ZeroSSL.
     #[cfg(feature = "zerossl-ca")]
     #[serde(rename = "zerossl")]
     ZeroSSL,
 
-    /// Custom CA endpoint
+    /// A custom CA endpoint.
     #[serde(rename = "custom")]
     Custom,
 }
-
 
 impl fmt::Display for CertificateAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -48,44 +41,43 @@ impl fmt::Display for CertificateAuthority {
     }
 }
 
-/// CA Configuration
+/// Configuration for a specific Certificate Authority.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CAConfig {
-    /// Certificate Authority type
+    /// The type of Certificate Authority.
     pub ca: CertificateAuthority,
 
-    /// Environment: production or staging
+    /// The environment (Production or Staging).
     #[serde(default)]
     pub environment: Environment,
 
-    /// Custom CA endpoint URL (only used when ca = Custom)
+    /// The URL of the custom CA directory (only used when `ca` is `Custom`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_url: Option<String>,
 
-    /// Email for notifications
+    /// Contact email address for account notifications.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contact_email: Option<String>,
 }
 
-/// ACME Environment
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// ACME Environment types.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
-#[derive(Default)]
 pub enum Environment {
-    /// Production environment
+    /// Production environment for real certificates.
     #[serde(rename = "production")]
     #[default]
     Production,
 
-    /// Staging/Testing environment
+    /// Staging environment for testing and development.
     #[serde(rename = "staging")]
     Staging,
 }
 
-
 impl CAConfig {
-    /// Create a new CA configuration
+    /// Creates a new `CAConfig` with the specified CA and environment.
     pub fn new(ca: CertificateAuthority, environment: Environment) -> Self {
+        tracing::debug!("Creating new CAConfig for {} ({:?})", ca, environment);
         Self {
             ca,
             environment,
@@ -94,51 +86,52 @@ impl CAConfig {
         }
     }
 
-    /// Set custom CA URL
+    /// Sets a custom CA directory URL.
     pub fn with_custom_url(mut self, url: String) -> Self {
         self.custom_url = Some(url);
         self
     }
 
-    /// Set contact email
+    /// Sets the contact email for the CA account.
     pub fn with_contact_email(mut self, email: String) -> Self {
         self.contact_email = Some(email);
         self
     }
 
-    /// Get the ACME directory URL for this CA
+    /// Returns the ACME directory URL for the configured CA and environment.
     pub fn directory_url(&self) -> Result<String, String> {
-        match self.ca {
-            // Let's Encrypt
+        let url = match self.ca {
             CertificateAuthority::LetsEncrypt => match self.environment {
                 Environment::Production => {
-                    Ok("https://acme-v02.api.letsencrypt.org/directory".to_string())
+                    "https://acme-v02.api.letsencrypt.org/directory".to_string()
                 }
                 Environment::Staging => {
-                    Ok("https://acme-staging-v02.api.letsencrypt.org/directory".to_string())
+                    "https://acme-staging-v02.api.letsencrypt.org/directory".to_string()
                 }
             },
 
             #[cfg(feature = "google-ca")]
             CertificateAuthority::Google => {
-                // Google doesn't have a separate staging environment
-                Ok("https://dv.google.com/acme/directory".to_string())
+                "https://dv.google.com/acme/directory".to_string()
             }
 
             #[cfg(feature = "zerossl-ca")]
-            CertificateAuthority::ZeroSSL => Ok("https://acme.zerossl.com/v2/DV90".to_string()),
+            CertificateAuthority::ZeroSSL => "https://acme.zerossl.com/v2/DV90".to_string(),
 
-            // Custom CA
             CertificateAuthority::Custom => self
                 .custom_url
                 .clone()
-                .ok_or_else(|| "Custom CA requires custom_url to be set".to_string()),
-        }
+                .ok_or_else(|| "Custom CA requires custom_url to be set".to_string())?,
+        };
+
+        tracing::debug!("Resolved directory URL: {}", url);
+        Ok(url)
     }
 
-    /// Validate the configuration
+    /// Validates the CA configuration.
     pub fn validate(&self) -> Result<(), String> {
         if self.ca == CertificateAuthority::Custom && self.custom_url.is_none() {
+            tracing::error!("Validation failed: Custom CA selected but no URL provided");
             return Err("Custom CA requires custom_url to be set".to_string());
         }
         Ok(())
@@ -149,12 +142,9 @@ impl fmt::Display for CAConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} ({})",
+            "{} ({:?})",
             self.ca,
-            match self.environment {
-                Environment::Production => "Production",
-                Environment::Staging => "Staging",
-            }
+            self.environment
         )
     }
 }
