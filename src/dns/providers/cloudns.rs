@@ -1,13 +1,14 @@
-//! CloudNS Provider implementation for AcmeX
+//! ClouDNS Provider implementation for AcmeX
 //!
-//! This module provides DNS record management for CloudNS.
+//! This module provides DNS record management for ClouDNS.
 
 use crate::challenge::DnsProvider;
-use crate::error::Result;
+use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
-use tracing::{debug, info};
+use serde::Deserialize;
+use tracing::{debug, info, error};
 
-/// CloudNS DNS Provider configuration
+/// ClouDNS DNS Provider configuration
 #[derive(Debug, Clone)]
 pub struct ClouDnsProvider {
     auth_id: String,
@@ -16,7 +17,7 @@ pub struct ClouDnsProvider {
 }
 
 impl ClouDnsProvider {
-    /// Create a new CloudNS provider instance
+    /// Create a new ClouDNS provider instance
     pub fn new(auth_id: String, auth_password: String) -> Self {
         Self {
             auth_id,
@@ -24,62 +25,128 @@ impl ClouDnsProvider {
             client: reqwest::Client::new(),
         }
     }
+
+    fn get_domain_and_host(&self, domain: &str) -> (String, String) {
+        let parts: Vec<&str> = domain.split('.').collect();
+        if parts.len() > 2 {
+            let domain_name = parts[parts.len() - 2..].join(".");
+            let host = domain.strip_suffix(&format!(".{}", domain_name)).unwrap_or("").to_string();
+            (domain_name, host)
+        } else {
+            (domain.to_string(), "".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClouDnsResponse {
+    status: String,
+    #[serde(rename = "statusDescription")]
+    status_description: Option<String>,
+    #[serde(rename = "recordID")]
+    record_id: Option<serde_json::Value>, // Can be string or number
 }
 
 #[async_trait]
 impl DnsProvider for ClouDnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        info!("Creating TXT record in CloudNS for domain: {}", domain);
+        info!("Creating TXT record in ClouDNS: {}", domain);
 
-        // Host is usually the part before domain
-        let (domain_name, host) = if let Some(idx) = domain.find('.') {
-            (&domain[idx + 1..], &domain[..idx])
-        } else {
-            (domain, "")
+        let (domain_name, host) = self.get_domain_and_host(domain);
+
+        let url = "https://api.cloudns.net/index.php";
+        let params = [
+            ("Action", "addRecord"),
+            ("auth-id", &self.auth_id),
+            ("auth-password", &self.auth_password),
+            ("domain-name", &domain_name),
+            ("record-type", "TXT"),
+            ("host", &host),
+            ("record", value),
+            ("ttl", "60"),
+        ];
+
+        let response = self.client.get(url).query(&params).send().await
+            .map_err(|e| AcmeError::transport(format!("ClouDNS API failed: {}", e)))?;
+
+        let body: ClouDnsResponse = response.json().await.map_err(|e| {
+            AcmeError::protocol(format!("Failed to parse ClouDNS response: {}", e))
+        })?;
+
+        if body.status != "Success" {
+            let desc = body.status_description.unwrap_or_else(|| "Unknown error".to_string());
+            error!("ClouDNS create record error: {}", desc);
+            return Err(AcmeError::protocol(format!("ClouDNS error: {}", desc)));
+        }
+
+        let record_id = body.record_id.ok_or_else(|| AcmeError::protocol("No recordID in ClouDNS response".to_string()))?;
+        let id_str = match record_id {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return Err(AcmeError::protocol("Invalid recordID format".to_string())),
         };
 
-        let url = format!(
-            "https://api.cloudns.net/index.php?Action=addRecord&auth-id={}&auth-password={}&domain-name={}&record-type=TXT&host={}&record={}",
-            self.auth_id, self.auth_password, domain_name, host, value
-        );
-
-        // Placeholder for real REST call
-        debug!("CloudNS API request: {}", url);
-
-        Ok("cloudns-record-id".to_string())
+        info!("ClouDNS TXT record created successfully, ID: {}", id_str);
+        Ok(id_str)
     }
 
     async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()> {
-        info!("Deleting TXT record from CloudNS: {}", record_id);
+        info!("Deleting TXT record from ClouDNS: {}", record_id);
 
-        let (domain_name, _) = if let Some(idx) = domain.find('.') {
-            (&domain[idx + 1..], &domain[..idx])
-        } else {
-            (domain, "")
-        };
+        let (domain_name, _) = self.get_domain_and_host(domain);
 
-        let url = format!(
-            "https://api.cloudns.net/index.php?Action=deleteRecord&auth-id={}&auth-password={}&domain-name={}&record-id={}",
-            self.auth_id, self.auth_password, domain_name, record_id
-        );
+        let url = "https://api.cloudns.net/index.php";
+        let params = [
+            ("Action", "deleteRecord"),
+            ("auth-id", &self.auth_id),
+            ("auth-password", &self.auth_password),
+            ("domain-name", &domain_name),
+            ("record-id", record_id),
+        ];
 
-        let response = self.client.get(&url).send().await.map_err(|e| {
-            crate::error::AcmeError::transport(format!("CloudNS API delete failed: {}", e))
+        let response = self.client.get(url).query(&params).send().await
+            .map_err(|e| AcmeError::transport(format!("ClouDNS API delete failed: {}", e)))?;
+
+        let body: ClouDnsResponse = response.json().await.map_err(|e| {
+            AcmeError::protocol(format!("Failed to parse ClouDNS response: {}", e))
         })?;
 
-        if !response.status().is_success() {
-            return Err(crate::error::AcmeError::protocol(format!(
-                "CloudNS delete error: HTTP {}",
-                response.status()
-            )));
+        if body.status != "Success" {
+            let desc = body.status_description.unwrap_or_else(|| "Unknown error".to_string());
+            error!("ClouDNS delete record error: {}", desc);
+            return Err(AcmeError::protocol(format!("ClouDNS delete error: {}", desc)));
         }
 
-        info!("CloudNS TXT record deleted successfully");
+        info!("ClouDNS TXT record deleted successfully");
         Ok(())
     }
 
-    async fn verify_record(&self, _domain: &str, _value: &str) -> Result<bool> {
-        // CloudNS API implementation placeholder
-        Ok(true)
+    async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
+        debug!("Verifying ClouDNS record for: {}", domain);
+        let (domain_name, host) = self.get_domain_and_host(domain);
+
+        let url = "https://api.cloudns.net/index.php";
+        let params = [
+            ("Action", "getRecords"),
+            ("auth-id", &self.auth_id),
+            ("auth-password", &self.auth_password),
+            ("domain-name", &domain_name),
+            ("host", &host),
+            ("type", "TXT"),
+        ];
+
+        let response = self.client.get(url).query(&params).send().await
+            .map_err(|e| AcmeError::transport(format!("ClouDNS API list failed: {}", e)))?;
+
+        let records: serde_json::Value = response.json().await.unwrap_or_default();
+        if let Some(records_map) = records.as_object() {
+            for (_, record) in records_map {
+                if record["record"].as_str() == Some(value) {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
