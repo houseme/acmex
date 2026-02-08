@@ -1,75 +1,78 @@
 [package]
 name = "acmex"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.92.0"
-description = "A comprehensive ACME v2 client for obtaining TLS certificates"
+description = "AcmeX: High-performance, extensible ACME v2 (RFC 8555) client and server in Rust, supporting multiple DNS providers, storage backends, and crypto libraries."
 license = "MIT OR Apache-2.0"
 authors = ["houseme <housemecn@gmail.com>"]
 homepage = "https://houseme.github.io/acmex"
 repository = "https://github.com/houseme/acmex"
 documentation = "https://docs.rs/acmex"
-keywords = ["acme", "tls", "certificate", "https"]
+keywords = ["acme", "tls", "certificate", "https", "letsencrypt"]
 readme = "README.md"
 categories = ["web-programming", "api-bindings", "asynchronous", "cryptography", "network-programming"]
 
 [dependencies]
+# Core Async & Runtime
+tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
+
+# Web & API Server
 axum = { version = "0.8", features = ["macros"] }
-base64 = "0.22"
-clap = { version = "4.5", features = ["derive"] }
-jiff = { version = "0.2.19", features = ["serde"] }
-hex = "0.4"
-hickory-resolver = { version = "0.25", features = ["serde"] }
-hmac = { version = "0.13.0-rc.5" }
-pem = "3.0"
-prometheus = "0.14"
-rand = "0.10.0-rc.9"
-rcgen = { version = "0.14", features = ["crypto", "aws_lc_rs", "pem"], default-features = false }
-regex = "1.12"
 reqwest = { version = "0.13", features = ["json", "gzip", "query", "form", "blocking"] }
-rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+urlencoding = "2.1"
+
+# Cryptography & Security
+rcgen = { version = "0.14", features = ["crypto", "aws_lc_rs", "pem"], default-features = false }
+x509-parser = "0.18"
+pem = "3.0"
+base64 = "0.22"
+hex = "0.4"
+hmac = { version = "0.13.0-rc.5" }
 sha1 = "0.11.0-rc.5"
 sha2 = "0.11.0-rc.5"
-thiserror = "2.0"
-toml = "0.9.11"
-tokio = { version = "1.49", features = ["full"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 tokio-rustls = "0.26"
+
+# Serialization & Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9.11"
+
+# Observability & Metrics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-opentelemetry = "0.32"
 opentelemetry = { version = "0.31", features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
-urlencoding = "2.1"
-x509-parser = "0.18"
+prometheus = "0.14"
 
-# Crypto Backends - aws-lc-rs is preferred
-[dependencies.aws-lc-rs]
-version = "1.15.4"
-optional = true
-features = ["fips"]
+# DNS & Networking
+hickory-resolver = { version = "0.25", features = ["serde"] }
 
-[dependencies.ring]
-version = "0.17"
-optional = true
+# Utilities
+clap = { version = "4.5", features = ["derive"] }
+jiff = { version = "0.2.19", features = ["serde"] }
+rand = "0.10.0-rc.9"
+regex = "1.12"
 
-# AWS SDK for Route53
-[dependencies.aws-config]
-version = "1.8"
-optional = true
+# Error Handling
+thiserror = "2.0"
 
-[dependencies.aws-sdk-route53]
-version = "1.106"
-optional = true
+# --- Optional Dependencies & Feature-gated Backends ---
 
-# Optional Redis support
-[dependencies.redis]
-version = "1.0.3"
-features = ["tokio-comp", "connection-manager", "aio"]
-optional = true
+# Crypto Backends
+aws-lc-rs = { version = "1.15.4", optional = true, features = ["fips"] }
+ring = { version = "0.17", optional = true }
+
+# AWS Route53 Support
+aws-config = { version = "1.8", optional = true }
+aws-sdk-route53 = { version = "1.106", optional = true }
+
+# Storage Backends
+redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
 
 [features]
 default = ["aws-lc-rs"]
