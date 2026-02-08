@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 #[cfg(feature = "dns-route53")]
 use aws_sdk_route53::types::{
-    Change, ChangeAction, ChangeBatch, RrType, ResourceRecord, ResourceRecordSet,
+    Change, ChangeAction, ChangeBatch, ResourceRecord, ResourceRecordSet, RrType,
 };
 
 /// Configuration for the Route53 DNS provider.
@@ -31,7 +31,10 @@ impl Route53DnsProvider {
     /// This method initializes the AWS SDK client using default credentials.
     #[cfg(feature = "dns-route53")]
     pub async fn new(config: Route53Config) -> Self {
-        tracing::debug!("Initializing Route53DnsProvider for Hosted Zone: {}", config.hosted_zone_id);
+        tracing::debug!(
+            "Initializing Route53DnsProvider for Hosted Zone: {}",
+            config.hosted_zone_id
+        );
         let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_route53::Client::new(&sdk_config);
         Self { config, client }
@@ -70,7 +73,10 @@ impl DnsProvider for Route53DnsProvider {
                                 .value(format!("\"{}\"", value))
                                 .build()
                                 .map_err(|e| {
-                                    tracing::error!("Failed to build Route53 resource record: {}", e);
+                                    tracing::error!(
+                                        "Failed to build Route53 resource record: {}",
+                                        e
+                                    );
                                     AcmeError::configuration(format!("Route53 build error: {}", e))
                                 })?,
                         )
@@ -86,10 +92,13 @@ impl DnsProvider for Route53DnsProvider {
                     AcmeError::configuration(format!("Route53 build error: {}", e))
                 })?;
 
-            let batch = ChangeBatch::builder().changes(change).build().map_err(|e| {
-                tracing::error!("Failed to build Route53 change batch: {}", e);
-                AcmeError::configuration(format!("Route53 build error: {}", e))
-            })?;
+            let batch = ChangeBatch::builder()
+                .changes(change)
+                .build()
+                .map_err(|e| {
+                    tracing::error!("Failed to build Route53 change batch: {}", e);
+                    AcmeError::configuration(format!("Route53 build error: {}", e))
+                })?;
 
             self.client
                 .change_resource_record_sets()
@@ -102,7 +111,10 @@ impl DnsProvider for Route53DnsProvider {
                     AcmeError::transport(format!("Route53 error: {}", e))
                 })?;
 
-            tracing::info!("Successfully submitted Route53 record change for {}", domain);
+            tracing::info!(
+                "Successfully submitted Route53 record change for {}",
+                domain
+            );
             // Return the value as the record_id so we can find it for deletion
             Ok(value.to_string())
         }
@@ -138,17 +150,22 @@ impl DnsProvider for Route53DnsProvider {
                             ResourceRecord::builder()
                                 .value(format!("\"{}\"", record_id))
                                 .build()
-                                .map_err(|e| AcmeError::configuration(format!("Route53 build error: {}", e)))?,
+                                .map_err(|e| {
+                                    AcmeError::configuration(format!("Route53 build error: {}", e))
+                                })?,
                         )
                         .build()
-                        .map_err(|e| AcmeError::configuration(format!("Route53 build error: {}", e)))?,
+                        .map_err(|e| {
+                            AcmeError::configuration(format!("Route53 build error: {}", e))
+                        })?,
                 )
                 .build()
                 .map_err(|e| AcmeError::configuration(format!("Route53 build error: {}", e)))?;
 
-            let batch = ChangeBatch::builder().changes(change).build().map_err(|e| {
-                AcmeError::configuration(format!("Route53 build error: {}", e))
-            })?;
+            let batch = ChangeBatch::builder()
+                .changes(change)
+                .build()
+                .map_err(|e| AcmeError::configuration(format!("Route53 build error: {}", e)))?;
 
             self.client
                 .change_resource_record_sets()
@@ -161,7 +178,10 @@ impl DnsProvider for Route53DnsProvider {
                     AcmeError::transport(format!("Route53 deletion error: {}", e))
                 })?;
 
-            tracing::info!("Successfully submitted Route53 record deletion for {}", domain);
+            tracing::info!(
+                "Successfully submitted Route53 record deletion for {}",
+                domain
+            );
             Ok(())
         }
         #[cfg(not(feature = "dns-route53"))]

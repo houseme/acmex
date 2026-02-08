@@ -3,6 +3,8 @@ use acmex::prelude::*;
 use acmex::renewal::RenewalHook;
 use acmex::scheduler::AdvancedRenewalScheduler;
 use acmex::storage::{CertificateStore, MemoryStorage};
+use std::sync::Arc;
+use std::time::Duration;
 
 struct MyRenewalHook;
 

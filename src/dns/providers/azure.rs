@@ -30,7 +30,10 @@ impl AzureDnsProvider {
         client_secret: String,
         tenant_id: String,
     ) -> Self {
-        tracing::debug!("Initializing AzureDnsProvider for Subscription: {}", subscription_id);
+        tracing::debug!(
+            "Initializing AzureDnsProvider for Subscription: {}",
+            subscription_id
+        );
         Self {
             subscription_id,
             resource_group,
@@ -43,7 +46,10 @@ impl AzureDnsProvider {
 
     /// Obtains an Azure access token using the Client Credentials Flow.
     async fn get_access_token(&self) -> Result<String> {
-        tracing::debug!("Requesting Azure access token for Tenant: {}", self.tenant_id);
+        tracing::debug!(
+            "Requesting Azure access token for Tenant: {}",
+            self.tenant_id
+        );
         let token_url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
             self.tenant_id
@@ -155,7 +161,9 @@ impl DnsProvider for AzureDnsProvider {
 
         if !response.status().is_success() {
             let error_body: serde_json::Value = response.json().await.unwrap_or_default();
-            let message = error_body["error"]["message"].as_str().unwrap_or("Unknown error");
+            let message = error_body["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown error");
             tracing::error!("Azure DNS API error: {}", message);
             return Err(AcmeError::protocol(format!(
                 "Azure DNS create error: {}",
@@ -191,7 +199,10 @@ impl DnsProvider for AzureDnsProvider {
             })?;
 
         if !response.status().is_success() {
-            tracing::error!("Azure DNS API deletion failed with status: {}", response.status());
+            tracing::error!(
+                "Azure DNS API deletion failed with status: {}",
+                response.status()
+            );
             return Err(AcmeError::protocol(format!(
                 "Azure DNS delete failed with status: {}",
                 response.status()
@@ -226,7 +237,10 @@ impl DnsProvider for AzureDnsProvider {
             })?;
 
         if !response.status().is_success() {
-            tracing::warn!("Azure DNS record verification returned status: {}", response.status());
+            tracing::warn!(
+                "Azure DNS record verification returned status: {}",
+                response.status()
+            );
             return Ok(false);
         }
 
@@ -260,9 +274,16 @@ mod tests {
     #[test]
     fn test_parse_zone_name() {
         let provider = AzureDnsProvider::new(
-            "sub".to_string(), "rg".to_string(), "c".to_string(), "s".to_string(), "t".to_string()
+            "sub".to_string(),
+            "rg".to_string(),
+            "c".to_string(),
+            "s".to_string(),
+            "t".to_string(),
         );
         assert_eq!(provider.parse_zone_name("example.com"), "example.com");
-        assert_eq!(provider.parse_zone_name("_acme-challenge.example.com"), "example.com");
+        assert_eq!(
+            provider.parse_zone_name("_acme-challenge.example.com"),
+            "example.com"
+        );
     }
 }

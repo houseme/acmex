@@ -40,7 +40,7 @@ impl MiddlewareChain {
     }
 
     /// Adds a middleware to the end of the chain.
-    pub fn add<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+    pub fn push<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.middlewares.push(Box::new(middleware));
         self
     }
@@ -150,7 +150,11 @@ impl RetryMiddleware {
 #[async_trait]
 impl Middleware for RetryMiddleware {
     async fn on_error(&self, url: &str, error: &crate::error::AcmeError) -> Result<()> {
-        tracing::debug!("Retry middleware intercepted error for {}: {:?}", url, error);
+        tracing::debug!(
+            "Retry middleware intercepted error for {}: {:?}",
+            url,
+            error
+        );
         Ok(())
     }
 }
@@ -179,7 +183,7 @@ mod tests {
             called: called.clone(),
         };
 
-        let chain = MiddlewareChain::new().add(middleware);
+        let chain = MiddlewareChain::new().push(middleware);
         chain.before_request("http://example.com", "GET").await.ok();
 
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));

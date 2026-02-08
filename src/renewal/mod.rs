@@ -68,7 +68,10 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
 
     /// Starts the renewal scheduler loop. This method runs indefinitely.
     pub async fn run(mut self, domains_list: Vec<Vec<String>>) -> Result<()> {
-        tracing::info!("Starting SimpleRenewalScheduler loop with {} domain sets", domains_list.len());
+        tracing::info!(
+            "Starting SimpleRenewalScheduler loop with {} domain sets",
+            domains_list.len()
+        );
         loop {
             for domains in &domains_list {
                 tracing::debug!("Checking renewal status for domains: {:?}", domains);
@@ -81,13 +84,20 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
 
                         match self.renew(domains.clone()).await {
                             Ok(bundle) => {
-                                tracing::info!("Successfully renewed certificate for domains: {:?}", domains);
+                                tracing::info!(
+                                    "Successfully renewed certificate for domains: {:?}",
+                                    domains
+                                );
                                 if let Some(hook) = &self.hook {
                                     hook.after_renewal(domains, &bundle);
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("Failed to renew certificate for {:?}: {}", domains, e);
+                                tracing::error!(
+                                    "Failed to renew certificate for {:?}: {}",
+                                    domains,
+                                    e
+                                );
                                 if let Some(hook) = &self.hook {
                                     hook.on_error(domains, &e);
                                 }
@@ -95,7 +105,10 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
                         }
                     }
                     Ok(false) => {
-                        tracing::debug!("Certificate for {:?} is still valid and not within renewal window", domains);
+                        tracing::debug!(
+                            "Certificate for {:?} is still valid and not within renewal window",
+                            domains
+                        );
                     }
                     Err(e) => {
                         tracing::error!("Error checking renewal status for {:?}: {}", domains, e);
@@ -112,7 +125,10 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
     pub async fn needs_renewal(&self, domains: &[String]) -> Result<bool> {
         let bundle = self.store.load(domains).await?;
         let Some(bundle) = bundle else {
-            tracing::info!("No existing certificate found for {:?}, triggering initial issuance", domains);
+            tracing::info!(
+                "No existing certificate found for {:?}, triggering initial issuance",
+                domains
+            );
             return Ok(true);
         };
 
@@ -121,7 +137,11 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
 
         // If expired or expiring soon
         if now >= expiry {
-            tracing::warn!("Certificate for {:?} has already expired (Expiry: {})", domains, expiry);
+            tracing::warn!(
+                "Certificate for {:?} has already expired (Expiry: {})",
+                domains,
+                expiry
+            );
             return Ok(true);
         }
 
@@ -132,7 +152,12 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
 
         let needs_renew = now >= threshold;
         if needs_renew {
-            tracing::info!("Certificate for {:?} is within the renewal window (Threshold: {}, Expiry: {})", domains, threshold, expiry);
+            tracing::info!(
+                "Certificate for {:?} is within the renewal window (Threshold: {}, Expiry: {})",
+                domains,
+                threshold,
+                expiry
+            );
         }
 
         Ok(needs_renew)
@@ -159,18 +184,15 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
 /// Extracts the expiration timestamp from a `CertificateBundle`.
 pub fn certificate_expiry_timestamp(bundle: &CertificateBundle) -> Result<Timestamp> {
     let chain = crate::order::parse_certificate_chain(&bundle.certificate_pem)?;
-    let cert_der = chain
-        .first()
-        .ok_or_else(|| {
-            tracing::error!("Certificate bundle contains an empty chain");
-            AcmeError::certificate("Empty certificate chain".to_string())
-        })?;
+    let cert_der = chain.first().ok_or_else(|| {
+        tracing::error!("Certificate bundle contains an empty chain");
+        AcmeError::certificate("Empty certificate chain".to_string())
+    })?;
 
-    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(cert_der)
-        .map_err(|e| {
-            tracing::error!("Failed to parse X.509 certificate DER: {}", e);
-            AcmeError::certificate(format!("Failed to parse certificate: {}", e))
-        })?;
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(cert_der).map_err(|e| {
+        tracing::error!("Failed to parse X.509 certificate DER: {}", e);
+        AcmeError::certificate(format!("Failed to parse certificate: {}", e))
+    })?;
 
     let not_after = cert.validity().not_after.timestamp();
     let ts = Timestamp::from_second(not_after)

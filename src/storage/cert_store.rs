@@ -60,9 +60,10 @@ impl<B: StorageBackend> CertificateStore<B> {
         let mut bundles = Vec::new();
         for key in keys {
             if let Some(bytes) = self.backend.load(&key).await?
-                && let Ok(bundle) = serde_json::from_slice(&bytes) {
-                    bundles.push(bundle);
-                }
+                && let Ok(bundle) = serde_json::from_slice(&bytes)
+            {
+                bundles.push(bundle);
+            }
         }
         Ok(bundles)
     }

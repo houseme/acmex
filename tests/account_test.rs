@@ -2,7 +2,6 @@ mod common;
 
 use acmex::prelude::*;
 use common::MockAcmeServer;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_full_account_lifecycle() -> Result<()> {

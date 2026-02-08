@@ -3,7 +3,7 @@
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
 use sha2::{Digest, Sha256};
 
@@ -83,12 +83,17 @@ impl HuaweiCloudDnsProvider {
         let (timestamp, signature) = self.sign_request("GET", url, "");
         let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
 
-        let response = self.client.get(&endpoint)
+        let response = self
+            .client
+            .get(&endpoint)
             .header("X-Sdk-Date", timestamp)
-            .header("Authorization", format!(
-                "SDK-HMAC-SHA256 Access={}, SignedHeaders=host;x-sdk-date, Signature={}",
-                self.access_key, signature
-            ))
+            .header(
+                "Authorization",
+                format!(
+                    "SDK-HMAC-SHA256 Access={}, SignedHeaders=host;x-sdk-date, Signature={}",
+                    self.access_key, signature
+                ),
+            )
             .send()
             .await
             .map_err(|e| {
@@ -112,7 +117,10 @@ impl HuaweiCloudDnsProvider {
         }
 
         tracing::error!("Huawei Cloud DNS zone not found for: {}", zone_name);
-        Err(AcmeError::protocol(format!("Zone not found for domain: {}", domain)))
+        Err(AcmeError::protocol(format!(
+            "Zone not found for domain: {}",
+            domain
+        )))
     }
 }
 
@@ -120,7 +128,10 @@ impl HuaweiCloudDnsProvider {
 impl DnsProvider for HuaweiCloudDnsProvider {
     /// Creates a TXT record in Huawei Cloud DNS.
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        tracing::info!("Creating TXT record in Huawei Cloud DNS for domain: {}", domain);
+        tracing::info!(
+            "Creating TXT record in Huawei Cloud DNS for domain: {}",
+            domain
+        );
 
         let zone_id = self.find_zone_id(domain).await?;
         let url = format!("/v2/zones/{}/recordsets", zone_id);
@@ -129,7 +140,8 @@ impl DnsProvider for HuaweiCloudDnsProvider {
             "type": "TXT",
             "records": [format!("\"{}\"", value)],
             "ttl": 300
-        }).to_string();
+        })
+        .to_string();
 
         let (timestamp, signature) = self.sign_request("POST", &url, &payload);
         let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
@@ -150,7 +162,10 @@ impl DnsProvider for HuaweiCloudDnsProvider {
             .send()
             .await
             .map_err(|e| {
-                tracing::error!("Network error during Huawei Cloud DNS record creation: {}", e);
+                tracing::error!(
+                    "Network error during Huawei Cloud DNS record creation: {}",
+                    e
+                );
                 AcmeError::transport(format!("Huawei API create failed: {}", e))
             })?;
 
@@ -170,14 +185,20 @@ impl DnsProvider for HuaweiCloudDnsProvider {
             AcmeError::protocol("Huawei response missing record ID".to_string())
         })?;
 
-        tracing::info!("Successfully created Huawei Cloud DNS TXT record with ID: {}", record_id);
+        tracing::info!(
+            "Successfully created Huawei Cloud DNS TXT record with ID: {}",
+            record_id
+        );
         // Return a composite ID: zone_id:record_id for deletion
         Ok(format!("{}:{}", zone_id, record_id))
     }
 
     /// Deletes a TXT record from Huawei Cloud DNS.
     async fn delete_txt_record(&self, _domain: &str, record_id: &str) -> Result<()> {
-        tracing::info!("Deleting TXT record from Huawei Cloud DNS, ID: {}", record_id);
+        tracing::info!(
+            "Deleting TXT record from Huawei Cloud DNS, ID: {}",
+            record_id
+        );
 
         let parts: Vec<&str> = record_id.split(':').collect();
         if parts.len() != 2 {
@@ -206,14 +227,20 @@ impl DnsProvider for HuaweiCloudDnsProvider {
             .send()
             .await
             .map_err(|e| {
-                tracing::error!("Network error during Huawei Cloud DNS record deletion: {}", e);
+                tracing::error!(
+                    "Network error during Huawei Cloud DNS record deletion: {}",
+                    e
+                );
                 AcmeError::transport(format!("Huawei API delete failed: {}", e))
             })?;
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
             tracing::error!("Huawei Cloud DNS API deletion failed: {}", error_text);
-            return Err(AcmeError::protocol(format!("Huawei delete error: {}", error_text)));
+            return Err(AcmeError::protocol(format!(
+                "Huawei delete error: {}",
+                error_text
+            )));
         }
 
         tracing::info!("Successfully deleted Huawei Cloud DNS TXT record");
@@ -222,21 +249,24 @@ impl DnsProvider for HuaweiCloudDnsProvider {
 
     /// Verifies the existence of a TXT record in Huawei Cloud DNS.
     async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
-        tracing::debug!("Verifying TXT record in Huawei Cloud DNS for domain: {}", domain);
+        tracing::debug!(
+            "Verifying TXT record in Huawei Cloud DNS for domain: {}",
+            domain
+        );
         let zone_id = match self.find_zone_id(domain).await {
             Ok(id) => id,
             Err(_) => return Ok(false),
         };
 
-        let url = format!("/v2/zones/{}/recordsets?name={}&type=TXT", zone_id, format!("{}.", domain));
+        let url = format!("/v2/zones/{zone_id}/recordsets?name={domain}&type=TXT");
         let (timestamp, signature) = self.sign_request("GET", &url, "");
-        let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
+        let endpoint = format!("https://dns.{}.myhuaweicloud.com{url}", self.region);
 
         let response = self.client.get(&endpoint)
             .header("X-Sdk-Date", timestamp)
             .header("Authorization", format!(
-                "SDK-HMAC-SHA256 Access={}, SignedHeaders=host;x-sdk-date, Signature={}",
-                self.access_key, signature
+                "SDK-HMAC-SHA256 Access={}, SignedHeaders=host;x-sdk-date, Signature={signature}",
+                self.access_key
             ))
             .send()
             .await

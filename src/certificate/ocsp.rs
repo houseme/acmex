@@ -2,8 +2,8 @@
 /// This module provides functionality to check the revocation status of a certificate
 /// by querying an OCSP responder as specified in the certificate's AIA extension.
 use crate::error::{AcmeError, Result};
-use x509_parser::prelude::*;
 use std::time::Duration;
+use x509_parser::prelude::*;
 
 /// Represents the revocation status of a certificate as returned by an OCSP responder.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -29,18 +29,17 @@ impl OcspVerifier {
     pub async fn verify_status(cert_der: &[u8]) -> Result<OcspStatus> {
         tracing::debug!("Starting OCSP status verification for certificate");
 
-        let (_, x509) = parse_x509_certificate(cert_der)
-            .map_err(|e| {
-                tracing::error!("Failed to parse X.509 certificate for OCSP check: {}", e);
-                AcmeError::certificate(format!("Parse cert failed: {}", e))
-            })?;
+        let (_, x509) = parse_x509_certificate(cert_der).map_err(|e| {
+            tracing::error!("Failed to parse X.509 certificate for OCSP check: {}", e);
+            AcmeError::certificate(format!("Parse cert failed: {}", e))
+        })?;
 
         // 1. Find OCSP responder URL in Authority Information Access (AIA) extension
         let ocsp_url = match Self::find_ocsp_url(&x509) {
             Ok(url) => {
                 tracing::info!("Found OCSP responder URL: {}", url);
                 url
-            },
+            }
             Err(e) => {
                 tracing::warn!("Could not find OCSP responder URL in certificate: {}", e);
                 return Err(e);
@@ -52,7 +51,7 @@ impl OcspVerifier {
         // (like `ocsp-rs` or `rcgen`'s internal tools) to handle ASN.1 encoding/decoding.
         // Here we implement the network orchestration logic.
 
-        let client = reqwest::Client::builder()
+        let _client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent("AcmeX/0.7.0")
             .build()
@@ -85,11 +84,11 @@ impl OcspVerifier {
             if let ParsedExtension::AuthorityInfoAccess(aia) = ext.parsed_extension() {
                 for access_desc in &aia.accessdescs {
                     // OID 1.3.6.1.5.5.7.48.1 (id-ad-ocsp)
-                    if access_desc.access_method.to_string() == "1.3.6.1.5.5.7.48.1" {
-                        if let GeneralName::URI(uri) = access_desc.access_location {
-                            tracing::debug!("Extracted OCSP URI: {}", uri);
-                            return Ok(uri.to_string());
-                        }
+                    if access_desc.access_method.to_string() == "1.3.6.1.5.5.7.48.1"
+                        && let GeneralName::URI(uri) = access_desc.access_location
+                    {
+                        tracing::debug!("Extracted OCSP URI: {}", uri);
+                        return Ok(uri.to_string());
                     }
                 }
             }

@@ -80,7 +80,10 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
         store: CertificateStore<B>,
         concurrency: usize,
     ) -> (Self, TaskSender) {
-        tracing::debug!("Initializing AdvancedRenewalScheduler with concurrency: {}", concurrency);
+        tracing::debug!(
+            "Initializing AdvancedRenewalScheduler with concurrency: {}",
+            concurrency
+        );
         let queue = Arc::new(Mutex::new(BinaryHeap::new()));
         let notifier = Arc::new(Notify::new());
         let (tx, mut rx) = mpsc::channel::<RenewalTask>(100);
@@ -169,7 +172,8 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
                 let _permit = permit; // Permit is released when this task finishes
                 tracing::info!(
                     "Processing renewal task (Priority: {:?}) for domains: {:?}",
-                    task.priority, task.domains
+                    task.priority,
+                    task.domains
                 );
 
                 if let Some(h) = &s.hook {
@@ -186,7 +190,11 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Failed to renew certificate for {:?}: {}", task.domains, e);
+                        tracing::error!(
+                            "Failed to renew certificate for {:?}: {}",
+                            task.domains,
+                            e
+                        );
                         if let Some(h) = &s.hook {
                             h.on_error(&task.domains, &e);
                         }
@@ -197,11 +205,15 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
                             next_task.retry_count += 1;
                             tracing::warn!(
                                 "Retrying renewal for {:?} (Attempt {}/3)",
-                                task.domains, next_task.retry_count
+                                task.domains,
+                                next_task.retry_count
                             );
                             let _ = s.task_tx.send(next_task).await;
                         } else {
-                            tracing::error!("Maximum retries reached for domains: {:?}", task.domains);
+                            tracing::error!(
+                                "Maximum retries reached for domains: {:?}",
+                                task.domains
+                            );
                         }
                     }
                 }

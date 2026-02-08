@@ -6,7 +6,7 @@ use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
 /// ClouDNS DNS Provider configuration
 #[derive(Debug, Clone)]
@@ -30,7 +30,10 @@ impl ClouDnsProvider {
         let parts: Vec<&str> = domain.split('.').collect();
         if parts.len() > 2 {
             let domain_name = parts[parts.len() - 2..].join(".");
-            let host = domain.strip_suffix(&format!(".{}", domain_name)).unwrap_or("").to_string();
+            let host = domain
+                .strip_suffix(&format!(".{}", domain_name))
+                .unwrap_or("")
+                .to_string();
             (domain_name, host)
         } else {
             (domain.to_string(), "".to_string())
@@ -66,20 +69,30 @@ impl DnsProvider for ClouDnsProvider {
             ("ttl", "60"),
         ];
 
-        let response = self.client.get(url).query(&params).send().await
+        let response = self
+            .client
+            .get(url)
+            .query(&params)
+            .send()
+            .await
             .map_err(|e| AcmeError::transport(format!("ClouDNS API failed: {}", e)))?;
 
-        let body: ClouDnsResponse = response.json().await.map_err(|e| {
-            AcmeError::protocol(format!("Failed to parse ClouDNS response: {}", e))
-        })?;
+        let body: ClouDnsResponse = response
+            .json()
+            .await
+            .map_err(|e| AcmeError::protocol(format!("Failed to parse ClouDNS response: {}", e)))?;
 
         if body.status != "Success" {
-            let desc = body.status_description.unwrap_or_else(|| "Unknown error".to_string());
+            let desc = body
+                .status_description
+                .unwrap_or_else(|| "Unknown error".to_string());
             error!("ClouDNS create record error: {}", desc);
             return Err(AcmeError::protocol(format!("ClouDNS error: {}", desc)));
         }
 
-        let record_id = body.record_id.ok_or_else(|| AcmeError::protocol("No recordID in ClouDNS response".to_string()))?;
+        let record_id = body
+            .record_id
+            .ok_or_else(|| AcmeError::protocol("No recordID in ClouDNS response".to_string()))?;
         let id_str = match record_id {
             serde_json::Value::String(s) => s,
             serde_json::Value::Number(n) => n.to_string(),
@@ -104,17 +117,28 @@ impl DnsProvider for ClouDnsProvider {
             ("record-id", record_id),
         ];
 
-        let response = self.client.get(url).query(&params).send().await
+        let response = self
+            .client
+            .get(url)
+            .query(&params)
+            .send()
+            .await
             .map_err(|e| AcmeError::transport(format!("ClouDNS API delete failed: {}", e)))?;
 
-        let body: ClouDnsResponse = response.json().await.map_err(|e| {
-            AcmeError::protocol(format!("Failed to parse ClouDNS response: {}", e))
-        })?;
+        let body: ClouDnsResponse = response
+            .json()
+            .await
+            .map_err(|e| AcmeError::protocol(format!("Failed to parse ClouDNS response: {}", e)))?;
 
         if body.status != "Success" {
-            let desc = body.status_description.unwrap_or_else(|| "Unknown error".to_string());
+            let desc = body
+                .status_description
+                .unwrap_or_else(|| "Unknown error".to_string());
             error!("ClouDNS delete record error: {}", desc);
-            return Err(AcmeError::protocol(format!("ClouDNS delete error: {}", desc)));
+            return Err(AcmeError::protocol(format!(
+                "ClouDNS delete error: {}",
+                desc
+            )));
         }
 
         info!("ClouDNS TXT record deleted successfully");
@@ -135,7 +159,12 @@ impl DnsProvider for ClouDnsProvider {
             ("type", "TXT"),
         ];
 
-        let response = self.client.get(url).query(&params).send().await
+        let response = self
+            .client
+            .get(url)
+            .query(&params)
+            .send()
+            .await
             .map_err(|e| AcmeError::transport(format!("ClouDNS API list failed: {}", e)))?;
 
         let records: serde_json::Value = response.json().await.unwrap_or_default();

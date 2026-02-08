@@ -28,7 +28,9 @@ impl DomainValidator {
         let result = tokio::task::spawn_blocking({
             let d = domain.to_string();
             move || (d.as_str(), 80).to_socket_addrs()
-        }).await.map_err(|e| AcmeError::protocol(format!("Task join error: {}", e)))?;
+        })
+        .await
+        .map_err(|e| AcmeError::protocol(format!("Task join error: {}", e)))?;
 
         match result {
             Ok(mut addrs) => {
@@ -37,7 +39,10 @@ impl DomainValidator {
                     Ok(())
                 } else {
                     tracing::error!("Domain {} did not resolve to any IP address", domain);
-                    Err(AcmeError::protocol(format!("Domain {} does not resolve", domain)))
+                    Err(AcmeError::protocol(format!(
+                        "Domain {} does not resolve",
+                        domain
+                    )))
                 }
             }
             Err(e) => {
@@ -53,7 +58,10 @@ impl Orchestrator for DomainValidator {
     /// Executes the domain validation workflow.
     /// This includes DNS resolution checks and connectivity tests.
     async fn execute(&self, config: &Config) -> Result<()> {
-        tracing::info!("Starting pre-flight domain validation for: {:?}", self.domains);
+        tracing::info!(
+            "Starting pre-flight domain validation for: {:?}",
+            self.domains
+        );
 
         for domain in &self.domains {
             // 1. Check DNS resolution if using HTTP-01
@@ -65,7 +73,9 @@ impl Orchestrator for DomainValidator {
             if config.challenge.challenge_type == "dns-01" {
                 if config.challenge.dns01.is_none() {
                     tracing::error!("DNS-01 challenge selected but no DNS configuration provided");
-                    return Err(AcmeError::configuration("Missing DNS-01 configuration".to_string()));
+                    return Err(AcmeError::configuration(
+                        "Missing DNS-01 configuration".to_string(),
+                    ));
                 }
                 tracing::debug!("DNS-01 configuration found for domain: {}", domain);
             }

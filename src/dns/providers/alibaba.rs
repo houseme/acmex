@@ -5,7 +5,7 @@ use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 use base64::Engine;
-use hmac::{Hmac, Mac, KeyInit};
+use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
 use sha1::Sha1;
 use std::collections::BTreeMap;
@@ -27,7 +27,10 @@ pub struct AlibabaCloudDnsProvider {
 impl AlibabaCloudDnsProvider {
     /// Creates a new `AlibabaCloudDnsProvider` instance.
     pub fn new(access_key_id: String, access_key_secret: String, region: String) -> Self {
-        tracing::debug!("Initializing AlibabaCloudDnsProvider for region: {}", region);
+        tracing::debug!(
+            "Initializing AlibabaCloudDnsProvider for region: {}",
+            region
+        );
         Self {
             access_key_id,
             access_key_secret,
@@ -41,13 +44,7 @@ impl AlibabaCloudDnsProvider {
         // 1. Sort parameters and build canonical query string
         let canonical_query_string = params
             .iter()
-            .map(|(k, v)| {
-                format!(
-                    "{}={}",
-                    self.percent_encode(k),
-                    self.percent_encode(v)
-                )
-            })
+            .map(|(k, v)| format!("{}={}", self.percent_encode(k), self.percent_encode(v)))
             .collect::<Vec<_>>()
             .join("&");
 
@@ -62,8 +59,8 @@ impl AlibabaCloudDnsProvider {
         type HmacSha1 = Hmac<Sha1>;
 
         let secret = format!("{}&", self.access_key_secret);
-        let mut mac = HmacSha1::new_from_slice(secret.as_bytes())
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha1::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
         mac.update(string_to_sign.as_bytes());
 
         base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
@@ -95,7 +92,11 @@ impl AlibabaCloudDnsProvider {
             .unwrap_or("")
             .to_string();
         if name.is_empty() && domain != domain_name {
-             domain.strip_suffix(&domain_name).unwrap_or("").trim_end_matches('.').to_string()
+            domain
+                .strip_suffix(&domain_name)
+                .unwrap_or("")
+                .trim_end_matches('.')
+                .to_string()
         } else {
             name
         }
@@ -108,7 +109,10 @@ impl AlibabaCloudDnsProvider {
         params.insert("AccessKeyId".to_string(), self.access_key_id.clone());
         params.insert("SignatureMethod".to_string(), "HMAC-SHA1".to_string());
         params.insert("SignatureVersion".to_string(), "1.0".to_string());
-        params.insert("SignatureNonce".to_string(), rand::random::<u64>().to_string());
+        params.insert(
+            "SignatureNonce".to_string(),
+            rand::random::<u64>().to_string(),
+        );
         params.insert(
             "Timestamp".to_string(),
             Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
@@ -125,15 +129,10 @@ impl AlibabaCloudDnsProvider {
 
         let url = format!("https://alidns.aliyuncs.com/?{}", query);
 
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("Network error during Alibaba Cloud API call: {}", e);
-                AcmeError::transport(format!("Alibaba API failed: {}", e))
-            })?;
+        let response = self.client.get(url).send().await.map_err(|e| {
+            tracing::error!("Network error during Alibaba Cloud API call: {}", e);
+            AcmeError::transport(format!("Alibaba API failed: {}", e))
+        })?;
 
         let status = response.status();
         let body: serde_json::Value = response.json().await.map_err(|e| {
@@ -159,7 +158,10 @@ impl AlibabaCloudDnsProvider {
 impl DnsProvider for AlibabaCloudDnsProvider {
     /// Creates a TXT record in Alibaba Cloud DNS.
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        tracing::info!("Creating TXT record in Alibaba Cloud DNS for domain: {}", domain);
+        tracing::info!(
+            "Creating TXT record in Alibaba Cloud DNS for domain: {}",
+            domain
+        );
 
         let domain_name = self.get_domain_name(domain);
         let record_name = self.get_record_name(domain);
@@ -182,26 +184,38 @@ impl DnsProvider for AlibabaCloudDnsProvider {
                 AcmeError::protocol("RecordId not found in response".to_string())
             })?;
 
-        tracing::info!("Successfully created Alibaba Cloud TXT record with ID: {}", record_id);
+        tracing::info!(
+            "Successfully created Alibaba Cloud TXT record with ID: {}",
+            record_id
+        );
         Ok(record_id)
     }
 
     /// Deletes a TXT record from Alibaba Cloud DNS.
     async fn delete_txt_record(&self, _domain: &str, record_id: &str) -> Result<()> {
-        tracing::info!("Deleting TXT record from Alibaba Cloud DNS, ID: {}", record_id);
+        tracing::info!(
+            "Deleting TXT record from Alibaba Cloud DNS, ID: {}",
+            record_id
+        );
 
         let mut params = BTreeMap::new();
         params.insert("Action".to_string(), "DeleteDomainRecord".to_string());
         params.insert("RecordId".to_string(), record_id.to_string());
 
         self.do_request(params).await?;
-        tracing::info!("Successfully deleted Alibaba Cloud TXT record: {}", record_id);
+        tracing::info!(
+            "Successfully deleted Alibaba Cloud TXT record: {}",
+            record_id
+        );
         Ok(())
     }
 
     /// Verifies the existence of a TXT record in Alibaba Cloud DNS.
     async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
-        tracing::debug!("Verifying TXT record in Alibaba Cloud DNS for domain: {}", domain);
+        tracing::debug!(
+            "Verifying TXT record in Alibaba Cloud DNS for domain: {}",
+            domain
+        );
         let domain_name = self.get_domain_name(domain);
         let record_name = self.get_record_name(domain);
 

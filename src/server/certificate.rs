@@ -42,9 +42,10 @@ pub async fn get_certificate(
     let mut ocsp_status = None;
     if let Some(storage) = &state.storage
         && let Ok(Some(cert_data)) = storage.load(&format!("cert:{}", id)).await
-            && let Ok(status) = OcspVerifier::verify_status(&cert_data).await {
-                ocsp_status = Some(format!("{:?}", status));
-            }
+        && let Ok(status) = OcspVerifier::verify_status(&cert_data).await
+    {
+        ocsp_status = Some(format!("{:?}", status));
+    }
 
     Json(CertificateResponse {
         id,

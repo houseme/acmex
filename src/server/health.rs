@@ -28,6 +28,12 @@ pub struct HealthCheck {
     components: Arc<RwLock<std::collections::HashMap<String, HealthStatus>>>,
 }
 
+impl Default for HealthCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthCheck {
     /// Create a new health check handler
     pub fn new() -> Self {

@@ -203,8 +203,8 @@ limiter.wait_for_token(1).await;
 
 // 中间件
 let chain = MiddlewareChain::new()
-.add(LoggingMiddleware::new(true))
-.add(TimeoutMiddleware::new(30));
+.push(LoggingMiddleware::new(true))
+.push(TimeoutMiddleware::new(30));
 ```
 
 **包含文件**:

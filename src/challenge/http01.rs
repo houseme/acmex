@@ -1,6 +1,6 @@
 /// HTTP-01 challenge implementation
 use async_trait::async_trait;
-use axum::{Router, extract::Path, http::StatusCode, routing::get};
+use axum::{extract::Path, http::StatusCode, routing::get, Router};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -21,6 +21,13 @@ pub struct Http01Solver {
     server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+impl Default for Http01Solver {
+    /// Create with default address (127.0.0.1:80)
+    fn default() -> Self {
+        Self::new("127.0.0.1:80".parse().expect("Invalid default address"))
+    }
+}
+
 impl Http01Solver {
     /// Create a new HTTP-01 solver
     pub fn new(listen_addr: SocketAddr) -> Self {
@@ -31,18 +38,13 @@ impl Http01Solver {
         }
     }
 
-    /// Create with default address (127.0.0.1:80)
-    pub fn default() -> Self {
-        Self::new("127.0.0.1:80".parse().expect("Invalid default address"))
-    }
-
     /// Start the HTTP server
     async fn start_server(&self) -> Result<()> {
         let key_auth = Arc::clone(&self.key_authorization);
 
         // Create router
         let app = Router::new()
-            .route("/.well-known/acme-challenge/:token", get(handle_challenge))
+            .route("/.well-known/acme-challenge/{token}", get(handle_challenge))
             .with_state(key_auth);
 
         // Create listener
@@ -74,9 +76,10 @@ async fn handle_challenge(
 ) -> std::result::Result<String, StatusCode> {
     let auth = key_auth.read().await;
     if let Some(ref auth_str) = *auth
-        && auth_str.contains(&token) {
-            return Ok(auth_str.clone());
-        }
+        && auth_str.contains(&token)
+    {
+        return Ok(auth_str.clone());
+    }
     Err(StatusCode::NOT_FOUND)
 }
 

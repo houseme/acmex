@@ -1,6 +1,7 @@
 use acmex::challenge::{ChallengeSolverRegistry, Dns01Solver};
 use acmex::dns::providers::cloudflare::{CloudFlareConfig, CloudFlareDnsProvider};
 use acmex::prelude::*;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {

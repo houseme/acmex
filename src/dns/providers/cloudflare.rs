@@ -26,7 +26,10 @@ pub struct CloudFlareDnsProvider {
 impl CloudFlareDnsProvider {
     /// Creates a new `CloudFlareDnsProvider` with the given configuration.
     pub fn new(config: CloudFlareConfig) -> Self {
-        tracing::debug!("Initializing CloudFlareDnsProvider for Zone: {}", config.zone_id);
+        tracing::debug!(
+            "Initializing CloudFlareDnsProvider for Zone: {}",
+            config.zone_id
+        );
         Self {
             config,
             http_client: reqwest::Client::new(),
@@ -91,23 +94,24 @@ impl DnsProvider for CloudFlareDnsProvider {
             })?;
 
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            tracing::error!("CloudFlare API error ({}): {}", response.status(), text);
+            tracing::error!("CloudFlare API error ({}): {}", status, text);
             return Err(AcmeError::storage(format!(
                 "CloudFlare create record failed: {}",
                 text
             )));
         }
 
-        let body: CloudFlareRecordResponse = response
-            .json()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to parse CloudFlare response: {}", e);
-                AcmeError::storage(format!("CloudFlare parse response failed: {}", e))
-            })?;
+        let body: CloudFlareRecordResponse = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse CloudFlare response: {}", e);
+            AcmeError::storage(format!("CloudFlare parse response failed: {}", e))
+        })?;
 
-        tracing::info!("Successfully created CloudFlare TXT record with ID: {}", body.result.id);
+        tracing::info!(
+            "Successfully created CloudFlare TXT record with ID: {}",
+            body.result.id
+        );
         Ok(body.result.id)
     }
 
@@ -131,8 +135,13 @@ impl DnsProvider for CloudFlareDnsProvider {
             })?;
 
         if !response.status().is_success() {
+            let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            tracing::error!("CloudFlare API error during deletion ({}): {}", response.status(), text);
+            tracing::error!(
+                "CloudFlare API error during deletion ({}): {}",
+                status,
+                text
+            );
             return Err(AcmeError::storage(format!(
                 "CloudFlare delete record failed: {}",
                 text
@@ -163,7 +172,10 @@ impl DnsProvider for CloudFlareDnsProvider {
             })?;
 
         if !response.status().is_success() {
-            tracing::warn!("CloudFlare record verification returned status: {}", response.status());
+            tracing::warn!(
+                "CloudFlare record verification returned status: {}",
+                response.status()
+            );
             return Ok(false);
         }
 

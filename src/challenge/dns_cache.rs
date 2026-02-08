@@ -45,6 +45,12 @@ pub struct DnsCache {
     default_ttl: Duration,
 }
 
+impl Default for DnsCache {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(60))
+    }
+}
+
 impl DnsCache {
     /// Create a new DNS cache
     pub fn new(default_ttl: Duration) -> Self {
@@ -54,11 +60,6 @@ impl DnsCache {
             txt_records: Arc::new(RwLock::new(HashMap::new())),
             default_ttl,
         }
-    }
-
-    /// Create with default TTL of 60 seconds
-    pub fn default() -> Self {
-        Self::new(Duration::from_secs(60))
     }
 
     /// Get A records

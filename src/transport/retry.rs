@@ -104,9 +104,16 @@ impl RetryPolicy {
         };
 
         if retry {
-            tracing::info!("Request failed with status {}, scheduling retry attempt {}", status_code, attempt + 1);
+            tracing::info!(
+                "Request failed with status {}, scheduling retry attempt {}",
+                status_code,
+                attempt + 1
+            );
         } else {
-            tracing::debug!("Request failed with status {}, no retry scheduled", status_code);
+            tracing::debug!(
+                "Request failed with status {}, no retry scheduled",
+                status_code
+            );
         }
 
         retry

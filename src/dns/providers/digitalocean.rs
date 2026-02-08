@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
@@ -71,7 +71,9 @@ impl DnsProvider for DigitalOceanDnsProvider {
         let record_name = if domain == self.config.domain {
             "@"
         } else {
-            domain.strip_suffix(&format!(".{}", self.config.domain)).unwrap_or(domain)
+            domain
+                .strip_suffix(&format!(".{}", self.config.domain))
+                .unwrap_or(domain)
         };
 
         let payload = DigitalOceanRecordCreateRequest {
@@ -88,9 +90,7 @@ impl DnsProvider for DigitalOceanDnsProvider {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| {
-                AcmeError::transport(format!("DigitalOcean API failed: {}", e))
-            })?;
+            .map_err(|e| AcmeError::transport(format!("DigitalOcean API failed: {}", e)))?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -102,7 +102,10 @@ impl DnsProvider for DigitalOceanDnsProvider {
             AcmeError::protocol(format!("Failed to parse DigitalOcean response: {}", e))
         })?;
 
-        info!("DigitalOcean TXT record created successfully, ID: {}", body.domain_record.id);
+        info!(
+            "DigitalOcean TXT record created successfully, ID: {}",
+            body.domain_record.id
+        );
         Ok(body.domain_record.id.to_string())
     }
 
@@ -120,14 +123,15 @@ impl DnsProvider for DigitalOceanDnsProvider {
             .bearer_auth(&self.config.api_token)
             .send()
             .await
-            .map_err(|e| {
-                AcmeError::transport(format!("DigitalOcean API delete failed: {}", e))
-            })?;
+            .map_err(|e| AcmeError::transport(format!("DigitalOcean API delete failed: {}", e)))?;
 
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
             error!("DigitalOcean delete record error: {}", text);
-            return Err(AcmeError::protocol(format!("DigitalOcean delete error: {}", text)));
+            return Err(AcmeError::protocol(format!(
+                "DigitalOcean delete error: {}",
+                text
+            )));
         }
 
         info!("DigitalOcean TXT record deleted successfully");
@@ -148,9 +152,7 @@ impl DnsProvider for DigitalOceanDnsProvider {
             .bearer_auth(&self.config.api_token)
             .send()
             .await
-            .map_err(|e| {
-                AcmeError::transport(format!("DigitalOcean API verify failed: {}", e))
-            })?;
+            .map_err(|e| AcmeError::transport(format!("DigitalOcean API verify failed: {}", e)))?;
 
         if !response.status().is_success() {
             return Ok(false);
@@ -163,7 +165,9 @@ impl DnsProvider for DigitalOceanDnsProvider {
         let record_name = if domain == self.config.domain {
             "@"
         } else {
-            domain.strip_suffix(&format!(".{}", self.config.domain)).unwrap_or(domain)
+            domain
+                .strip_suffix(&format!(".{}", self.config.domain))
+                .unwrap_or(domain)
         };
 
         for record in body.domain_records {

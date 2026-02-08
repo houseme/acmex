@@ -24,7 +24,10 @@ pub struct TencentCloudDnsProvider {
 impl TencentCloudDnsProvider {
     /// Creates a new `TencentCloudDnsProvider` instance.
     pub fn new(secret_id: String, secret_key: String, region: String) -> Self {
-        tracing::debug!("Initializing TencentCloudDnsProvider for region: {}", region);
+        tracing::debug!(
+            "Initializing TencentCloudDnsProvider for region: {}",
+            region
+        );
         Self {
             secret_id,
             secret_key,
@@ -127,7 +130,10 @@ impl TencentCloudDnsProvider {
 impl DnsProvider for TencentCloudDnsProvider {
     /// Creates a TXT record in Tencent Cloud DNS.
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        tracing::info!("Creating TXT record in Tencent Cloud DNS for domain: {}", domain);
+        tracing::info!(
+            "Creating TXT record in Tencent Cloud DNS for domain: {}",
+            domain
+        );
 
         let domain_name = self.get_domain(domain);
         let record_name = self.get_record_name(domain);
@@ -168,13 +174,10 @@ impl DnsProvider for TencentCloudDnsProvider {
                 AcmeError::transport(format!("Tencent API failed: {}", e))
             })?;
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to parse Tencent Cloud API response: {}", e);
-                AcmeError::protocol(format!("Failed to parse Tencent response: {}", e))
-            })?;
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse Tencent Cloud API response: {}", e);
+            AcmeError::protocol(format!("Failed to parse Tencent response: {}", e))
+        })?;
 
         if let Some(err) = body["Response"]["Error"].as_object() {
             let code = err["Code"].as_str().unwrap_or("Unknown");
@@ -195,13 +198,19 @@ impl DnsProvider for TencentCloudDnsProvider {
                 AcmeError::protocol("RecordId not found in response".to_string())
             })?;
 
-        tracing::info!("Successfully created Tencent Cloud TXT record with ID: {}", record_id);
+        tracing::info!(
+            "Successfully created Tencent Cloud TXT record with ID: {}",
+            record_id
+        );
         Ok(record_id)
     }
 
     /// Deletes a TXT record from Tencent Cloud DNS.
     async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()> {
-        tracing::info!("Deleting TXT record from Tencent Cloud DNS, ID: {}", record_id);
+        tracing::info!(
+            "Deleting TXT record from Tencent Cloud DNS, ID: {}",
+            record_id
+        );
 
         let domain_name = self.get_domain(domain);
         let payload = serde_json::json!({
@@ -210,7 +219,8 @@ impl DnsProvider for TencentCloudDnsProvider {
                 tracing::error!("Invalid Tencent record ID format: {}", record_id);
                 AcmeError::invalid_input("Invalid record ID")
             })?
-        }).to_string();
+        })
+        .to_string();
 
         let service = "dnspod";
         let action = "DeleteRecord";
@@ -234,24 +244,36 @@ impl DnsProvider for TencentCloudDnsProvider {
             .send()
             .await
             .map_err(|e| {
-                tracing::error!("Network error during Tencent Cloud DNS record deletion: {}", e);
+                tracing::error!(
+                    "Network error during Tencent Cloud DNS record deletion: {}",
+                    e
+                );
                 AcmeError::transport(format!("Tencent API delete failed: {}", e))
             })?;
 
         if !response.status().is_success() {
-            tracing::error!("Tencent Cloud DNS API deletion failed with status: {}", response.status());
+            tracing::error!(
+                "Tencent Cloud DNS API deletion failed with status: {}",
+                response.status()
+            );
             return Err(AcmeError::protocol(
                 "Tencent DNS delete request failed".to_string(),
             ));
         }
 
-        tracing::info!("Successfully deleted Tencent Cloud TXT record: {}", record_id);
+        tracing::info!(
+            "Successfully deleted Tencent Cloud TXT record: {}",
+            record_id
+        );
         Ok(())
     }
 
     /// Verifies the existence of a TXT record in Tencent Cloud DNS.
     async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
-        tracing::debug!("Verifying TXT record in Tencent Cloud DNS for domain: {}", domain);
+        tracing::debug!(
+            "Verifying TXT record in Tencent Cloud DNS for domain: {}",
+            domain
+        );
         let domain_name = self.get_domain(domain);
         let record_name = self.get_record_name(domain);
 
@@ -284,17 +306,20 @@ impl DnsProvider for TencentCloudDnsProvider {
             .send()
             .await
             .map_err(|e| {
-                tracing::error!("Network error during Tencent Cloud DNS record verification: {}", e);
+                tracing::error!(
+                    "Network error during Tencent Cloud DNS record verification: {}",
+                    e
+                );
                 AcmeError::transport(format!("Tencent API verify failed: {}", e))
             })?;
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to parse Tencent Cloud DNS verification response: {}", e);
-                AcmeError::protocol(format!("Failed to parse Tencent response: {}", e))
-            })?;
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            tracing::error!(
+                "Failed to parse Tencent Cloud DNS verification response: {}",
+                e
+            );
+            AcmeError::protocol(format!("Failed to parse Tencent response: {}", e))
+        })?;
 
         if let Some(records) = body["Response"]["RecordList"].as_array() {
             for record in records {

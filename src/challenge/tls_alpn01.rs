@@ -24,6 +24,12 @@ pub struct TlsAlpn01Solver {
     server_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+impl Default for TlsAlpn01Solver {
+    /// Create with default address (0.0.0.0:443)
+    fn default() -> Self {
+        Self::new("0.0.0.0:443".parse().expect("Invalid default address"))
+    }
+}
 impl TlsAlpn01Solver {
     /// Create a new TLS-ALPN-01 solver
     pub fn new(listen_addr: SocketAddr) -> Self {
@@ -32,11 +38,6 @@ impl TlsAlpn01Solver {
             key_authorization: Arc::new(RwLock::new(None)),
             server_handle: Arc::new(RwLock::new(None)),
         }
-    }
-
-    /// Create with default address (0.0.0.0:443)
-    pub fn default() -> Self {
-        Self::new("0.0.0.0:443".parse().expect("Invalid default address"))
     }
 
     /// Generate a self-signed certificate with the acme-tls/1 ALPN extension

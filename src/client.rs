@@ -73,7 +73,10 @@ impl AcmeClient {
     /// Creates a new ACME client with the given configuration.
     /// Generates a new key pair for the account.
     pub fn new(config: AcmeConfig) -> Result<Self> {
-        tracing::debug!("Creating new AcmeClient with directory: {}", config.directory_url);
+        tracing::debug!(
+            "Creating new AcmeClient with directory: {}",
+            config.directory_url
+        );
         let http_client = reqwest::Client::new();
         let key_pair = Arc::new(KeyPair::generate()?);
 
@@ -102,7 +105,10 @@ impl AcmeClient {
 
     /// Registers a new account or retrieves an existing one using the configured key pair.
     pub async fn register_account(&mut self) -> Result<String> {
-        tracing::info!("Registering account with ACME server: {}", self.config.directory_url);
+        tracing::info!(
+            "Registering account with ACME server: {}",
+            self.config.directory_url
+        );
         let dir_mgr = DirectoryManager::new(&self.config.directory_url, self.http_client.clone());
         let directory = dir_mgr.get().await?;
 
@@ -271,7 +277,10 @@ impl AcmeClient {
             .await?;
 
         if order.status != "ready" {
-            tracing::error!("Order failed to reach 'ready' status. Current status: {}", order.status);
+            tracing::error!(
+                "Order failed to reach 'ready' status. Current status: {}",
+                order.status
+            );
             return Err(crate::error::AcmeError::order(
                 "Order not ready after authorization".to_string(),
                 order.status,
@@ -294,7 +303,10 @@ impl AcmeClient {
             .await?;
 
         if order.status != "valid" {
-            tracing::error!("Order failed to reach 'valid' status. Current status: {}", order.status);
+            tracing::error!(
+                "Order failed to reach 'valid' status. Current status: {}",
+                order.status
+            );
             return Err(crate::error::AcmeError::order(
                 "Order not valid after finalization".to_string(),
                 order.status,
@@ -379,7 +391,11 @@ pub struct CertificateBundle {
 impl CertificateBundle {
     /// Saves the certificate and private key to the specified file paths.
     pub fn save_to_files(&self, cert_path: &str, key_path: &str) -> Result<()> {
-        tracing::info!("Saving certificate to {} and key to {}", cert_path, key_path);
+        tracing::info!(
+            "Saving certificate to {} and key to {}",
+            cert_path,
+            key_path
+        );
         std::fs::write(cert_path, &self.certificate_pem)?;
         std::fs::write(key_path, &self.private_key_pem)?;
         Ok(())

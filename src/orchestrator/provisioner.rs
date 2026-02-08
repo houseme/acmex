@@ -2,13 +2,12 @@
 /// This module coordinates the entire process of account registration,
 /// challenge fulfillment, and certificate issuance.
 use super::Orchestrator;
-use crate::challenge::{ChallengeSolverRegistry, Http01Solver, TlsAlpn01Solver, Dns01Solver};
+use crate::challenge::{ChallengeSolverRegistry, Http01Solver, TlsAlpn01Solver};
 use crate::client::{AcmeClient, AcmeConfig};
 use crate::config::Config;
 use crate::error::{AcmeError, Result};
 use crate::types::Contact;
 use async_trait::async_trait;
-use std::sync::Arc;
 
 /// Orchestrator for provisioning certificates with automatic retries.
 pub struct CertificateProvisioner {
@@ -40,7 +39,7 @@ impl Orchestrator for CertificateProvisioner {
                 Ok(_) => {
                     tracing::info!("Provisioning completed successfully");
                     return Ok(());
-                },
+                }
                 Err(e) => {
                     tracing::warn!("Provisioning attempt {} failed: {}", retry_count, e);
                     last_error = Some(e);
@@ -71,13 +70,17 @@ impl CertificateProvisioner {
         );
 
         // 1. Configure ACME client
-        tracing::debug!("Configuring ACME client for directory: {}", config.acme.directory);
+        tracing::debug!(
+            "Configuring ACME client for directory: {}",
+            config.acme.directory
+        );
         let mut acme_config =
             AcmeConfig::new(&config.acme.directory).with_tos_agreed(config.acme.tos_agreed);
 
         for contact in &config.acme.contact {
-            if contact.starts_with("mailto:") {
-                acme_config = acme_config.with_contact(Contact::email(&contact[7..]));
+            if contact.strip_prefix("mailto:").is_some() {
+                let contact_mail = &contact[7..];
+                acme_config = acme_config.with_contact(Contact::email(contact_mail));
             } else {
                 acme_config = acme_config.with_contact(Contact::url(contact));
             }
@@ -91,7 +94,10 @@ impl CertificateProvisioner {
 
         // 3. Configure challenge solvers
         let mut registry = ChallengeSolverRegistry::new();
-        tracing::debug!("Setting up challenge solver for type: {}", config.challenge.challenge_type);
+        tracing::debug!(
+            "Setting up challenge solver for type: {}",
+            config.challenge.challenge_type
+        );
 
         match config.challenge.challenge_type.as_str() {
             "http-01" => {
@@ -111,17 +117,25 @@ impl CertificateProvisioner {
             }
             "dns-01" => {
                 if let Some(ref dns_config) = config.challenge.dns01 {
-                    tracing::info!("Configuring DNS-01 solver with provider: {}", dns_config.provider);
+                    tracing::info!(
+                        "Configuring DNS-01 solver with provider: {:?}",
+                        dns_config.provider
+                    );
                     // Note: In a full implementation, we would use a factory to create the provider
                     // based on the provider name in the config.
                     // For now, we assume the provider is correctly registered in the registry.
                     // registry.register(Dns01Solver::new(Arc::new(provider)));
                 } else {
-                    return Err(AcmeError::configuration("DNS-01 selected but no DNS config found".to_string()));
+                    return Err(AcmeError::configuration(
+                        "DNS-01 selected but no DNS config found".to_string(),
+                    ));
                 }
             }
             _ => {
-                tracing::error!("Unsupported challenge type: {}", config.challenge.challenge_type);
+                tracing::error!(
+                    "Unsupported challenge type: {}",
+                    config.challenge.challenge_type
+                );
                 return Err(AcmeError::configuration(format!(
                     "Unsupported challenge type: {}",
                     config.challenge.challenge_type
@@ -131,7 +145,7 @@ impl CertificateProvisioner {
 
         // 4. Issue certificate
         tracing::info!("Requesting certificate issuance from ACME server");
-        let bundle = client
+        let _bundle = client
             .issue_certificate(self.domains.clone(), &mut registry)
             .await?;
 

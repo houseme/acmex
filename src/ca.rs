@@ -111,9 +111,7 @@ impl CAConfig {
             },
 
             #[cfg(feature = "google-ca")]
-            CertificateAuthority::Google => {
-                "https://dv.google.com/acme/directory".to_string()
-            }
+            CertificateAuthority::Google => "https://dv.google.com/acme/directory".to_string(),
 
             #[cfg(feature = "zerossl-ca")]
             CertificateAuthority::ZeroSSL => "https://acme.zerossl.com/v2/DV90".to_string(),
@@ -140,12 +138,7 @@ impl CAConfig {
 
 impl fmt::Display for CAConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} ({:?})",
-            self.ca,
-            self.environment
-        )
+        write!(f, "{} ({:?})", self.ca, self.environment)
     }
 }
 

@@ -18,15 +18,17 @@ impl Base64Encoding {
     /// Automatically handles missing padding if necessary.
     pub fn decode(data: &str) -> Result<Vec<u8>> {
         tracing::debug!("Decoding URL-safe Base64 data (length: {})", data.len());
-        // Add necessary padding for the base64 crate if it's not already there
-        let padded = match data.len() % 4 {
-            2 => format!("{}==", data),
-            3 => format!("{}=", data),
-            _ => data.to_string(),
-        };
+
+        // ACME uses URL-safe base64 without padding.
+        // We use the URL_SAFE engine which can be configured to at least try decoding.
+        // However, base64 crate's URL_SAFE_NO_PAD engine will ERROR if it sees padding.
+        // If we want to be robust and handle BOTH, we should trim padding then use NO_PAD,
+        // or just use a configuration that is lenient.
+
+        let data = data.trim_end_matches('=');
 
         base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&padded)
+            .decode(data)
             .map_err(|e| {
                 tracing::error!("Failed to decode URL-safe Base64: {}", e);
                 AcmeError::crypto(format!("Base64 decode error: {}", e))
@@ -42,12 +44,10 @@ impl Base64Encoding {
     /// Decodes data from standard Base64 with padding.
     pub fn decode_standard(data: &str) -> Result<Vec<u8>> {
         use base64::engine::general_purpose::STANDARD;
-        STANDARD
-            .decode(data)
-            .map_err(|e| {
-                tracing::error!("Failed to decode standard Base64: {}", e);
-                AcmeError::crypto(format!("Base64 decode error: {}", e))
-            })
+        STANDARD.decode(data).map_err(|e| {
+            tracing::error!("Failed to decode standard Base64: {}", e);
+            AcmeError::crypto(format!("Base64 decode error: {}", e))
+        })
     }
 }
 
@@ -65,11 +65,10 @@ impl PemEncoding {
     /// Decodes binary data from a PEM-formatted string.
     /// Returns a tuple containing the label and the raw bytes.
     pub fn decode(pem_data: &str) -> Result<(String, Vec<u8>)> {
-        let pem = pem::parse(pem_data)
-            .map_err(|e| {
-                tracing::error!("Failed to parse PEM data: {}", e);
-                AcmeError::crypto(format!("PEM parse error: {}", e))
-            })?;
+        let pem = pem::parse(pem_data).map_err(|e| {
+            tracing::error!("Failed to parse PEM data: {}", e);
+            AcmeError::crypto(format!("PEM parse error: {}", e))
+        })?;
 
         Ok((pem.tag().to_string(), pem.contents().to_vec()))
     }
@@ -83,14 +82,18 @@ impl PemEncoding {
     pub fn extract_data(pem_data: &str, expected_label: Option<&str>) -> Result<Vec<u8>> {
         let (label, data) = Self::decode(pem_data)?;
 
-        if let Some(expected) = expected_label {
-            if label != expected {
-                tracing::error!("PEM label mismatch: expected '{}', found '{}'", expected, label);
-                return Err(AcmeError::crypto(format!(
-                    "Expected PEM label '{}', got '{}'",
-                    expected, label
-                )));
-            }
+        if let Some(expected) = expected_label
+            && label != expected
+        {
+            tracing::error!(
+                "PEM label mismatch: expected '{}', found '{}'",
+                expected,
+                label
+            );
+            return Err(AcmeError::crypto(format!(
+                "Expected PEM label '{}', got '{}'",
+                expected, label
+            )));
         }
 
         Ok(data)
@@ -114,8 +117,11 @@ impl HexEncoding {
 
     /// Decodes binary data from a hexadecimal string.
     pub fn decode(hex_str: &str) -> Result<Vec<u8>> {
-        if hex_str.len() % 2 != 0 {
-            tracing::error!("Hex string has invalid length (must be even): {}", hex_str.len());
+        if !hex_str.len().is_multiple_of(2) {
+            tracing::error!(
+                "Hex string has invalid length (must be even): {}",
+                hex_str.len()
+            );
             return Err(AcmeError::crypto(
                 "Hex string length must be even".to_string(),
             ));
@@ -123,16 +129,14 @@ impl HexEncoding {
 
         let mut result = Vec::with_capacity(hex_str.len() / 2);
         for chunk in hex_str.as_bytes().chunks(2) {
-            let hex = std::str::from_utf8(chunk)
-                .map_err(|e| {
-                    tracing::error!("Invalid UTF-8 in hex chunk: {}", e);
-                    AcmeError::crypto(format!("Invalid UTF-8: {}", e))
-                })?;
-            let byte = u8::from_str_radix(hex, 16)
-                .map_err(|e| {
-                    tracing::error!("Failed to parse hex byte '{}': {}", hex, e);
-                    AcmeError::crypto(format!("Hex decode error: {}", e))
-                })?;
+            let hex = std::str::from_utf8(chunk).map_err(|e| {
+                tracing::error!("Invalid UTF-8 in hex chunk: {}", e);
+                AcmeError::crypto(format!("Invalid UTF-8: {}", e))
+            })?;
+            let byte = u8::from_str_radix(hex, 16).map_err(|e| {
+                tracing::error!("Failed to parse hex byte '{}': {}", hex, e);
+                AcmeError::crypto(format!("Hex decode error: {}", e))
+            })?;
             result.push(byte);
         }
 

@@ -57,7 +57,10 @@ impl NonceManager {
             })?;
 
         if !response.status().is_success() {
-            tracing::error!("Failed to fetch nonce, server returned status: {}", response.status());
+            tracing::error!(
+                "Failed to fetch nonce, server returned status: {}",
+                response.status()
+            );
             return Err(crate::error::AcmeError::protocol(format!(
                 "Failed to fetch nonce: HTTP {}",
                 response.status()

@@ -106,12 +106,13 @@ impl<'a> KeyRollover<'a> {
 
         // Cache the nonce from response
         if let Some(nonce_header) = response.headers().get("replay-nonce")
-            && let Ok(nonce_str) = nonce_header.to_str() {
-                self.account_manager
-                    .nonce_manager
-                    .cache_nonce(nonce_str.to_string())
-                    .await;
-            }
+            && let Ok(nonce_str) = nonce_header.to_str()
+        {
+            self.account_manager
+                .nonce_manager
+                .cache_nonce(nonce_str.to_string())
+                .await;
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -132,7 +133,10 @@ impl<'a> KeyRollover<'a> {
         })?;
 
         account.id = account_url.to_string();
-        tracing::info!("Account key rollover completed successfully for {}", account.id);
+        tracing::info!(
+            "Account key rollover completed successfully for {}",
+            account.id
+        );
 
         Ok(account)
     }

@@ -1,9 +1,9 @@
+use crate::config::{AcmeSettings, Config};
 /// Obtain new certificate command implementation.
 /// This module handles the 'obtain' CLI command, coordinating with the
 /// orchestrator and the new multi-CA configuration system.
 use crate::error::{AcmeError, Result};
-use crate::config::{Config, AcmeSettings};
-use crate::orchestrator::{Orchestrator, CertificateProvisioner};
+use crate::orchestrator::CertificateProvisioner;
 use std::fs;
 use std::path::Path;
 
@@ -29,14 +29,21 @@ pub async fn handle_obtain(
         return Err(AcmeError::invalid_input("No email specified"));
     }
 
-    tracing::info!("Starting certificate acquisition for domains: {:?}", domains);
+    tracing::info!(
+        "Starting certificate acquisition for domains: {:?}",
+        domains
+    );
     println!("📋 Requesting certificate for: {:?}", domains);
 
     // 2. Build configuration using the new multi-CA mechanism
     let mut config = Config::new();
     config.acme = AcmeSettings {
         ca: "letsencrypt".to_string(), // Default to Let's Encrypt
-        ca_environment: if prod { "production".to_string() } else { "staging".to_string() },
+        ca_environment: if prod {
+            "production".to_string()
+        } else {
+            "staging".to_string()
+        },
         contact: vec![format!("mailto:{}", email)],
         tos_agreed: true,
         ..Default::default()
@@ -44,15 +51,17 @@ pub async fn handle_obtain(
 
     // Configure challenge settings
     config.challenge.challenge_type = challenge_type.clone();
-    if let Some(provider) = dns_provider {
-        if let Some(ref mut dns_config) = config.challenge.dns01 {
-            dns_config.provider = Some(provider);
-        }
+    if let Some(provider) = dns_provider
+        && let Some(ref mut dns_config) = config.challenge.dns01
+    {
+        dns_config.provider = Some(provider);
     }
 
     // 3. Resolve the ACME directory URL via the CAConfig system
     let ca_config = config.acme.to_ca_config()?;
-    let acme_url = ca_config.directory_url().map_err(AcmeError::configuration)?;
+    let acme_url = ca_config
+        .directory_url()
+        .map_err(AcmeError::configuration)?;
     config.acme.directory = acme_url.clone();
 
     println!("   CA: {}", ca_config.ca);
@@ -62,7 +71,7 @@ pub async fn handle_obtain(
     // 4. Initialize the Provisioner Orchestrator
     // In a real scenario, we would use the orchestrator to handle the full flow.
     // For now, we simulate the steps while using the resolved configuration.
-    let provisioner = CertificateProvisioner::new(domains.clone());
+    let _provisioner = CertificateProvisioner::new(domains.clone());
 
     println!("\n⏳ Step 1: Validating system readiness...");
     // Here we would call orchestrator.execute(&config)
@@ -74,20 +83,26 @@ pub async fn handle_obtain(
     // 5. Save the results (Simulated for now, would come from AcmeClient bundle)
     println!("\n⏳ Step 3: Saving certificate and key...");
 
-    if let Some(parent) = Path::new(&cert_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = Path::new(&cert_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
-    if let Some(parent) = Path::new(&key_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = Path::new(&key_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
     }
 
     // Placeholder for actual certificate data
-    fs::write(&cert_path, "-----BEGIN CERTIFICATE-----\n(Actual data from ACME)\n-----END CERTIFICATE-----\n")?;
-    fs::write(&key_path, "-----BEGIN PRIVATE KEY-----\n(Actual data from ACME)\n-----END PRIVATE KEY-----\n")?;
+    fs::write(
+        &cert_path,
+        "-----BEGIN CERTIFICATE-----\n(Actual data from ACME)\n-----END CERTIFICATE-----\n",
+    )?;
+    fs::write(
+        &key_path,
+        "-----BEGIN PRIVATE KEY-----\n(Actual data from ACME)\n-----END PRIVATE KEY-----\n",
+    )?;
 
     println!("✓ Certificate saved to: {}", cert_path);
     println!("✓ Private key saved to: {}", key_path);

@@ -46,18 +46,19 @@ impl<B: StorageBackend + 'static> Orchestrator for CertificateRenewer<B> {
 
         for key in cert_keys {
             if let Some(cert_data) = self.store.backend().load(&key).await?
-                && self.needs_renewal(&cert_data) {
-                    info!("Certificate {} needs renewal, triggering process...", key);
+                && self.needs_renewal(&cert_data)
+            {
+                info!("Certificate {} needs renewal, triggering process...", key);
 
-                    // In a real implementation, we would extract domains from the certificate
-                    // and use the CertificateProvisioner to renew them.
-                    // For now, we log the intent.
+                // In a real implementation, we would extract domains from the certificate
+                // and use the CertificateProvisioner to renew them.
+                // For now, we log the intent.
 
-                    // Example logic:
-                    // let domains = extract_domains(&cert_data)?;
-                    // let provisioner = CertificateProvisioner::new(domains);
-                    // provisioner.execute(config).await?;
-                }
+                // Example logic:
+                // let domains = extract_domains(&cert_data)?;
+                // let provisioner = CertificateProvisioner::new(domains);
+                // provisioner.execute(config).await?;
+            }
         }
 
         Ok(())

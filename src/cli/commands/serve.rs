@@ -64,8 +64,9 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
     let mut acme_config = crate::client::AcmeConfig::new(&config.acme.directory)
         .with_tos_agreed(config.acme.tos_agreed);
     for contact in &config.acme.contact {
-        if contact.starts_with("mailto:") {
-            acme_config = acme_config.with_contact(crate::types::Contact::email(&contact[7..]));
+        if contact.strip_prefix("mailto:").is_some() {
+            let contact_mail = &contact[7..];
+            acme_config = acme_config.with_contact(crate::types::Contact::email(contact_mail));
         }
     }
     let client = crate::client::AcmeClient::new(acme_config)?;

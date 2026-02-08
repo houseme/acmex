@@ -35,9 +35,10 @@ impl<'a> JwsSigner<'a> {
         let signing_input = format!("{}.{}", header_encoded, payload_encoded);
 
         // Sign using rcgen's KeyPair (requires SigningKey trait)
-        let signature = self.key_pair.sign(signing_input.as_bytes()).map_err(|e| {
-            AcmeError::crypto(format!("JWS signing failed: {}", e))
-        })?;
+        let signature = self
+            .key_pair
+            .sign(signing_input.as_bytes())
+            .map_err(|e| AcmeError::crypto(format!("JWS signing failed: {}", e)))?;
 
         let signature_encoded = URL_SAFE_NO_PAD.encode(&signature);
 

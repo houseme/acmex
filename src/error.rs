@@ -22,7 +22,7 @@ pub enum AcmeError {
         /// The status of the order when the error occurred.
         status: String,
         /// Detailed error message from the server.
-        detail: String
+        detail: String,
     },
 
     /// Errors occurring during challenge verification.

@@ -65,9 +65,10 @@ pub struct DirectoryManager {
 impl DirectoryManager {
     /// Creates a new `DirectoryManager` for the given ACME directory URL.
     pub fn new(url: impl Into<String>, http_client: reqwest::Client) -> Self {
-        tracing::debug!("Initializing DirectoryManager for URL: {}", url.as_ref());
+        let url = url.into();
+        tracing::debug!("Initializing DirectoryManager for URL: {}", url);
         Self {
-            url: url.into(),
+            url,
             directory: Arc::new(RwLock::new(None)),
             http_client,
         }
@@ -82,7 +83,10 @@ impl DirectoryManager {
         })?;
 
         if !response.status().is_success() {
-            tracing::error!("ACME directory request failed with status: {}", response.status());
+            tracing::error!(
+                "ACME directory request failed with status: {}",
+                response.status()
+            );
             return Err(crate::error::AcmeError::protocol(format!(
                 "Failed to fetch directory: HTTP {}",
                 response.status()

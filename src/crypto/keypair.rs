@@ -115,15 +115,15 @@ impl KeyPairGenerator {
     pub fn generate(&self) -> Result<rcgen::KeyPair> {
         tracing::info!("Generating new {} key pair", self.key_type);
         match self.key_type {
-            KeyType::Ed25519 => {
-                rcgen::KeyPair::generate()
-                    .map_err(|e| {
-                        tracing::error!("Failed to generate Ed25519 key: {}", e);
-                        AcmeError::crypto(format!("Failed to generate Ed25519 key: {}", e))
-                    })
-            },
+            KeyType::Ed25519 => rcgen::KeyPair::generate().map_err(|e| {
+                tracing::error!("Failed to generate Ed25519 key: {}", e);
+                AcmeError::crypto(format!("Failed to generate Ed25519 key: {}", e))
+            }),
             _ => {
-                tracing::error!("Key generation for {} is not yet implemented", self.key_type);
+                tracing::error!(
+                    "Key generation for {} is not yet implemented",
+                    self.key_type
+                );
                 Err(AcmeError::crypto(format!(
                     "Key type {} generation not yet implemented",
                     self.key_type

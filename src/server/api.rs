@@ -77,11 +77,10 @@ pub async fn start_server(
     let tasks = Arc::new(RwLock::new(HashMap::new()));
 
     // Load API keys from environment variable ACMEX_API_KEYS (comma separated)
-    let api_keys_str =
-        std::env::var("ACMEX_API_KEYS").unwrap_or_else(|_| {
-            tracing::warn!("ACMEX_API_KEYS not set, using default insecure key");
-            "secret-admin-key".to_string()
-        });
+    let api_keys_str = std::env::var("ACMEX_API_KEYS").unwrap_or_else(|_| {
+        tracing::warn!("ACMEX_API_KEYS not set, using default insecure key");
+        "secret-admin-key".to_string()
+    });
     let api_keys: Vec<String> = api_keys_str
         .split(',')
         .map(|s| s.trim().to_string())
@@ -138,12 +137,10 @@ pub async fn start_server(
 
     tracing::info!("AcmeX API server is now listening on http://{}", addr);
 
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| {
-            tracing::error!("Axum server error: {}", e);
-            crate::error::AcmeError::transport(format!("Server error: {}", e))
-        })?;
+    axum::serve(listener, app).await.map_err(|e| {
+        tracing::error!("Axum server error: {}", e);
+        crate::error::AcmeError::transport(format!("Server error: {}", e))
+    })?;
 
     Ok(())
 }

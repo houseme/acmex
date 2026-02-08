@@ -18,20 +18,18 @@ pub struct HttpResponse {
 impl HttpResponse {
     /// Returns the response body as a UTF-8 string.
     pub fn text(&self) -> Result<String> {
-        String::from_utf8(self.body.clone())
-            .map_err(|e| {
-                tracing::error!("Failed to decode HTTP response body as UTF-8: {}", e);
-                crate::error::AcmeError::transport(format!("Invalid UTF-8: {}", e))
-            })
+        String::from_utf8(self.body.clone()).map_err(|e| {
+            tracing::error!("Failed to decode HTTP response body as UTF-8: {}", e);
+            crate::error::AcmeError::transport(format!("Invalid UTF-8: {}", e))
+        })
     }
 
     /// Deserializes the response body from JSON into the specified type.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
-        serde_json::from_slice(&self.body)
-            .map_err(|e| {
-                tracing::error!("Failed to parse HTTP response body as JSON: {}", e);
-                crate::error::AcmeError::transport(format!("JSON parse error: {}", e))
-            })
+        serde_json::from_slice(&self.body).map_err(|e| {
+            tracing::error!("Failed to parse HTTP response body as JSON: {}", e);
+            crate::error::AcmeError::transport(format!("JSON parse error: {}", e))
+        })
     }
 
     /// Returns true if the status code indicates success (2xx).
@@ -82,6 +80,13 @@ pub struct HttpClient {
     config: HttpClientConfig,
 }
 
+impl Default for HttpClient {
+    /// Creates a new `HttpClient` with default settings.
+    fn default() -> Self {
+        Self::new(HttpClientConfig::default()).expect("Failed to initialize default HttpClient")
+    }
+}
+
 impl HttpClient {
     /// Creates a new `HttpClient` with the specified configuration.
     pub fn new(config: HttpClientConfig) -> Result<Self> {
@@ -102,11 +107,6 @@ impl HttpClient {
             })?;
 
         Ok(Self { client, config })
-    }
-
-    /// Creates a new `HttpClient` with default settings.
-    pub fn default() -> Result<Self> {
-        Self::new(HttpClientConfig::default())
     }
 
     /// Executes an asynchronous GET request.
@@ -141,13 +141,10 @@ impl HttpClient {
 
     /// Internal helper to execute a request and transform the response.
     async fn execute_request(&self, request: reqwest::RequestBuilder) -> Result<HttpResponse> {
-        let response = request
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("Network request failed: {}", e);
-                crate::error::AcmeError::transport(format!("Request failed: {}", e))
-            })?;
+        let response = request.send().await.map_err(|e| {
+            tracing::error!("Network request failed: {}", e);
+            crate::error::AcmeError::transport(format!("Request failed: {}", e))
+        })?;
 
         let status = response.status().as_u16();
         let headers = response
@@ -199,6 +196,8 @@ mod tests {
     #[tokio::test]
     async fn test_http_client_creation() {
         let client = HttpClient::default();
-        assert!(client.is_ok());
+        assert_eq!(client.config().user_agent, "AcmeX/0.7.0");
+        assert_eq!(client.config().timeout.as_secs(), 30);
+        assert!(client.config().follow_redirects);
     }
 }

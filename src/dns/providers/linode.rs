@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
@@ -52,7 +52,7 @@ struct LinodeListResponse {
 
 #[derive(Debug, Deserialize)]
 struct LinodeRecord {
-    id: u64,
+    _id: u64,
     target: String,
 }
 
@@ -90,9 +90,10 @@ impl DnsProvider for LinodeDnsProvider {
             return Err(AcmeError::protocol(format!("Linode error: {}", text)));
         }
 
-        let body: LinodeRecordResponse = response.json().await.map_err(|e| {
-            AcmeError::protocol(format!("Failed to parse Linode response: {}", e))
-        })?;
+        let body: LinodeRecordResponse = response
+            .json()
+            .await
+            .map_err(|e| AcmeError::protocol(format!("Failed to parse Linode response: {}", e)))?;
 
         info!("Linode TXT record created successfully, ID: {}", body.id);
         Ok(body.id.to_string())
@@ -117,7 +118,10 @@ impl DnsProvider for LinodeDnsProvider {
         if !response.status().is_success() {
             let text = response.text().await.unwrap_or_default();
             error!("Linode delete record error: {}", text);
-            return Err(AcmeError::protocol(format!("Linode delete error: {}", text)));
+            return Err(AcmeError::protocol(format!(
+                "Linode delete error: {}",
+                text
+            )));
         }
 
         info!("Linode TXT record deleted successfully");
@@ -144,9 +148,10 @@ impl DnsProvider for LinodeDnsProvider {
             return Ok(false);
         }
 
-        let body: LinodeListResponse = response.json().await.map_err(|_| {
-            AcmeError::protocol("Failed to parse Linode list response".to_string())
-        })?;
+        let body: LinodeListResponse = response
+            .json()
+            .await
+            .map_err(|_| AcmeError::protocol("Failed to parse Linode list response".to_string()))?;
 
         for record in body.data {
             if record.target == value {

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
+use std::str::FromStr;
 use std::time::Duration;
 
 /// Main configuration structure for the AcmeX application.
@@ -542,12 +543,16 @@ impl Config {
             tracing::error!("Failed to read config file: {}", e);
             AcmeError::configuration(format!("Failed to read config file: {}", e))
         })?;
-        Self::from_str(&content)
+        content.parse()
     }
+}
+
+impl FromStr for Config {
+    type Err = AcmeError;
 
     /// Loads configuration from a TOML string.
-    pub fn from_str(content: &str) -> Result<Self> {
-        let mut config: Config = toml::from_str(content).map_err(|e| {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let mut config: Config = toml::from_str(s).map_err(|e| {
             tracing::error!("Failed to parse TOML configuration: {}", e);
             AcmeError::configuration(format!("Failed to parse TOML: {}", e))
         })?;
@@ -556,11 +561,13 @@ impl Config {
         let ca_config = config.acme.to_ca_config()?;
         config.acme.directory = ca_config
             .directory_url()
-            .map_err(|e| AcmeError::configuration(e))?;
+            .map_err(AcmeError::configuration)?;
 
         Ok(config)
     }
+}
 
+impl Config {
     /// High-standard environment variable override implementation: supports all parameters and ensures core state synchronization.
     pub fn apply_env_overrides(&mut self) -> Result<()> {
         tracing::debug!("Applying comprehensive environment variable overrides");
@@ -599,16 +606,16 @@ impl Config {
             self.challenge.challenge_type = ct;
         }
 
-        if let Ok(interval) = env::var("ACMEX_RENEWAL_CHECK_INTERVAL") {
-            if let Ok(secs) = interval.parse::<u64>() {
-                self.renewal.check_interval = secs;
-            }
+        if let Ok(interval) = env::var("ACMEX_RENEWAL_CHECK_INTERVAL")
+            && let Ok(secs) = interval.parse::<u64>()
+        {
+            self.renewal.check_interval = secs;
         }
 
-        if let Ok(days) = env::var("ACMEX_RENEWAL_BEFORE_DAYS") {
-            if let Ok(d) = days.parse::<u32>() {
-                self.renewal.renew_before_days = d;
-            }
+        if let Ok(days) = env::var("ACMEX_RENEWAL_BEFORE_DAYS")
+            && let Ok(d) = days.parse::<u32>()
+        {
+            self.renewal.renew_before_days = d;
         }
 
         // 4. Critical: Re-trigger resolution of derived state
@@ -655,19 +662,19 @@ impl Config {
 
         match self.storage.backend.as_str() {
             "file" => {
-                if let Some(ref file_config) = self.storage.file {
-                    if file_config.path.is_empty() {
-                        return Err(AcmeError::configuration(
-                            "File storage path cannot be empty",
-                        ));
-                    }
+                if let Some(ref file_config) = self.storage.file
+                    && file_config.path.is_empty()
+                {
+                    return Err(AcmeError::configuration(
+                        "File storage path cannot be empty",
+                    ));
                 }
             }
             "redis" => {
-                if let Some(ref redis_config) = self.storage.redis {
-                    if redis_config.url.is_empty() {
-                        return Err(AcmeError::configuration("Redis URL cannot be empty"));
-                    }
+                if let Some(ref redis_config) = self.storage.redis
+                    && redis_config.url.is_empty()
+                {
+                    return Err(AcmeError::configuration("Redis URL cannot be empty"));
                 }
             }
             _ => {}

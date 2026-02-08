@@ -1,5 +1,6 @@
 use acmex::challenge::{ChallengeSolverRegistry, Http01Solver};
 use acmex::prelude::*;
+use std::error::Error;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn Error>> {

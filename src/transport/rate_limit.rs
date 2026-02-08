@@ -27,7 +27,11 @@ impl RateLimiter {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        tracing::debug!("Initializing RateLimiter (max: {}, rate: {}/s)", max_tokens, refill_rate);
+        tracing::debug!(
+            "Initializing RateLimiter (max: {}, rate: {}/s)",
+            max_tokens,
+            refill_rate
+        );
         Self {
             max_tokens,
             refill_rate,
@@ -53,7 +57,10 @@ impl RateLimiter {
             tracing::debug!("Token acquired (remaining: {:.2})", *current);
             true
         } else {
-            tracing::warn!("Rate limit exceeded: not enough tokens (available: {:.2})", *current);
+            tracing::warn!(
+                "Rate limit exceeded: not enough tokens (available: {:.2})",
+                *current
+            );
             false
         }
     }
@@ -103,7 +110,10 @@ pub struct RequestLimiter {
 impl RequestLimiter {
     /// Creates a new `RequestLimiter` with the specified concurrency limit.
     pub fn new(max_concurrent: u32) -> Self {
-        tracing::debug!("Initializing RequestLimiter (max concurrent: {})", max_concurrent);
+        tracing::debug!(
+            "Initializing RequestLimiter (max concurrent: {})",
+            max_concurrent
+        );
         Self {
             max_concurrent,
             current: Arc::new(AtomicU64::new(0)),

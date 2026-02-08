@@ -1,10 +1,10 @@
-/// Cryptographic primitives layer.
-/// This module provides foundational cryptographic functionality including
-/// key generation, digital signatures, hashing, and various encoding schemes
-/// required for the ACME protocol and certificate management.
-///
-/// The architecture is designed to be modular, allowing for easy extension
-/// of supported algorithms and encoding formats.
+//! Cryptographic primitives layer.
+//! This module provides foundational cryptographic functionality including
+//! key generation, digital signatures, hashing, and various encoding schemes
+//! required for the ACME protocol and certificate management.
+//!
+//! The architecture is designed to be modular, allowing for easy extension
+//! of supported algorithms and encoding formats.
 
 pub mod encoding;
 pub mod hash;

@@ -38,7 +38,7 @@ impl KeyPair {
         let pem_str = self.0.serialize_pem();
         fs::write(path_ref, pem_str).map_err(|e| {
             tracing::error!("Failed to write key file {:?}: {}", path_ref, e);
-            e.into()
+            crate::error::AcmeError::from(e)
         })?;
         Ok(())
     }
@@ -49,7 +49,7 @@ impl KeyPair {
         tracing::info!("Loading key pair from file: {:?}", path_ref);
         let content = fs::read_to_string(path_ref).map_err(|e| {
             tracing::error!("Failed to read key file {:?}: {}", path_ref, e);
-            e.into()
+            crate::error::AcmeError::from(e)
         })?;
         Self::from_pem(&content)
     }

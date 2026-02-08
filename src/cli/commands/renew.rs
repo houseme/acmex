@@ -57,8 +57,8 @@ pub async fn handle_renew(domains: Vec<String>, _force: bool, storage_path: Stri
     let _now = SystemTime::now();
 
     // Get expiration duration
-    let expiry_timestamp = Timestamp::from_millisecond(not_after.timestamp() * 1000)
-        .map_err(|_| {
+    let expiry_timestamp =
+        Timestamp::from_millisecond(not_after.timestamp() * 1000).map_err(|_| {
             crate::error::AcmeError::Certificate("Failed to parse expiration timestamp".to_string())
         })?;
 

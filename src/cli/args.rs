@@ -14,7 +14,7 @@ pub struct Cli {
     pub log_level: String,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Obtain a new certificate
     Obtain(ObtainArgs),
@@ -41,13 +41,13 @@ pub enum Commands {
     Serve(ServeArgs),
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct OrderArgs {
     #[command(subcommand)]
     pub command: OrderCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum OrderCommands {
     /// List all orders
     List,
@@ -58,13 +58,13 @@ pub enum OrderCommands {
     },
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct CertArgs {
     #[command(subcommand)]
     pub command: CertCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum CertCommands {
     /// List all managed certificates
     List,
@@ -82,7 +82,7 @@ pub enum CertCommands {
     },
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct ObtainArgs {
     /// Domain(s) to obtain certificate for
     #[arg(short, long, required = true)]
@@ -113,7 +113,7 @@ pub struct ObtainArgs {
     pub dns_provider: Option<String>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct RenewArgs {
     /// Domain(s) to renew
     #[arg(short, long, required = true)]
@@ -128,7 +128,7 @@ pub struct RenewArgs {
     pub force: bool,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct DaemonArgs {
     /// Domain(s) to manage
     #[arg(short, long, required = true)]
@@ -155,20 +155,20 @@ pub struct DaemonArgs {
     pub notify_email: Option<String>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct InfoArgs {
     /// Certificate file path
     #[arg(short, long, required = true)]
     pub cert: String,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct AccountArgs {
     #[command(subcommand)]
     pub command: AccountCommands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum AccountCommands {
     /// Register a new account
     Register(AccountRegisterArgs),
@@ -180,7 +180,7 @@ pub enum AccountCommands {
     RotateKey(AccountRotateKeyArgs),
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct AccountRegisterArgs {
     /// Contact email
     #[arg(short, long, required = true)]
@@ -195,7 +195,7 @@ pub struct AccountRegisterArgs {
     pub key_path: String,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct AccountUpdateArgs {
     /// Account key path
     #[arg(short, long, required = true)]
@@ -210,7 +210,7 @@ pub struct AccountUpdateArgs {
     pub prod: bool,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct AccountDeactivateArgs {
     /// Account key path
     #[arg(short, long, required = true)]
@@ -221,7 +221,7 @@ pub struct AccountDeactivateArgs {
     pub prod: bool,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct AccountRotateKeyArgs {
     /// Current account key path
     #[arg(short, long, required = true)]
@@ -236,7 +236,7 @@ pub struct AccountRotateKeyArgs {
     pub prod: bool,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct ServeArgs {
     /// Listen address
     #[arg(short, long, default_value = "127.0.0.1:8080")]

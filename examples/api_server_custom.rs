@@ -2,6 +2,8 @@ use acmex::config::Config;
 use acmex::notifications::WebhookManager;
 use acmex::prelude::*;
 use acmex::server::start_server;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {

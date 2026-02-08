@@ -127,9 +127,10 @@ impl<'a> AccountManager<'a> {
 
         // Cache the nonce from response
         if let Some(nonce_header) = response.headers().get("replay-nonce")
-            && let Ok(nonce_str) = nonce_header.to_str() {
-                self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
-            }
+            && let Ok(nonce_str) = nonce_header.to_str()
+        {
+            self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+        }
 
         // Extract account URL before consuming response
         let account_url = response
@@ -150,7 +151,11 @@ impl<'a> AccountManager<'a> {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            tracing::error!("Account registration failed with status {}: {}", status, error_text);
+            tracing::error!(
+                "Account registration failed with status {}: {}",
+                status,
+                error_text
+            );
             return Err(crate::error::AcmeError::account(format!(
                 "Failed to register account: HTTP {}: {}",
                 status, error_text
@@ -173,7 +178,11 @@ impl<'a> AccountManager<'a> {
         account_id: &str,
         contacts: Vec<Contact>,
     ) -> Result<Account> {
-        tracing::info!("Updating contacts for account {}: {:?}", account_id, contacts);
+        tracing::info!(
+            "Updating contacts for account {}: {:?}",
+            account_id,
+            contacts
+        );
         let nonce = self.nonce_manager.get_nonce().await?;
 
         let header = json!({
@@ -204,9 +213,10 @@ impl<'a> AccountManager<'a> {
 
         // Cache the nonce from response
         if let Some(nonce_header) = response.headers().get("replay-nonce")
-            && let Ok(nonce_str) = nonce_header.to_str() {
-                self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
-            }
+            && let Ok(nonce_str) = nonce_header.to_str()
+        {
+            self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -214,7 +224,11 @@ impl<'a> AccountManager<'a> {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            tracing::error!("Contact update failed with status {}: {}", status, error_text);
+            tracing::error!(
+                "Contact update failed with status {}: {}",
+                status,
+                error_text
+            );
             return Err(crate::error::AcmeError::account(format!(
                 "Failed to update account: HTTP {}: {}",
                 status, error_text
@@ -260,9 +274,10 @@ impl<'a> AccountManager<'a> {
 
         // Cache the nonce from response
         if let Some(nonce_header) = response.headers().get("replay-nonce")
-            && let Ok(nonce_str) = nonce_header.to_str() {
-                self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
-            }
+            && let Ok(nonce_str) = nonce_header.to_str()
+        {
+            self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+        }
 
         let status = response.status();
         if !status.is_success() {
@@ -315,13 +330,18 @@ impl<'a> AccountManager<'a> {
 
         // Cache the nonce from response
         if let Some(nonce_header) = response.headers().get("replay-nonce")
-            && let Ok(nonce_str) = nonce_header.to_str() {
-                self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
-            }
+            && let Ok(nonce_str) = nonce_header.to_str()
+        {
+            self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+        }
 
         let status = response.status();
         if !status.is_success() {
-            tracing::error!("Account deactivation failed for {}, status: {}", account_id, status);
+            tracing::error!(
+                "Account deactivation failed for {}, status: {}",
+                account_id,
+                status
+            );
             return Err(crate::error::AcmeError::account(format!(
                 "Failed to deactivate account: HTTP {}",
                 status
