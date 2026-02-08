@@ -40,6 +40,7 @@ pub trait Signer: Send + Sync {
 
 /// HMAC 签名器 (简化实现)
 pub struct HmacSigner {
+    #[allow(dead_code)]
     key: Vec<u8>,
     algorithm: String,
 }

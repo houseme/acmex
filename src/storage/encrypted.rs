@@ -35,7 +35,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
             let mut out = nonce_bytes.to_vec();
             out.extend_from_slice(&in_out);
-            return Ok(out);
+            Ok(out)
         }
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
@@ -88,7 +88,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
                 .open_in_place(nonce, Aad::empty(), &mut in_out)
                 .map_err(|_| AcmeError::crypto("Decrypt failed".to_string()))?;
 
-            return Ok(plaintext.to_vec());
+            Ok(plaintext.to_vec())
         }
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]

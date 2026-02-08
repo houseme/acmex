@@ -48,7 +48,7 @@ impl TencentCloudDnsProvider {
         let canonical_uri = "/";
         let canonical_querystring = "";
         let canonical_headers =
-            format!("content-type:application/json\nhost:dnspod.tencentcloudapi.com\n");
+            "content-type:application/json\nhost:dnspod.tencentcloudapi.com\n".to_string();
         let signed_headers = "content-type;host";
         let mut hasher = Sha256::new();
         hasher.update(payload);
@@ -138,7 +138,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
             self.secret_id,
-            Zoned::now().strftime("%Y-%m-%d").to_string(),
+            Zoned::now().strftime("%Y-%m-%d"),
             signature
         );
 
@@ -195,7 +195,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
             self.secret_id,
-            Zoned::now().strftime("%Y-%m-%d").to_string(),
+            Zoned::now().strftime("%Y-%m-%d"),
             signature
         );
 
@@ -244,7 +244,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
             self.secret_id,
-            Zoned::now().strftime("%Y-%m-%d").to_string(),
+            Zoned::now().strftime("%Y-%m-%d"),
             signature
         );
 
@@ -271,11 +271,10 @@ impl DnsProvider for TencentCloudDnsProvider {
 
         if let Some(records) = body["Response"]["RecordList"].as_array() {
             for record in records {
-                if let Some(v) = record["Value"].as_str() {
-                    if v == value {
+                if let Some(v) = record["Value"].as_str()
+                    && v == value {
                         return Ok(true);
                     }
-                }
             }
         }
 

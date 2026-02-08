@@ -64,11 +64,10 @@ impl DnsCache {
     /// Get A records
     pub async fn get_a(&self, domain: &str) -> Option<Vec<IpAddr>> {
         let cache = self.a_records.read().await;
-        if let Some(record) = cache.get(domain) {
-            if !record.is_expired() {
+        if let Some(record) = cache.get(domain)
+            && !record.is_expired() {
                 return Some(record.value.clone());
             }
-        }
         None
     }
 
@@ -84,11 +83,10 @@ impl DnsCache {
     /// Get AAAA records
     pub async fn get_aaaa(&self, domain: &str) -> Option<Vec<IpAddr>> {
         let cache = self.aaaa_records.read().await;
-        if let Some(record) = cache.get(domain) {
-            if !record.is_expired() {
+        if let Some(record) = cache.get(domain)
+            && !record.is_expired() {
                 return Some(record.value.clone());
             }
-        }
         None
     }
 
@@ -104,11 +102,10 @@ impl DnsCache {
     /// Get TXT records
     pub async fn get_txt(&self, domain: &str) -> Option<Vec<String>> {
         let cache = self.txt_records.read().await;
-        if let Some(record) = cache.get(domain) {
-            if !record.is_expired() {
+        if let Some(record) = cache.get(domain)
+            && !record.is_expired() {
                 return Some(record.value.clone());
             }
-        }
         None
     }
 

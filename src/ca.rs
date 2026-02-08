@@ -12,9 +12,11 @@ use std::fmt;
 /// Supported Certificate Authorities
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum CertificateAuthority {
     /// Let's Encrypt (default)
     #[serde(rename = "letsencrypt")]
+    #[default]
     LetsEncrypt,
 
     /// Google Trust Services
@@ -32,11 +34,6 @@ pub enum CertificateAuthority {
     Custom,
 }
 
-impl Default for CertificateAuthority {
-    fn default() -> Self {
-        CertificateAuthority::LetsEncrypt
-    }
-}
 
 impl fmt::Display for CertificateAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -73,9 +70,11 @@ pub struct CAConfig {
 /// ACME Environment
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Environment {
     /// Production environment
     #[serde(rename = "production")]
+    #[default]
     Production,
 
     /// Staging/Testing environment
@@ -83,11 +82,6 @@ pub enum Environment {
     Staging,
 }
 
-impl Default for Environment {
-    fn default() -> Self {
-        Environment::Production
-    }
-}
 
 impl CAConfig {
     /// Create a new CA configuration

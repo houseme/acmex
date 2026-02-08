@@ -84,11 +84,10 @@ impl GoogleCloudDnsProvider {
             for zone in zones {
                 if let Some(dns_name) = zone["dnsName"].as_str() {
                     let dns_name_trimmed = dns_name.trim_end_matches('.');
-                    if dns_name_trimmed == zone_name {
-                        if let Some(id) = zone["id"].as_str() {
+                    if dns_name_trimmed == zone_name
+                        && let Some(id) = zone["id"].as_str() {
                             return Ok(id.to_string());
                         }
-                    }
                 }
             }
         }
@@ -287,19 +286,16 @@ impl DnsProvider for GoogleCloudDnsProvider {
 
         if let Some(rrsets) = body["rrsets"].as_array() {
             for rrset in rrsets {
-                if rrset["name"].as_str() == Some(&record_name) {
-                    if rrset["type"].as_str() == Some("TXT") {
-                        if let Some(rrdatas) = rrset["rrdatas"].as_array() {
+                if rrset["name"].as_str() == Some(&record_name)
+                    && rrset["type"].as_str() == Some("TXT")
+                        && let Some(rrdatas) = rrset["rrdatas"].as_array() {
                             for rrdata in rrdatas {
-                                if let Some(s) = rrdata.as_str() {
-                                    if s == value {
+                                if let Some(s) = rrdata.as_str()
+                                    && s == value {
                                         return Ok(true);
                                     }
-                                }
                             }
                         }
-                    }
-                }
             }
         }
 

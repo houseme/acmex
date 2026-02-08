@@ -69,14 +69,13 @@ impl PemEncoding {
     pub fn extract_data(pem_data: &str, expected_label: Option<&str>) -> Result<Vec<u8>> {
         let (label, data) = Self::decode(pem_data)?;
 
-        if let Some(expected) = expected_label {
-            if label != expected {
+        if let Some(expected) = expected_label
+            && label != expected {
                 return Err(AcmeError::crypto(format!(
                     "Expected PEM label '{}', got '{}'",
                     expected, label
                 )));
             }
-        }
 
         Ok(data)
     }
@@ -99,7 +98,7 @@ impl HexEncoding {
 
     /// 从十六进制字符串解码
     pub fn decode(hex_str: &str) -> Result<Vec<u8>> {
-        if hex_str.len() % 2 != 0 {
+        if !hex_str.len().is_multiple_of(2) {
             return Err(AcmeError::crypto(
                 "Hex string length must be even".to_string(),
             ));

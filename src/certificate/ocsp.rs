@@ -50,11 +50,10 @@ impl OcspVerifier {
             if let ParsedExtension::AuthorityInfoAccess(aia) = ext.parsed_extension() {
                 for access_desc in &aia.accessdescs {
                     // OID 1.3.6.1.5.5.7.48.1 (id-ad-ocsp)
-                    if access_desc.access_method.to_string() == "1.3.6.1.5.5.7.48.1" {
-                        if let GeneralName::URI(uri) = access_desc.access_location {
+                    if access_desc.access_method.to_string() == "1.3.6.1.5.5.7.48.1"
+                        && let GeneralName::URI(uri) = access_desc.access_location {
                             return Ok(uri.to_string());
                         }
-                    }
                 }
             }
         }

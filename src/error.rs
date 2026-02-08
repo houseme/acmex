@@ -216,3 +216,10 @@ impl From<std::time::SystemTimeError> for AcmeError {
         AcmeError::Protocol(format!("SystemTime error: {}", err))
     }
 }
+
+#[cfg(feature = "dns-route53")]
+impl From<aws_sdk_route53::error::BuildError> for AcmeError {
+    fn from(err: aws_sdk_route53::error::BuildError) -> Self {
+        AcmeError::Configuration(format!("Route53 build error: {}", err))
+    }
+}

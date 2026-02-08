@@ -138,7 +138,7 @@ impl AcmeClient {
             account_id,
         );
 
-        let identifiers: Vec<Identifier> = domains.iter().map(|d| Identifier::dns(d)).collect();
+        let identifiers: Vec<Identifier> = domains.iter().map(Identifier::dns).collect();
         let order_req = NewOrderRequest {
             identifiers,
             not_before: None,
@@ -177,7 +177,7 @@ impl AcmeClient {
         );
 
         // Create order
-        let identifiers: Vec<Identifier> = domains.iter().map(|d| Identifier::dns(d)).collect();
+        let identifiers: Vec<Identifier> = domains.iter().map(Identifier::dns).collect();
         let order_req = NewOrderRequest {
             identifiers,
             not_before: None,

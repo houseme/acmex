@@ -73,14 +73,13 @@ impl<'a> CertificateRevocation<'a> {
             })?;
 
         // Cache nonce
-        if let Some(nonce_header) = response.headers().get("replay-nonce") {
-            if let Ok(nonce_str) = nonce_header.to_str() {
+        if let Some(nonce_header) = response.headers().get("replay-nonce")
+            && let Ok(nonce_str) = nonce_header.to_str() {
                 self.account_manager
                     .nonce_manager
                     .cache_nonce(nonce_str.to_string())
                     .await;
             }
-        }
 
         let status = response.status();
         if !status.is_success() {

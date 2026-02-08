@@ -34,7 +34,7 @@ pub async fn handle_daemon(
     info!("Daemon started for domains: {:?}", domains);
 
     let check_interval = Duration::from_secs(check_interval_secs);
-    let renew_before_secs = (renew_before_days as u64) * 24 * 3600;
+    let renew_before_secs = renew_before_days * 24 * 3600;
 
     // Setup signal handling for graceful shutdown
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
@@ -64,11 +64,10 @@ pub async fn handle_daemon(
                             println!("✓ Renewed {} certificates at {}", count, Zoned::now());
 
                             // Send notification if email provided
-                            if let Some(ref email) = notify_email {
-                                if let Err(e) = send_renewal_notification(email, count).await {
+                            if let Some(ref email) = notify_email
+                                && let Err(e) = send_renewal_notification(email, count).await {
                                     warn!("Failed to send notification: {}", e);
                                 }
-                            }
                         } else {
                             info!("No certificates needed renewal");
                         }
@@ -78,11 +77,10 @@ pub async fn handle_daemon(
                         warn!("Renewal check failed: {}", e);
 
                         // Send error notification if email provided
-                        if let Some(ref email) = notify_email {
-                            if let Err(e) = send_error_notification(email, &e.to_string()).await {
+                        if let Some(ref email) = notify_email
+                            && let Err(e) = send_error_notification(email, &e.to_string()).await {
                                 warn!("Failed to send error notification: {}", e);
                             }
-                        }
                     }
                 }
             }

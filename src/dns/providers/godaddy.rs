@@ -193,11 +193,10 @@ impl DnsProvider for GodaddyDnsProvider {
 
         if let Some(records_array) = body.as_array() {
             for record in records_array {
-                if let Some(data) = record["data"].as_str() {
-                    if data == value {
+                if let Some(data) = record["data"].as_str()
+                    && data == value {
                         return Ok(true);
                     }
-                }
             }
         }
 

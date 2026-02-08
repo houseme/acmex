@@ -15,6 +15,7 @@ use std::time::Duration;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Config {
     #[serde(default)]
     pub acme: AcmeSettings,
@@ -283,6 +284,7 @@ pub struct MetricsSettings {
 
 /// Notification settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct NotificationSettings {
     /// Webhook configurations
     #[serde(default)]
@@ -562,14 +564,6 @@ impl Default for MetricsSettings {
     }
 }
 
-impl Default for NotificationSettings {
-    fn default() -> Self {
-        Self {
-            webhooks: Vec::new(),
-            email: Vec::new(),
-        }
-    }
-}
 
 impl Default for CliSettings {
     fn default() -> Self {
@@ -594,20 +588,6 @@ impl Default for ServerSettings {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            acme: AcmeSettings::default(),
-            storage: StorageSettings::default(),
-            challenge: ChallengeSettings::default(),
-            renewal: RenewalSettings::default(),
-            metrics: None,
-            notifications: None,
-            cli: None,
-            server: None,
-        }
-    }
-}
 
 impl Config {
     /// Create a new configuration with defaults
@@ -618,14 +598,14 @@ impl Config {
     /// Load configuration from a TOML file
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| AcmeError::configuration(&format!("Failed to read config file: {}", e)))?;
+            .map_err(|e| AcmeError::configuration(format!("Failed to read config file: {}", e)))?;
         Self::from_str(&content)
     }
 
     /// Load configuration from a TOML string
     pub fn from_str(content: &str) -> Result<Self> {
         toml::from_str(content)
-            .map_err(|e| AcmeError::configuration(&format!("Failed to parse TOML: {}", e)))
+            .map_err(|e| AcmeError::configuration(format!("Failed to parse TOML: {}", e)))
     }
 
     /// Apply environment variable overrides
@@ -641,18 +621,16 @@ impl Config {
         }
 
         // Override file path
-        if let Ok(path) = env::var("ACMEX_STORAGE_FILE_PATH") {
-            if let Some(ref mut file_config) = self.storage.file {
+        if let Ok(path) = env::var("ACMEX_STORAGE_FILE_PATH")
+            && let Some(ref mut file_config) = self.storage.file {
                 file_config.path = Self::expand_env_var(&path)?;
             }
-        }
 
         // Override Redis URL
-        if let Ok(url) = env::var("ACMEX_STORAGE_REDIS_URL") {
-            if let Some(ref mut redis_config) = self.storage.redis {
+        if let Ok(url) = env::var("ACMEX_STORAGE_REDIS_URL")
+            && let Some(ref mut redis_config) = self.storage.redis {
                 redis_config.url = Self::expand_env_var(&url)?;
             }
-        }
 
         // Override challenge type
         if let Ok(challenge_type) = env::var("ACMEX_CHALLENGE_TYPE") {
@@ -660,18 +638,16 @@ impl Config {
         }
 
         // Override renewal check interval
-        if let Ok(interval) = env::var("ACMEX_RENEWAL_CHECK_INTERVAL") {
-            if let Ok(secs) = interval.parse::<u64>() {
+        if let Ok(interval) = env::var("ACMEX_RENEWAL_CHECK_INTERVAL")
+            && let Ok(secs) = interval.parse::<u64>() {
                 self.renewal.check_interval = secs;
             }
-        }
 
         // Override renewal window
-        if let Ok(days) = env::var("ACMEX_RENEWAL_BEFORE_DAYS") {
-            if let Ok(d) = days.parse::<u32>() {
+        if let Ok(days) = env::var("ACMEX_RENEWAL_BEFORE_DAYS")
+            && let Ok(d) = days.parse::<u32>() {
                 self.renewal.renew_before_days = d;
             }
-        }
 
         Ok(())
     }
@@ -703,30 +679,27 @@ impl Config {
         // Validate storage backend
         match self.storage.backend.as_str() {
             "file" => {
-                if let Some(ref file_config) = self.storage.file {
-                    if file_config.path.is_empty() {
+                if let Some(ref file_config) = self.storage.file
+                    && file_config.path.is_empty() {
                         return Err(AcmeError::configuration(
                             "File storage path cannot be empty",
                         ));
                     }
-                }
             }
             "redis" => {
-                if let Some(ref redis_config) = self.storage.redis {
-                    if redis_config.url.is_empty() {
+                if let Some(ref redis_config) = self.storage.redis
+                    && redis_config.url.is_empty() {
                         return Err(AcmeError::configuration("Redis URL cannot be empty"));
                     }
-                }
             }
             "encrypted" => {
-                if let Some(ref encrypted_config) = self.storage.encrypted {
-                    if encrypted_config.encryption_key.is_empty() {
+                if let Some(ref encrypted_config) = self.storage.encrypted
+                    && encrypted_config.encryption_key.is_empty() {
                         return Err(AcmeError::configuration("Encryption key cannot be empty"));
                     }
-                }
             }
             backend => {
-                return Err(AcmeError::configuration(&format!(
+                return Err(AcmeError::configuration(format!(
                     "Invalid storage backend: {}",
                     backend
                 )));
@@ -737,7 +710,7 @@ impl Config {
         match self.challenge.challenge_type.as_str() {
             "http-01" | "dns-01" | "tls-alpn-01" => {}
             challenge_type => {
-                return Err(AcmeError::configuration(&format!(
+                return Err(AcmeError::configuration(format!(
                     "Invalid challenge type: {}",
                     challenge_type
                 )));

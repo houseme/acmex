@@ -257,13 +257,11 @@ impl DnsProvider for AlibabaCloudDnsProvider {
 
         if let Some(domain_records) = body["DomainRecords"]["Record"].as_array() {
             for record in domain_records {
-                if record["Type"].as_str() == Some("TXT") {
-                    if let Some(v) = record["Value"].as_str() {
-                        if v == value {
+                if record["Type"].as_str() == Some("TXT")
+                    && let Some(v) = record["Value"].as_str()
+                        && v == value {
                             return Ok(true);
                         }
-                    }
-                }
             }
         }
 

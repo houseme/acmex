@@ -4,7 +4,7 @@ use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 #[cfg(feature = "dns-route53")]
 use aws_sdk_route53::types::{
-    Change, ChangeAction, ChangeBatch, RRType, ResourceRecord, ResourceRecordSet,
+    Change, ChangeAction, ChangeBatch, RrType, ResourceRecord, ResourceRecordSet,
 };
 
 /// Route53 DNS provider configuration
@@ -23,7 +23,7 @@ pub struct Route53DnsProvider {
 impl Route53DnsProvider {
     #[cfg(feature = "dns-route53")]
     pub async fn new(config: Route53Config) -> Self {
-        let sdk_config = aws_config::load_from_env().await;
+        let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_route53::Client::new(&sdk_config);
         Self { config, client }
     }
@@ -50,7 +50,7 @@ impl DnsProvider for Route53DnsProvider {
                 .resource_record_set(
                     ResourceRecordSet::builder()
                         .name(name)
-                        .r_type(RRType::Txt)
+                        .r#type(RrType::Txt)
                         .ttl(300)
                         .resource_records(
                             ResourceRecord::builder()
@@ -72,7 +72,11 @@ impl DnsProvider for Route53DnsProvider {
                 .await
                 .map_err(|e| AcmeError::transport(format!("Route53 error: {}", e)))?;
 
-            Ok(resp.change_info().id().to_string())
+            let change_info = resp.change_info().ok_or_else(|| {
+                AcmeError::protocol("Route53 response missing change_info".to_string())
+            })?;
+
+            Ok(change_info.id().to_string())
         }
         #[cfg(not(feature = "dns-route53"))]
         {

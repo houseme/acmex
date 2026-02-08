@@ -227,11 +227,10 @@ impl DnsProvider for AzureDnsProvider {
             for record in txt_records {
                 if let Some(values) = record["value"].as_array() {
                     for v in values {
-                        if let Some(s) = v.as_str() {
-                            if s == value {
+                        if let Some(s) = v.as_str()
+                            && s == value {
                                 return Ok(true);
                             }
-                        }
                     }
                 }
             }

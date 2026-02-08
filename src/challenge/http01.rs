@@ -73,11 +73,10 @@ async fn handle_challenge(
     axum::extract::State(key_auth): axum::extract::State<Arc<RwLock<Option<String>>>>,
 ) -> std::result::Result<String, StatusCode> {
     let auth = key_auth.read().await;
-    if let Some(ref auth_str) = *auth {
-        if auth_str.contains(&token) {
+    if let Some(ref auth_str) = *auth
+        && auth_str.contains(&token) {
             return Ok(auth_str.clone());
         }
-    }
     Err(StatusCode::NOT_FOUND)
 }
 

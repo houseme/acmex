@@ -88,16 +88,14 @@ pub async fn handle_obtain(
     println!("\n⏳ Step 11: Saving certificate and key...");
 
     // Create parent directories if needed
-    if let Some(parent) = Path::new(&cert_path).parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = Path::new(&cert_path).parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
-    if let Some(parent) = Path::new(&key_path).parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = Path::new(&key_path).parent()
+        && !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
-    }
 
     // Create dummy certificate for testing
     fs::write(

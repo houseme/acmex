@@ -111,11 +111,10 @@ impl<'a> AccountManager<'a> {
             })?;
 
         // Cache the nonce from response
-        if let Some(nonce_header) = response.headers().get("replay-nonce") {
-            if let Ok(nonce_str) = nonce_header.to_str() {
+        if let Some(nonce_header) = response.headers().get("replay-nonce")
+            && let Ok(nonce_str) = nonce_header.to_str() {
                 self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
             }
-        }
 
         // Extract account URL before consuming response
         let account_url = response
@@ -183,11 +182,10 @@ impl<'a> AccountManager<'a> {
             })?;
 
         // Cache the nonce from response
-        if let Some(nonce_header) = response.headers().get("replay-nonce") {
-            if let Ok(nonce_str) = nonce_header.to_str() {
+        if let Some(nonce_header) = response.headers().get("replay-nonce")
+            && let Ok(nonce_str) = nonce_header.to_str() {
                 self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
             }
-        }
 
         let status = response.status();
         if !status.is_success() {
@@ -235,11 +233,10 @@ impl<'a> AccountManager<'a> {
             })?;
 
         // Cache the nonce from response
-        if let Some(nonce_header) = response.headers().get("replay-nonce") {
-            if let Ok(nonce_str) = nonce_header.to_str() {
+        if let Some(nonce_header) = response.headers().get("replay-nonce")
+            && let Ok(nonce_str) = nonce_header.to_str() {
                 self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
             }
-        }
 
         let status = response.status();
         if !status.is_success() {
@@ -286,11 +283,10 @@ impl<'a> AccountManager<'a> {
             })?;
 
         // Cache the nonce from response
-        if let Some(nonce_header) = response.headers().get("replay-nonce") {
-            if let Ok(nonce_str) = nonce_header.to_str() {
+        if let Some(nonce_header) = response.headers().get("replay-nonce")
+            && let Ok(nonce_str) = nonce_header.to_str() {
                 self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
             }
-        }
 
         let status = response.status();
         if !status.is_success() {
