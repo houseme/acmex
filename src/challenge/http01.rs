@@ -1,6 +1,6 @@
 /// HTTP-01 challenge implementation
 use async_trait::async_trait;
-use axum::{extract::Path, http::StatusCode, routing::get, Router};
+use axum::{Router, extract::Path, http::StatusCode, routing::get};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
