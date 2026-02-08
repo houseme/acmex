@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use hmac::{Hmac, Mac, KeyInit};
 use jiff::Zoned;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info};
+use tracing::{debug, info, error};
 
 /// Huawei Cloud DNS Provider configuration
 #[derive(Debug, Clone)]
@@ -63,24 +63,65 @@ impl HuaweiCloudDnsProvider {
 
         (timestamp, signature)
     }
+
+    /// Find the zone ID for a given domain
+    async fn find_zone_id(&self, domain: &str) -> Result<String> {
+        // Extract the base domain (e.g., _acme-challenge.example.com -> example.com)
+        let parts: Vec<&str> = domain.split('.').collect();
+        let zone_name = if parts.len() > 2 {
+            format!("{}.", parts[parts.len() - 2..].join("."))
+        } else {
+            format!("{}.", domain)
+        };
+
+        debug!("Searching for Huawei Cloud DNS zone: {}", zone_name);
+
+        let url = "/v2/zones";
+        let (timestamp, signature) = self.sign_request("GET", url, "");
+        let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
+
+        let response = self.client.get(&endpoint)
+            .header("X-Sdk-Date", timestamp)
+            .header("Authorization", format!(
+                "SDK-HMAC-SHA256 Access={}, SignedHeaders=host;x-sdk-date, Signature={}",
+                self.access_key, signature
+            ))
+            .send()
+            .await
+            .map_err(|e| AcmeError::transport(format!("Huawei API list zones failed: {}", e)))?;
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            AcmeError::protocol(format!("Failed to parse Huawei zones response: {}", e))
+        })?;
+
+        if let Some(zones) = body["zones"].as_array() {
+            for zone in zones {
+                if zone["name"].as_str() == Some(&zone_name) {
+                    let id = zone["id"].as_str().unwrap_or_default().to_string();
+                    debug!("Found Huawei zone ID: {} for {}", id, zone_name);
+                    return Ok(id);
+                }
+            }
+        }
+
+        error!("Huawei Cloud DNS zone not found for: {}", zone_name);
+        Err(AcmeError::protocol(format!("Zone not found for domain: {}", domain)))
+    }
 }
 
 #[async_trait]
 impl DnsProvider for HuaweiCloudDnsProvider {
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        info!(
-            "Creating TXT record in Huawei Cloud DNS for domain: {}",
-            domain
-        );
+        info!("Creating TXT record in Huawei Cloud DNS: {}", domain);
 
-        // In a real implementation, we would first need to find the zone ID for the domain
-        // For now, we assume the user might provide it or we'd have a lookup method.
-        let zone_id = "zone-id-placeholder";
+        let zone_id = self.find_zone_id(domain).await?;
         let url = format!("/v2/zones/{}/recordsets", zone_id);
-        let payload = format!(
-            r#"{{"name":"{}.","type":"TXT","records":["\"{}\""]}}"#,
-            domain, value
-        );
+        let payload = serde_json::json!({
+            "name": format!("{}.", domain),
+            "type": "TXT",
+            "records": [format!("\"{}\"", value)],
+            "ttl": 300
+        }).to_string();
 
         let (timestamp, signature) = self.sign_request("POST", &url, &payload);
         let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
@@ -104,10 +145,8 @@ impl DnsProvider for HuaweiCloudDnsProvider {
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            return Err(AcmeError::protocol(format!(
-                "Huawei DNS create error: {}",
-                error_text
-            )));
+            error!("Huawei DNS create error: {}", error_text);
+            return Err(AcmeError::protocol(format!("Huawei error: {}", error_text)));
         }
 
         let body: serde_json::Value = response.json().await.map_err(|e| {
@@ -118,17 +157,22 @@ impl DnsProvider for HuaweiCloudDnsProvider {
             AcmeError::protocol("Huawei response missing record ID".to_string())
         })?;
 
-        Ok(record_id.to_string())
+        info!("Huawei Cloud DNS TXT record created successfully, ID: {}", record_id);
+        // We return a composite ID: zone_id:record_id for deletion
+        Ok(format!("{}:{}", zone_id, record_id))
     }
 
-    async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()> {
-        info!(
-            "Deleting TXT record in Huawei Cloud DNS for domain: {}, record_id: {}",
-            domain, record_id
-        );
+    async fn delete_txt_record(&self, _domain: &str, record_id: &str) -> Result<()> {
+        info!("Deleting TXT record from Huawei Cloud DNS: {}", record_id);
 
-        let zone_id = "zone-id-placeholder";
-        let url = format!("/v2/zones/{}/recordsets/{}", zone_id, record_id);
+        let parts: Vec<&str> = record_id.split(':').collect();
+        if parts.len() != 2 {
+            return Err(AcmeError::invalid_input("Invalid Huawei record ID format"));
+        }
+        let zone_id = parts[0];
+        let real_record_id = parts[1];
+
+        let url = format!("/v2/zones/{}/recordsets/{}", zone_id, real_record_id);
         let (timestamp, signature) = self.sign_request("DELETE", &url, "");
 
         let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
@@ -152,17 +196,50 @@ impl DnsProvider for HuaweiCloudDnsProvider {
 
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
-            return Err(AcmeError::protocol(format!(
-                "Huawei DNS delete error: {}",
-                error_text
-            )));
+            error!("Huawei DNS delete error: {}", error_text);
+            return Err(AcmeError::protocol(format!("Huawei delete error: {}", error_text)));
         }
 
         info!("Huawei Cloud DNS TXT record deleted successfully");
         Ok(())
     }
 
-    async fn verify_record(&self, _domain: &str, _value: &str) -> Result<bool> {
-        Ok(true)
+    async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
+        debug!("Verifying Huawei DNS record for: {}", domain);
+        let zone_id = match self.find_zone_id(domain).await {
+            Ok(id) => id,
+            Err(_) => return Ok(false),
+        };
+
+        let url = format!("/v2/zones/{}/recordsets?name={}&type=TXT", zone_id, format!("{}.", domain));
+        let (timestamp, signature) = self.sign_request("GET", &url, "");
+        let endpoint = format!("https://dns.{}.myhuaweicloud.com{}", self.region, url);
+
+        let response = self.client.get(&endpoint)
+            .header("X-Sdk-Date", timestamp)
+            .header("Authorization", format!(
+                "SDK-HMAC-SHA256 Access={}, SignedHeaders=host;x-sdk-date, Signature={}",
+                self.access_key, signature
+            ))
+            .send()
+            .await
+            .map_err(|e| AcmeError::transport(format!("Huawei API verify failed: {}", e)))?;
+
+        let body: serde_json::Value = response.json().await.unwrap_or_default();
+        let quoted_value = format!("\"{}\"", value);
+
+        if let Some(recordsets) = body["recordsets"].as_array() {
+            for rs in recordsets {
+                if let Some(records) = rs["records"].as_array() {
+                    for r in records {
+                        if r.as_str() == Some(&quoted_value) {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
