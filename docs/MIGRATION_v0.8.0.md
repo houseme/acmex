@@ -9,23 +9,28 @@
 
 ## 🎯 Overview
 
-This guide helps you migrate your AcmeX integration from v0.7.0 to v0.8.0. The v0.8.0 release introduces several breaking changes focused on improved stability, performance, and feature completeness. Most migrations involve updating dependencies and minor code adjustments.
+This guide helps you migrate your AcmeX integration from v0.7.0 to v0.8.0. The v0.8.0 release introduces several
+breaking changes focused on improved stability, performance, and feature completeness. Most migrations involve updating
+dependencies and minor code adjustments.
 
 ---
 
 ## 🔄 Breaking Changes Summary
 
 ### 1. **Minimum Rust Version**
+
 - **Change**: Bumped minimum supported Rust version to 1.92
 - **Impact**: Projects using older Rust versions must upgrade
 - **Action Required**: Update Rust toolchain to 1.92+
 
 ### 2. **Feature Flag Renaming**
+
 - **Change**: Some internal feature flags renamed for consistency
 - **Impact**: `Cargo.toml` feature declarations may need updates
 - **Action Required**: Review and update feature flags
 
 ### 3. **API Adjustments**
+
 - **Change**: Minor public API changes for better ergonomics
 - **Impact**: Code using deprecated methods may need updates
 - **Action Required**: Update method calls as needed
@@ -63,7 +68,7 @@ If using specific features, review and update:
 [dependencies.acmex]
 version = "0.8.0"
 features = [
-    "dns-cloudflare",  # Renamed from "cloudflare" if used
+    "dns-cloudflare", # Renamed from "cloudflare" if used
     "redis",
     "cli"
 ]
@@ -75,17 +80,17 @@ features = [
 
 Review the following feature flag changes:
 
-| Old Feature | New Feature | Notes |
-|-------------|-------------|-------|
+| Old Feature  | New Feature      | Notes               |
+|--------------|------------------|---------------------|
 | `cloudflare` | `dns-cloudflare` | Standardized naming |
-| `route53` | `dns-route53` | Standardized naming |
-| `alibaba` | `dns-alibaba` | Standardized naming |
-| `azure` | `dns-azure` | Standardized naming |
-| `google` | `dns-google` | Standardized naming |
-| `huawei` | `dns-huawei` | Standardized naming |
-| `tencent` | `dns-tencent` | Standardized naming |
-| `godaddy` | `dns-godaddy` | Standardized naming |
-| `cloudns` | `dns-cloudns` | Standardized naming |
+| `route53`    | `dns-route53`    | Standardized naming |
+| `alibaba`    | `dns-alibaba`    | Standardized naming |
+| `azure`      | `dns-azure`      | Standardized naming |
+| `google`     | `dns-google`     | Standardized naming |
+| `huawei`     | `dns-huawei`     | Standardized naming |
+| `tencent`    | `dns-tencent`    | Standardized naming |
+| `godaddy`    | `dns-godaddy`    | Standardized naming |
+| `cloudns`    | `dns-cloudns`    | Standardized naming |
 
 Update your `Cargo.toml` accordingly.
 
@@ -97,12 +102,12 @@ If using deprecated methods, update to new implementations:
 
 ```rust
 // Old (v0.7.0)
-let config = AcmeConfig::new(directory_url, contact)?;
+let config = AcmeConfig::new(directory_url, contact) ?;
 
 // New (v0.8.0)
 let config = AcmeConfig::lets_encrypt_staging()
-    .with_contact(Contact::email("admin@example.com"))
-    .with_tos_agreed(true);
+.with_contact(Contact::email("admin@example.com"))
+.with_tos_agreed(true);
 ```
 
 #### Challenge Solver Registration
@@ -111,11 +116,11 @@ Update solver registration patterns:
 
 ```rust
 // Old
-let solver = CloudflareSolver::new(api_token, zone_id)?;
+let solver = CloudflareSolver::new(api_token, zone_id) ?;
 solver_registry.add_solver(solver);
 
 // New
-solver_registry.register(Box::new(CloudflareSolver::new(api_token, zone_id)?));
+solver_registry.register(Box::new(CloudflareSolver::new(api_token, zone_id) ? ));
 ```
 
 ### Step 5: Update Configuration Files
@@ -180,21 +185,25 @@ Update any internal documentation or README files to reference v0.8.0.
 ## 🐛 Common Issues and Solutions
 
 ### Issue 1: Compilation Errors Due to Rust Version
+
 **Error**: `error: package \`acmex v0.8.0\` cannot be built because it requires rustc 1.92 or newer`
 
 **Solution**: Upgrade Rust as shown in Step 1.
 
 ### Issue 2: Feature Not Found
+
 **Error**: `error: feature 'cloudflare' is not a valid feature`
 
 **Solution**: Update feature names as shown in Step 3.
 
 ### Issue 3: API Method Not Found
+
 **Error**: `error: method not found in \`AcmeConfig\``
 
 **Solution**: Update to new API patterns as shown in Step 4.
 
 ### Issue 4: Missing CLI Feature
+
 **Error**: `error: could not find \`bin\` at \`src/main.rs\``
 
 **Solution**: Add `cli` feature to your dependencies.
@@ -204,6 +213,7 @@ Update any internal documentation or README files to reference v0.8.0.
 ## 📊 Performance Improvements
 
 After migration, you may notice:
+
 - **15% faster** certificate issuance
 - **10% lower** memory usage for idle servers
 - **Reduced latency** in DNS challenge propagation
@@ -222,6 +232,7 @@ After migration, you may notice:
 ## 🙏 Need Help?
 
 If you encounter issues during migration:
+
 1. Check the [troubleshooting section](#-common-issues-and-solutions) above
 2. Review the [release notes](RELEASE_NOTES_v0.8.0.md) for detailed changes
 3. Open an issue on [GitHub](https://github.com/houseme/acmex/issues) with migration tag
