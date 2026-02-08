@@ -60,22 +60,28 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
     pub async fn run(mut self, domains_list: Vec<Vec<String>>) -> Result<()> {
         loop {
             for domains in &domains_list {
-                if self.needs_renewal(domains).await? {
-                    if let Some(hook) = &self.hook {
-                        hook.before_renewal(domains);
-                    }
+                match self.needs_renewal(domains).await {
+                    Ok(true) => {
+                        if let Some(hook) = &self.hook {
+                            hook.before_renewal(domains);
+                        }
 
-                    match self.renew(domains.clone()).await {
-                        Ok(bundle) => {
-                            if let Some(hook) = &self.hook {
-                                hook.after_renewal(domains, &bundle);
+                        match self.renew(domains.clone()).await {
+                            Ok(bundle) => {
+                                if let Some(hook) = &self.hook {
+                                    hook.after_renewal(domains, &bundle);
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(hook) = &self.hook {
+                                    hook.on_error(domains, &e);
+                                }
                             }
                         }
-                        Err(e) => {
-                            if let Some(hook) = &self.hook {
-                                hook.on_error(domains, &e);
-                            }
-                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::error!("Error checking renewal for {:?}: {}", domains, e);
                     }
                 }
             }
@@ -94,19 +100,16 @@ impl<B: StorageBackend> SimpleRenewalScheduler<B> {
         let expiry = certificate_expiry_timestamp(&bundle)?;
         let now = now_timestamp()?;
 
-        // Compare timestamps directly - both are Timestamp in jiff
-        // Since Timestamp implements PartialOrd, we can compare directly
+        // If expired or expiring soon
         if now >= expiry {
-            // Certificate already expired
             return Ok(true);
         }
 
-        // Check if expiry is within the renewal window
-        // Calculate remaining time by comparing timestamps
+        // Calculate the threshold for renewal
+        let renew_before_secs = self.renew_before.as_secs() as i64;
+        let threshold = expiry.as_second() - renew_before_secs;
 
-        // For simplicity, always renew if close to expiration
-        // A more sophisticated approach would use proper duration calculation
-        Ok(true) // Placeholder: in production, implement proper time comparison
+        Ok(now.as_second() >= threshold)
     }
 
     /// Renew a certificate for domains

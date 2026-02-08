@@ -18,18 +18,10 @@ impl KeyPair {
 
     /// Create from PEM encoded string
     pub fn from_pem(pem_str: &str) -> Result<Self> {
-        let pem = pem::parse(pem_str)
-            .map_err(|e| crate::error::AcmeError::pem(format!("Failed to parse PEM: {}", e)))?;
-
-        if pem.tag() != "PRIVATE KEY" {
-            return Err(crate::error::AcmeError::pem(
-                "Expected PRIVATE KEY, got: ".to_string() + pem.tag(),
-            ));
-        }
-
-        // For now, we'll generate a new key pair as a fallback
-        // because rcgen doesn't provide direct from_pkcs8
-        Self::generate()
+        let key_pair = RcgenKeyPair::from_pem(pem_str).map_err(|e| {
+            crate::error::AcmeError::pem(format!("Failed to parse PEM: {}", e))
+        })?;
+        Ok(Self(key_pair))
     }
 
     /// Save key pair to PEM file
@@ -50,14 +42,13 @@ impl KeyPair {
         self.0.serialize_pem()
     }
 
-    /// Get public key bytes (placeholder - rcgen doesn't expose this directly)
-    pub fn public_key_bytes(&self) -> &[u8] {
-        // Note: rcgen doesn't provide direct access to public key bytes
-        // This is a limitation of the rcgen API. In production, you'd extract
-        // this from the serialized PEM or use another approach
-        &[]
+    /// Get public key bytes
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        // In rcgen 0.14, public_key_raw() returns the raw public key bytes
+        self.0.public_key_raw().to_vec()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

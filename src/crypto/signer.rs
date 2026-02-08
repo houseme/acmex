@@ -1,7 +1,7 @@
 //! 签名器 - 提供统一的签名接口
 
 use crate::error::{AcmeError, Result};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, KeyInit};
 use sha2::Sha256;
 
 /// 数字签名
@@ -62,8 +62,9 @@ impl Signer for HmacSigner {
     fn sign(&self, data: &[u8]) -> Result<Signature> {
         match self.algorithm.as_str() {
             "HS256" | "HMAC-SHA256" => {
-                let mut mac = Hmac::<Sha256>::new_from_slice(&self.key)
+                let mac = Hmac::<Sha256>::new_from_slice(&self.key)
                     .map_err(|e| AcmeError::crypto(format!("HMAC key error: {}", e)))?;
+                let mut mac = mac;
                 mac.update(data);
                 let result = mac.finalize().into_bytes().to_vec();
                 Ok(Signature::new(result, self.algorithm.clone()))
@@ -82,8 +83,9 @@ impl Signer for HmacSigner {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
         match self.algorithm.as_str() {
             "HS256" | "HMAC-SHA256" => {
-                let mut mac = Hmac::<Sha256>::new_from_slice(&self.key)
+                let mac = Hmac::<Sha256>::new_from_slice(&self.key)
                     .map_err(|e| AcmeError::crypto(format!("HMAC key error: {}", e)))?;
+                let mut mac = mac;
                 mac.update(data);
                 Ok(mac.verify_slice(signature).is_ok())
             }

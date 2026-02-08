@@ -15,6 +15,7 @@ pub struct Route53Config {
 
 /// Route53 DNS provider
 pub struct Route53DnsProvider {
+    #[allow(dead_code)]
     config: Route53Config,
     #[cfg(feature = "dns-route53")]
     client: aws_sdk_route53::Client,
@@ -49,7 +50,7 @@ impl DnsProvider for Route53DnsProvider {
                 .action(ChangeAction::Upsert)
                 .resource_record_set(
                     ResourceRecordSet::builder()
-                        .name(name)
+                        .name(&name)
                         .r#type(RrType::Txt)
                         .ttl(300)
                         .resource_records(
@@ -63,8 +64,7 @@ impl DnsProvider for Route53DnsProvider {
 
             let batch = ChangeBatch::builder().changes(change).build()?;
 
-            let resp = self
-                .client
+            self.client
                 .change_resource_record_sets()
                 .hosted_zone_id(&self.config.hosted_zone_id)
                 .change_batch(batch)
@@ -72,15 +72,12 @@ impl DnsProvider for Route53DnsProvider {
                 .await
                 .map_err(|e| AcmeError::transport(format!("Route53 error: {}", e)))?;
 
-            let change_info = resp.change_info().ok_or_else(|| {
-                AcmeError::protocol("Route53 response missing change_info".to_string())
-            })?;
-
-            Ok(change_info.id().to_string())
+            // Return the value as the record_id so we can find it for deletion
+            Ok(value.to_string())
         }
         #[cfg(not(feature = "dns-route53"))]
         {
-            let _ = (domain, value);
+            let _ = (domain, value, &self.config);
             Err(AcmeError::configuration(
                 "Route53 feature not enabled".to_string(),
             ))
@@ -90,17 +87,45 @@ impl DnsProvider for Route53DnsProvider {
     async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()> {
         #[cfg(feature = "dns-route53")]
         {
-            // Note: Route53 deletion requires the exact record set.
-            // In a real implementation, we might need to fetch the current value first
-            // if we don't have it. For now, we use a placeholder or assume Upsert over Delete
-            // is often preferred in ACME clients if we don't track state well.
-            // But let's try to implement a generic "delete" if we had the value.
-            tracing::info!("Deleting Route53 record: {} (id: {})", domain, record_id);
+            let name = if domain.ends_with('.') {
+                domain.to_string()
+            } else {
+                format!("{}.", domain)
+            };
+
+            // To delete, we need the exact record set.
+            // We'll use the record_id (which is the value) to construct the deletion change.
+            let change = Change::builder()
+                .action(ChangeAction::Delete)
+                .resource_record_set(
+                    ResourceRecordSet::builder()
+                        .name(name)
+                        .r#type(RrType::Txt)
+                        .ttl(300)
+                        .resource_records(
+                            ResourceRecord::builder()
+                                .value(format!("\"{}\"", record_id))
+                                .build()?,
+                        )
+                        .build()?,
+                )
+                .build()?;
+
+            let batch = ChangeBatch::builder().changes(change).build()?;
+
+            self.client
+                .change_resource_record_sets()
+                .hosted_zone_id(&self.config.hosted_zone_id)
+                .change_batch(batch)
+                .send()
+                .await
+                .map_err(|e| AcmeError::transport(format!("Route53 deletion error: {}", e)))?;
+
             Ok(())
         }
         #[cfg(not(feature = "dns-route53"))]
         {
-            let _ = (domain, record_id);
+            let _ = (domain, record_id, &self.config);
             Err(AcmeError::configuration(
                 "Route53 feature not enabled".to_string(),
             ))
