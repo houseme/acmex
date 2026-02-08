@@ -172,7 +172,10 @@ mod tests {
     #[test]
     fn test_certificate_chain_parsing() {
         // Generate a self-signed cert for testing
-        let params = CertificateParams::new(vec!["example.com".to_string()]).unwrap();
+        let mut params = CertificateParams::new(vec!["example.com".to_string()]).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "example.com");
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let cert = params.self_signed(&key_pair).unwrap();
         let pem = cert.pem();
