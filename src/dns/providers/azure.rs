@@ -1,26 +1,28 @@
-//! Azure DNS Provider implementation for AcmeX
-//!
-//! This module provides DNS record management for Azure DNS.
-//! Supports resource group and DNS zone operations via Azure REST API.
-
+/// Azure DNS Provider implementation.
+/// This module provides DNS record management for Azure DNS using the Azure Resource Manager REST API.
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
-use tracing::info;
 
-/// Azure DNS Provider configuration
+/// Azure DNS Provider for handling DNS-01 challenges.
 #[derive(Debug, Clone)]
 pub struct AzureDnsProvider {
+    /// Azure Subscription ID.
     subscription_id: String,
+    /// Azure Resource Group name where the DNS zone resides.
     resource_group: String,
+    /// Azure Client ID (Application ID).
     client_id: String,
+    /// Azure Client Secret.
     client_secret: String,
+    /// Azure Tenant ID.
     tenant_id: String,
+    /// Internal HTTP client.
     client: reqwest::Client,
 }
 
 impl AzureDnsProvider {
-    /// Create a new Azure DNS provider instance
+    /// Creates a new `AzureDnsProvider` instance.
     pub fn new(
         subscription_id: String,
         resource_group: String,
@@ -28,6 +30,7 @@ impl AzureDnsProvider {
         client_secret: String,
         tenant_id: String,
     ) -> Self {
+        tracing::debug!("Initializing AzureDnsProvider for Subscription: {}", subscription_id);
         Self {
             subscription_id,
             resource_group,
@@ -38,8 +41,9 @@ impl AzureDnsProvider {
         }
     }
 
-    /// Get Azure access token using Client Credentials Flow
+    /// Obtains an Azure access token using the Client Credentials Flow.
     async fn get_access_token(&self) -> Result<String> {
+        tracing::debug!("Requesting Azure access token for Tenant: {}", self.tenant_id);
         let token_url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
             self.tenant_id
@@ -58,28 +62,37 @@ impl AzureDnsProvider {
             .form(&params)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Azure token request failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Network error during Azure token request: {}", e);
+                AcmeError::transport(format!("Azure token request failed: {}", e))
+            })?;
 
         let status = response.status();
         let body: serde_json::Value = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse Azure token response JSON: {}", e);
             AcmeError::protocol(format!("Failed to parse Azure token response: {}", e))
         })?;
 
         if !status.is_success() {
+            let error = body["error"].as_str().unwrap_or("Unknown");
+            let description = body["error_description"].as_str().unwrap_or("");
+            tracing::error!("Azure authentication failed: {} - {}", error, description);
             return Err(AcmeError::protocol(format!(
                 "Azure auth error: {} - {}",
-                body["error"].as_str().unwrap_or("Unknown"),
-                body["error_description"].as_str().unwrap_or("")
+                error, description
             )));
         }
 
         body["access_token"]
             .as_str()
-            .ok_or_else(|| AcmeError::protocol("access_token not found in response".to_string()))
+            .ok_or_else(|| {
+                tracing::error!("'access_token' missing in Azure response");
+                AcmeError::protocol("access_token not found in response".to_string())
+            })
             .map(|s| s.to_string())
     }
 
-    /// Parse domain to get zone name (e.g., _acme-challenge.example.com -> example.com)
+    /// Parses the full domain to extract the DNS zone name.
     fn parse_zone_name(&self, domain: &str) -> String {
         let parts: Vec<&str> = domain.split('.').collect();
         if parts.len() > 2 {
@@ -89,7 +102,7 @@ impl AzureDnsProvider {
         }
     }
 
-    /// Get record name relative to the zone
+    /// Returns the record name relative to the DNS zone.
     fn get_record_name(&self, domain: &str, zone_name: &str) -> String {
         if domain == zone_name {
             "@".to_string()
@@ -104,8 +117,9 @@ impl AzureDnsProvider {
 
 #[async_trait]
 impl DnsProvider for AzureDnsProvider {
+    /// Creates a TXT record in Azure DNS.
     async fn create_txt_record(&self, domain: &str, value: &str) -> Result<String> {
-        info!("Creating TXT record in Azure DNS: {}", domain);
+        tracing::info!("Creating TXT record in Azure DNS for domain: {}", domain);
 
         let token = self.get_access_token().await?;
         let zone_name = self.parse_zone_name(domain);
@@ -134,21 +148,28 @@ impl DnsProvider for AzureDnsProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Azure API failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Network error during Azure DNS record creation: {}", e);
+                AcmeError::transport(format!("Azure API failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
             let error_body: serde_json::Value = response.json().await.unwrap_or_default();
+            let message = error_body["error"]["message"].as_str().unwrap_or("Unknown error");
+            tracing::error!("Azure DNS API error: {}", message);
             return Err(AcmeError::protocol(format!(
                 "Azure DNS create error: {}",
-                error_body["error"]["message"].as_str().unwrap_or("Unknown error")
+                message
             )));
         }
 
+        tracing::info!("Successfully created Azure TXT record: {}", record_name);
         Ok(record_name)
     }
 
+    /// Deletes a TXT record from Azure DNS.
     async fn delete_txt_record(&self, domain: &str, record_id: &str) -> Result<()> {
-        info!("Deleting TXT record from Azure DNS: {}", domain);
+        tracing::info!("Deleting TXT record from Azure DNS for domain: {}", domain);
 
         let token = self.get_access_token().await?;
         let zone_name = self.parse_zone_name(domain);
@@ -164,19 +185,26 @@ impl DnsProvider for AzureDnsProvider {
             .bearer_auth(&token)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Azure API delete failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Network error during Azure DNS record deletion: {}", e);
+                AcmeError::transport(format!("Azure API delete failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
+            tracing::error!("Azure DNS API deletion failed with status: {}", response.status());
             return Err(AcmeError::protocol(format!(
                 "Azure DNS delete failed with status: {}",
                 response.status()
             )));
         }
 
+        tracing::info!("Successfully deleted Azure TXT record: {}", record_id);
         Ok(())
     }
 
+    /// Verifies the existence of a TXT record in Azure DNS.
     async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
+        tracing::debug!("Verifying TXT record in Azure DNS for domain: {}", domain);
         let token = self.get_access_token().await?;
         let zone_name = self.parse_zone_name(domain);
         let record_name = self.get_record_name(domain, &zone_name);
@@ -192,19 +220,27 @@ impl DnsProvider for AzureDnsProvider {
             .bearer_auth(&token)
             .send()
             .await
-            .map_err(|e| AcmeError::transport(format!("Azure API verify failed: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Network error during Azure DNS record verification: {}", e);
+                AcmeError::transport(format!("Azure API verify failed: {}", e))
+            })?;
 
         if !response.status().is_success() {
+            tracing::warn!("Azure DNS record verification returned status: {}", response.status());
             return Ok(false);
         }
 
-        let body: serde_json::Value = response.json().await.map_err(|_| AcmeError::protocol("Failed to parse response"))?;
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse Azure DNS verification response: {}", e);
+            AcmeError::protocol("Failed to parse response")
+        })?;
 
         if let Some(txt_records) = body["properties"]["TXTRecords"].as_array() {
             for record in txt_records {
                 if let Some(values) = record["value"].as_array() {
                     for v in values {
                         if v.as_str() == Some(value) {
+                            tracing::debug!("Azure DNS record verification successful");
                             return Ok(true);
                         }
                     }
@@ -212,6 +248,7 @@ impl DnsProvider for AzureDnsProvider {
             }
         }
 
+        tracing::warn!("Azure DNS record verification failed: value not found");
         Ok(false)
     }
 }
