@@ -1,20 +1,24 @@
-//! 编码工具 - Base64、PEM 等编码/解码
-
+/// Encoding utilities for Base64, PEM, and Hex formats.
+/// This module provides a unified interface for various encoding schemes
+/// required by the ACME protocol and certificate management.
 use crate::error::{AcmeError, Result};
 use base64::Engine;
 
-/// Base64 编码器
+/// A utility for Base64 encoding and decoding.
 pub struct Base64Encoding;
 
 impl Base64Encoding {
-    /// 使用 URL-safe Base64 进行编码 (无填充)
+    /// Encodes data using URL-safe Base64 without padding (RFC 4648).
+    /// This is the standard encoding for ACME JWS payloads and nonces.
     pub fn encode(data: &[u8]) -> String {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
     }
 
-    /// 使用 URL-safe Base64 进行解码 (无填充)
+    /// Decodes data from URL-safe Base64.
+    /// Automatically handles missing padding if necessary.
     pub fn decode(data: &str) -> Result<Vec<u8>> {
-        // 添加必要的填充
+        tracing::debug!("Decoding URL-safe Base64 data (length: {})", data.len());
+        // Add necessary padding for the base64 crate if it's not already there
         let padded = match data.len() % 4 {
             2 => format!("{}==", data),
             3 => format!("{}=", data),
@@ -23,69 +27,81 @@ impl Base64Encoding {
 
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&padded)
-            .map_err(|e| AcmeError::crypto(format!("Base64 decode error: {}", e)))
+            .map_err(|e| {
+                tracing::error!("Failed to decode URL-safe Base64: {}", e);
+                AcmeError::crypto(format!("Base64 decode error: {}", e))
+            })
     }
 
-    /// 标准 Base64 编码 (带填充)
+    /// Encodes data using standard Base64 with padding.
     pub fn encode_standard(data: &[u8]) -> String {
         use base64::engine::general_purpose::STANDARD;
         STANDARD.encode(data)
     }
 
-    /// 标准 Base64 解码 (带填充)
+    /// Decodes data from standard Base64 with padding.
     pub fn decode_standard(data: &str) -> Result<Vec<u8>> {
         use base64::engine::general_purpose::STANDARD;
         STANDARD
             .decode(data)
-            .map_err(|e| AcmeError::crypto(format!("Base64 decode error: {}", e)))
+            .map_err(|e| {
+                tracing::error!("Failed to decode standard Base64: {}", e);
+                AcmeError::crypto(format!("Base64 decode error: {}", e))
+            })
     }
 }
 
-/// PEM 编码器
+/// A utility for PEM (Privacy-Enhanced Mail) encoding and decoding.
 pub struct PemEncoding;
 
 impl PemEncoding {
-    /// 将二进制数据编码为 PEM 格式
+    /// Encodes binary data into a PEM-formatted string with the specified label.
     pub fn encode(data: &[u8], label: &str) -> String {
+        tracing::debug!("Encoding data to PEM with label: {}", label);
         let pem = pem::Pem::new(label.to_string(), data.to_vec());
         pem::encode(&pem)
     }
 
-    /// 从 PEM 格式解码二进制数据
+    /// Decodes binary data from a PEM-formatted string.
+    /// Returns a tuple containing the label and the raw bytes.
     pub fn decode(pem_data: &str) -> Result<(String, Vec<u8>)> {
         let pem = pem::parse(pem_data)
-            .map_err(|e| AcmeError::crypto(format!("PEM parse error: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to parse PEM data: {}", e);
+                AcmeError::crypto(format!("PEM parse error: {}", e))
+            })?;
 
-        // 使用公开方法访问 pem 结构
         Ok((pem.tag().to_string(), pem.contents().to_vec()))
     }
 
-    /// 检查是否为有效的 PEM 格式
+    /// Checks if the provided string is a valid PEM-formatted block.
     pub fn is_valid(data: &str) -> bool {
         pem::parse(data).is_ok()
     }
 
-    /// 从 PEM 中提取二进制数据
+    /// Extracts binary data from a PEM string, optionally verifying the label.
     pub fn extract_data(pem_data: &str, expected_label: Option<&str>) -> Result<Vec<u8>> {
         let (label, data) = Self::decode(pem_data)?;
 
-        if let Some(expected) = expected_label
-            && label != expected {
+        if let Some(expected) = expected_label {
+            if label != expected {
+                tracing::error!("PEM label mismatch: expected '{}', found '{}'", expected, label);
                 return Err(AcmeError::crypto(format!(
                     "Expected PEM label '{}', got '{}'",
                     expected, label
                 )));
             }
+        }
 
         Ok(data)
     }
 }
 
-/// 十六进制编码器
+/// A utility for Hexadecimal encoding and decoding.
 pub struct HexEncoding;
 
 impl HexEncoding {
-    /// 编码为十六进制字符串
+    /// Encodes binary data into a lowercase hexadecimal string.
     pub fn encode(data: &[u8]) -> String {
         const HEX_CHARS: &[u8] = b"0123456789abcdef";
         let mut result = String::with_capacity(data.len() * 2);
@@ -96,9 +112,10 @@ impl HexEncoding {
         result
     }
 
-    /// 从十六进制字符串解码
+    /// Decodes binary data from a hexadecimal string.
     pub fn decode(hex_str: &str) -> Result<Vec<u8>> {
-        if !hex_str.len().is_multiple_of(2) {
+        if hex_str.len() % 2 != 0 {
+            tracing::error!("Hex string has invalid length (must be even): {}", hex_str.len());
             return Err(AcmeError::crypto(
                 "Hex string length must be even".to_string(),
             ));
@@ -107,9 +124,15 @@ impl HexEncoding {
         let mut result = Vec::with_capacity(hex_str.len() / 2);
         for chunk in hex_str.as_bytes().chunks(2) {
             let hex = std::str::from_utf8(chunk)
-                .map_err(|e| AcmeError::crypto(format!("Invalid UTF-8: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Invalid UTF-8 in hex chunk: {}", e);
+                    AcmeError::crypto(format!("Invalid UTF-8: {}", e))
+                })?;
             let byte = u8::from_str_radix(hex, 16)
-                .map_err(|e| AcmeError::crypto(format!("Hex decode error: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to parse hex byte '{}': {}", hex, e);
+                    AcmeError::crypto(format!("Hex decode error: {}", e))
+                })?;
             result.push(byte);
         }
 
