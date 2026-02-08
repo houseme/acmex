@@ -1,95 +1,117 @@
-//! 签名器 - 提供统一的签名接口
-
+/// Signer utilities providing a unified interface for digital signatures.
+/// This module defines the `Signer` trait and implementations for various
+/// algorithms used in the ACME protocol, such as HMAC and EdDSA.
 use crate::error::{AcmeError, Result};
 use hmac::{Hmac, Mac, KeyInit};
 use sha2::Sha256;
 
-/// 数字签名
+/// Represents a digital signature and its associated algorithm.
 #[derive(Debug, Clone)]
 pub struct Signature {
-    /// 签名数据
+    /// The raw signature data.
     pub data: Vec<u8>,
-    /// 签名算法
+    /// The name of the algorithm used to create the signature (e.g., "HS256", "EdDSA").
     pub algorithm: String,
 }
 
 impl Signature {
-    /// 创建新签名
+    /// Creates a new `Signature` instance.
     pub fn new(data: Vec<u8>, algorithm: String) -> Self {
         Self { data, algorithm }
     }
 
-    /// 获取 Base64 编码的签名
+    /// Returns the signature data as a URL-safe Base64-encoded string (no padding).
     pub fn to_base64(&self) -> String {
         use base64::Engine;
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&self.data)
     }
 }
 
-/// 签名器特征 - 提供统一的签名接口
+/// A trait for objects that can sign data.
+/// This provides a unified interface for both symmetric (HMAC) and asymmetric (EdDSA, RSA) signing.
 pub trait Signer: Send + Sync {
-    /// 签名数据
+    /// Signs the provided data and returns a `Signature`.
     fn sign(&self, data: &[u8]) -> Result<Signature>;
 
-    /// 获取签名算法名称
+    /// Returns the name of the signing algorithm.
     fn algorithm(&self) -> &str;
 
-    /// 验证签名 (可选实现)
+    /// Verifies a signature against the provided data.
+    /// Default implementation returns `false` if not overridden.
     fn verify(&self, _data: &[u8], _signature: &[u8]) -> Result<bool> {
-        Ok(false) // 默认不支持
+        Ok(false)
     }
 }
 
-/// HMAC 签名器
+/// An HMAC-based signer implementation.
 pub struct HmacSigner {
+    /// The secret key used for signing.
     key: Vec<u8>,
+    /// The HMAC algorithm name.
     algorithm: String,
 }
 
 impl HmacSigner {
-    /// 创建 HMAC 签名器
+    /// Creates a new `HmacSigner` with the specified key and algorithm.
     pub fn new(key: Vec<u8>, algorithm: String) -> Self {
         Self { key, algorithm }
     }
 
-    /// 使用 SHA256 创建 HMAC 签名器 (HS256)
+    /// Creates a new `HmacSigner` using the HS256 (HMAC-SHA256) algorithm.
     pub fn hs256(key: Vec<u8>) -> Self {
         Self::new(key, "HS256".to_string())
     }
 }
 
 impl Signer for HmacSigner {
+    /// Signs data using the configured HMAC algorithm.
     fn sign(&self, data: &[u8]) -> Result<Signature> {
+        tracing::debug!("Signing data with HMAC algorithm: {}", self.algorithm);
         match self.algorithm.as_str() {
             "HS256" | "HMAC-SHA256" => {
                 let mac = Hmac::<Sha256>::new_from_slice(&self.key)
-                    .map_err(|e| AcmeError::crypto(format!("HMAC key error: {}", e)))?;
+                    .map_err(|e| {
+                        tracing::error!("Invalid HMAC key: {}", e);
+                        AcmeError::crypto(format!("HMAC key error: {}", e))
+                    })?;
                 let mut mac = mac;
                 mac.update(data);
                 let result = mac.finalize().into_bytes().to_vec();
                 Ok(Signature::new(result, self.algorithm.clone()))
             }
-            _ => Err(AcmeError::crypto(format!(
-                "Unsupported HMAC algorithm: {}",
-                self.algorithm
-            ))),
+            _ => {
+                tracing::error!("Unsupported HMAC algorithm requested: {}", self.algorithm);
+                Err(AcmeError::crypto(format!(
+                    "Unsupported HMAC algorithm: {}",
+                    self.algorithm
+                )))
+            }
         }
     }
 
+    /// Returns the HMAC algorithm name.
     fn algorithm(&self) -> &str {
         &self.algorithm
     }
 
+    /// Verifies an HMAC signature.
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
+        tracing::debug!("Verifying HMAC signature with algorithm: {}", self.algorithm);
         match self.algorithm.as_str() {
             "HS256" | "HMAC-SHA256" => {
                 let mac = Hmac::<Sha256>::new_from_slice(&self.key)
-                    .map_err(|e| AcmeError::crypto(format!("HMAC key error: {}", e)))?;
+                    .map_err(|e| {
+                        tracing::error!("Invalid HMAC key during verification: {}", e);
+                        AcmeError::crypto(format!("HMAC key error: {}", e))
+                    })?;
                 let mut mac = mac;
                 mac.update(data);
                 Ok(mac.verify_slice(signature).is_ok())
             }
-            _ => Ok(false),
+            _ => {
+                tracing::warn!("Verification not supported for algorithm: {}", self.algorithm);
+                Ok(false)
+            }
         }
     }
 }

@@ -1,123 +1,91 @@
 # AcmeX
 
-[English](./README.md) | [中文](./README_ZH.md)
+[![Crates.io](https://img.shields.io/crates/v/acmex.svg)](https://crates.io/crates/acmex)
+[![Documentation](https://docs.rs/acmex/badge.svg)](https://docs.rs/acmex)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-A simple ACME v2 client for obtaining TLS certificates, built with Rust. Supports TLS-ALPN-01, HTTP-01, and DNS-01
-challenges, integrates with rustls, and works with Let's Encrypt, Google Trust Services, and ZeroSSL.
+**AcmeX** is a modular, enterprise-grade ACME v2 (RFC 8555) client and server ecosystem written in Rust. It is designed for high performance, reliability, and extensibility, supporting various DNS providers, storage backends, and cryptographic libraries.
 
-[![AcmeX](https://img.shields.io/badge/version-v0.7.0--dev-blue)](https://github.com/houseme/acmex)
+## 🏗 Architecture
 
-**AcmeX** is an enterprise-grade ACME v2 (RFC 8555) client and management server.
+AcmeX follows a layered design to ensure separation of concerns and ease of maintenance:
 
-## 🚀 Key Features (v0.7.0)
+- **Application Layer**: CLI and REST API (Axum-based) entry points.
+- **Orchestration Layer**: High-level workflow management for provisioning, validation, and renewal.
+- **Scheduling Layer**: Task execution and concurrency management.
+- **Protocol Layer**: Low-level ACME implementation (JWS, Nonce management, Directory).
+- **Storage Tier**: Pluggable backends (File, Redis, Memory, Encrypted).
+- **Certificate Tier**: Chain verification, CSR generation, and OCSP status checking.
 
-- **Asynchronous Task Architecture**: Non-blocking certificate issuance via 202 Accepted polling.
-- **Enterprise API Server**: RESTful API powered by Axum with `X-API-Key` authentication.
-- **Broad DNS Ecosystem**: Built-in support for 11 providers including AWS Route53, Alibaba Cloud, Huawei Cloud, Tencent
-  Cloud, etc.
-- **Nonce Pooling**: High-performance pre-fetching and caching of ACME nonces.
-- **Real-time OCSP Monitoring**: Automated status checks for issued certificates.
-- **Multi-backend Storage**: File, Redis, and Memory storage support.
+## 🚀 Key Features
 
-## Features
+- **Full ACME v2 Support**: Complete implementation of RFC 8555.
+- **Asynchronous Execution**: Non-blocking task polling for long-running operations.
+- **Multiple Challenge Types**: Support for `HTTP-01`, `DNS-01`, and `TLS-ALPN-01`.
+- **Extensive DNS Support**: Built-in providers for Cloudflare, AWS Route53, Alibaba Cloud, Azure, and more.
+- **Flexible Storage**: Support for local files, Redis, and encrypted storage.
+- **Observability**: Integrated metrics (Prometheus), structured logging (Tracing), and OpenTelemetry support.
+- **Security First**: Memory safety via Rust, `zeroize` for sensitive data, and RFC 7807 error reporting.
 
-- Comprehensive ACME v2 support (RFC 8555)
-- TLS-ALPN-01, HTTP-01, and DNS-01 challenges
-- rustls integration for memory-safe TLS
-- File-based caching (default) and Redis caching (optional)
-- Let's Encrypt by default, Google Trust Services and ZeroSSL via features
-- CLI tool and library usage
-- Production-ready with axum, Prometheus monitoring, and tracing
+## 🛠 Installation
 
-## Installation
-
-Add to your `Cargo.toml`:
+Add AcmeX to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 acmex = "0.7.0"
 ```
 
-For Redis support:
-
-```toml
-[dependencies]
-acmex = { version = "0.7.0", features = ["redis"] }
-```
-
-## Usage
-
-### As a Library
+## 📖 Quick Start
 
 ```rust
-use acmex::{AcmeClient, AcmeConfig, ChallengeType};
+use acmex::prelude::*;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AcmeConfig::new(vec!["example.com".to_string()])
-        .contact(vec!["mailto:user@example.com".to_string()])
-        .prod(false);
-    let client = AcmeClient::new(config);
-    let (cert, key) = client.provision_certificate(ChallengeType::TlsAlpn01, None).await?;
-    // Use cert and key with rustls
+async fn main() -> Result<()> {
+    // 1. Configure the client
+    let config = AcmeConfig::lets_encrypt_staging()
+        .with_contact(Contact::email("admin@example.com"))
+        .with_tos_agreed(true);
+
+    let mut client = AcmeClient::new(config)?;
+
+    // 2. Issue a certificate
+    let domains = vec!["example.com".to_string()];
+    let mut solver_registry = ChallengeSolverRegistry::new();
+    // Add your solvers here (e.g., Http01Solver, Dns01Solver)
+
+    let bundle = client.issue_certificate(domains, &mut solver_registry).await?;
+
+    // 3. Save the certificate
+    bundle.save_to_files("cert.pem", "key.pem")?;
+
     Ok(())
 }
 ```
 
-### As a CLI Tool
+## 🛠 Development
 
+### Prerequisites
+- Rust 1.75+
+- Docker (for Redis/Testing)
+
+### Running Tests
 ```bash
-cargo run -- --domains example.com --email user@example.com --cache-dir ./acmex_cache
+cargo test
 ```
 
-With Redis:
+## 📄 Documentation
 
-```bash
-cargo run --features redis -- --domains example.com --email user@example.com --redis-url redis://127.0.0.1:6379
-```
-
-## 📦 Service Mode
-
-Start the AcmeX management server:
-
-```bash
-# Set API keys for authentication
-export ACMEX_API_KEYS="admin-token-1,admin-token-2"
-
-# Start server
-acmex serve 0.0.0.0:8080 --config acmex.toml
-```
-
-## 🛠 Usage Example (API)
-
-Obtain a certificate via REST API:
-
-```bash
-curl -X POST http://localhost:8080/api/orders \
-     -H "X-API-Key: admin-token-1" \
-     -H "Content-Type: application/json" \
-     -d '{"domains": ["example.com", "*.example.com"]}'
-
-# Response: 202 Accepted {"task_id": "abc-123"}
-```
-
-## 📚 Documentation
-
+Detailed documentation is available in the `docs` directory:
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [Observability Guide](docs/OBSERVABILITY.md)
-- [REST API Reference](docs/api/openapi.yaml)
-- [Implementing DNS Providers](docs/DNS-01_IMPLEMENTATION.md)
+- [V0.7.0 Planning](docs/V0.7.0_PLANNING.md)
 
-## License
+## 📜 License
 
-This project is licensed under either of
-
-- [MIT License](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
+Licensed under either of:
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
-
-You may choose either license to use this project. Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in the work by you shall be dual licensed as above, without any additional terms or conditions.
-
-See the [LICENSE-MIT](./LICENSE-MIT) and [LICENSE-APACHE](./LICENSE-APACHE) files for details.

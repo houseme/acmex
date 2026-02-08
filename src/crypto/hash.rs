@@ -1,22 +1,24 @@
-//! 哈希工具 - 支持多种哈希算法
-
+/// Hashing utilities supporting multiple algorithms.
+/// This module provides a unified interface for common cryptographic hash functions
+/// used in ACME operations, such as challenge validation and thumbprint calculation.
 use crate::error::Result;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
-/// 哈希算法枚举
+/// Supported hashing algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgorithm {
-    /// SHA256 (推荐用于 DNS-01)
+    /// SHA-256 (Recommended for DNS-01 and general ACME use).
     Sha256,
-    /// SHA384
+    /// SHA-384.
     Sha384,
-    /// SHA512
+    /// SHA-512.
     Sha512,
 }
 
 impl HashAlgorithm {
-    /// 计算哈希值
+    /// Computes the hash of the provided data using the selected algorithm.
     pub fn hash(&self, data: &[u8]) -> Result<Vec<u8>> {
+        tracing::debug!("Computing {} hash for {} bytes of data", self, data.len());
         match self {
             HashAlgorithm::Sha256 => {
                 let mut hasher = Sha256::new();
@@ -36,7 +38,7 @@ impl HashAlgorithm {
         }
     }
 
-    /// 获取哈希值的十六进制字符串
+    /// Computes the hash and returns it as a hex-encoded string.
     pub fn hash_hex(&self, data: &[u8]) -> Result<String> {
         let hash = self.hash(data)?;
         Ok(crate::crypto::encoding::HexEncoding::encode(&hash))
@@ -53,22 +55,22 @@ impl std::fmt::Display for HashAlgorithm {
     }
 }
 
-/// SHA256 哈希函数
+/// A specialized utility for SHA-256 hashing.
 pub struct Sha256Hash;
 
 impl Sha256Hash {
-    /// 计算 SHA256 哈希
+    /// Computes the SHA-256 hash of the provided data.
     pub fn hash(data: &[u8]) -> Result<Vec<u8>> {
         HashAlgorithm::Sha256.hash(data)
     }
 
-    /// 计算 SHA256 哈希并返回十六进制字符串
+    /// Computes the SHA-256 hash and returns it as a hex-encoded string.
     pub fn hash_hex(data: &[u8]) -> Result<String> {
         let hash = Self::hash(data)?;
         Ok(crate::crypto::encoding::HexEncoding::encode(&hash))
     }
 
-    /// 计算 SHA256 哈希并返回 Base64 编码
+    /// Computes the SHA-256 hash and returns it as a URL-safe Base64-encoded string (no padding).
     pub fn hash_base64(data: &[u8]) -> Result<String> {
         use base64::Engine;
         let hash = Self::hash(data)?;
@@ -85,7 +87,7 @@ mod tests {
         let data = b"test data";
         let hash = Sha256Hash::hash(data).unwrap();
 
-        // 已知的 SHA256("test data") 值
+        // Known SHA256("test data") value
         assert_eq!(
             hex::encode(&hash),
             "916f0027a575074ce72a331777c3478d6513f786a591bd892da1a577bf2335f9"

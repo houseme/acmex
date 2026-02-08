@@ -1,66 +1,71 @@
-/// ACME Directory management
+/// ACME Directory management.
+/// This module handles the discovery of ACME service endpoints from the directory URL.
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// ACME Directory response
+/// Represents the ACME Directory response containing service endpoints.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Directory {
-    /// New nonce endpoint
+    /// Endpoint for obtaining a new anti-replay nonce.
     #[serde(rename = "newNonce")]
     pub new_nonce: String,
 
-    /// New account endpoint
+    /// Endpoint for creating a new account.
     #[serde(rename = "newAccount")]
     pub new_account: String,
 
-    /// New order endpoint
+    /// Endpoint for creating a new certificate order.
     #[serde(rename = "newOrder")]
     pub new_order: String,
 
-    /// Revoke cert endpoint
+    /// Endpoint for revoking a certificate.
     #[serde(rename = "revokeCert")]
     pub revoke_cert: String,
 
-    /// Key change endpoint
+    /// Endpoint for changing the account key.
     #[serde(rename = "keyChange")]
     pub key_change: String,
 
-    /// Directory metadata
+    /// Optional metadata provided by the ACME server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<DirectoryMeta>,
 }
 
-/// Directory metadata
+/// Metadata associated with the ACME directory.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DirectoryMeta {
-    /// Terms of Service URL
+    /// URL for the server's Terms of Service.
     #[serde(rename = "termsOfService")]
     pub terms_of_service: Option<String>,
 
-    /// Website URL
+    /// URL for the server's website.
     pub website: Option<String>,
 
-    /// CAA identities
+    /// List of hostnames that the server will use in CAA checks.
     #[serde(rename = "caaIdentities")]
     pub caa_identities: Option<Vec<String>>,
 
-    /// External account required flag
+    /// Indicates whether the server requires an external account binding.
     #[serde(rename = "externalAccountRequired")]
     pub external_account_required: Option<bool>,
 }
 
-/// Manager for ACME directory with caching
+/// A thread-safe manager for the ACME directory with caching capabilities.
 pub struct DirectoryManager {
+    /// The base directory URL.
     url: String,
+    /// Cached directory information.
     directory: Arc<RwLock<Option<Directory>>>,
+    /// The HTTP client used for fetching the directory.
     http_client: reqwest::Client,
 }
 
 impl DirectoryManager {
-    /// Create a new directory manager
+    /// Creates a new `DirectoryManager` for the given ACME directory URL.
     pub fn new(url: impl Into<String>, http_client: reqwest::Client) -> Self {
+        tracing::debug!("Initializing DirectoryManager for URL: {}", url.as_ref());
         Self {
             url: url.into(),
             directory: Arc::new(RwLock::new(None)),
@@ -68,13 +73,16 @@ impl DirectoryManager {
         }
     }
 
-    /// Fetch fresh directory from server
+    /// Fetches a fresh copy of the directory from the ACME server.
     pub async fn fetch(&self) -> Result<Directory> {
+        tracing::info!("Fetching ACME directory from: {}", self.url);
         let response = self.http_client.get(&self.url).send().await.map_err(|e| {
+            tracing::error!("Failed to connect to ACME directory: {}", e);
             crate::error::AcmeError::transport(format!("Failed to fetch directory: {}", e))
         })?;
 
         if !response.status().is_success() {
+            tracing::error!("ACME directory request failed with status: {}", response.status());
             return Err(crate::error::AcmeError::protocol(format!(
                 "Failed to fetch directory: HTTP {}",
                 response.status()
@@ -82,20 +90,23 @@ impl DirectoryManager {
         }
 
         let directory: Directory = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse ACME directory JSON: {}", e);
             crate::error::AcmeError::protocol(format!("Failed to parse directory: {}", e))
         })?;
 
+        tracing::debug!("Successfully fetched and parsed ACME directory");
         let mut cached = self.directory.write().await;
         *cached = Some(directory.clone());
 
         Ok(directory)
     }
 
-    /// Get cached directory or fetch if not cached
+    /// Returns the cached directory or fetches it if it's not already cached.
     pub async fn get(&self) -> Result<Directory> {
         {
             let cached = self.directory.read().await;
             if let Some(dir) = cached.clone() {
+                tracing::debug!("Using cached ACME directory");
                 return Ok(dir);
             }
         }
@@ -103,13 +114,14 @@ impl DirectoryManager {
         self.fetch().await
     }
 
-    /// Clear cached directory
+    /// Clears the cached directory information.
     pub async fn clear_cache(&self) {
+        tracing::debug!("Clearing ACME directory cache");
         let mut cached = self.directory.write().await;
         *cached = None;
     }
 
-    /// Get directory URL
+    /// Returns the base directory URL.
     pub fn url(&self) -> &str {
         &self.url
     }

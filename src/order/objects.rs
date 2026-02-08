@@ -1,147 +1,150 @@
-/// Order objects for ACME protocol
+/// Order-related objects for the ACME protocol.
+/// This module defines the structures for orders, authorizations, and challenges
+/// as specified in RFC 8555.
 use crate::types::{AuthorizationStatus, Identifier, OrderStatus};
 use serde::{Deserialize, Serialize};
 
-/// Authorization challenge
+/// Represents an ACME authorization challenge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Challenge {
-    /// Challenge type (http-01, dns-01, tls-alpn-01)
+    /// The type of challenge (e.g., "http-01", "dns-01", "tls-alpn-01").
     #[serde(rename = "type")]
     pub challenge_type: String,
 
-    /// Challenge URL
+    /// The URL to which a response should be posted to trigger validation.
     pub url: String,
 
-    /// Challenge status
+    /// The current status of the challenge (e.g., "pending", "processing", "valid", "invalid").
     pub status: String,
 
-    /// Challenge token for validation
+    /// A token used to construct the key authorization string.
     pub token: String,
 
-    /// Key authorization (computed from token and JWK thumbprint)
+    /// The computed key authorization string, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_authorization: Option<String>,
 
-    /// Validation details (varies by challenge type)
+    /// Additional validation details provided by the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation: Option<String>,
 
-    /// Timestamp when this challenge was updated
+    /// The timestamp when the challenge was last updated.
     #[serde(default)]
     pub updated: Option<String>,
 
-    /// Error information if validation failed
+    /// Error information if the challenge validation failed.
     #[serde(default)]
     pub error: Option<serde_json::Value>,
 }
 
-/// Authorization for a domain
+/// Represents an authorization for a specific identifier (e.g., a domain).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Authorization {
-    /// Authorization identifier
+    /// The identifier being authorized.
     pub identifier: Identifier,
 
-    /// Authorization status
+    /// The current status of the authorization.
     pub status: String,
 
-    /// Expiration timestamp
+    /// The expiration timestamp for this authorization.
     pub expires: String,
 
-    /// List of challenges
+    /// A list of challenges offered by the server to fulfill this authorization.
     pub challenges: Vec<Challenge>,
 
-    /// Wildcard flag
+    /// Indicates if this authorization is for a wildcard domain.
     #[serde(default)]
     pub wildcard: Option<bool>,
 
-    /// Combined challenges for convenience
+    /// A convenience field for storing combined challenge data.
     #[serde(default)]
     pub combined_challenges: Option<Vec<Challenge>>,
 }
 
 impl Authorization {
-    /// Get a specific challenge by type
+    /// Returns a reference to a specific challenge by its type.
     pub fn get_challenge(&self, challenge_type: &str) -> Option<&Challenge> {
         self.challenges
             .iter()
             .find(|c| c.challenge_type == challenge_type)
     }
 
-    /// Get status as AuthorizationStatus enum
+    /// Parses the status string into an `AuthorizationStatus` enum.
     pub fn status_enum(&self) -> Option<AuthorizationStatus> {
         self.status.parse().ok()
     }
 }
 
-/// ACME Order
+/// Represents an ACME certificate order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
-    /// Order status
+    /// The current status of the order.
     pub status: String,
 
-    /// Expiration timestamp
+    /// The expiration timestamp for the order.
     pub expires: String,
 
-    /// List of identifiers (domains) in this order
+    /// The list of identifiers (domains) included in this order.
     pub identifiers: Vec<Identifier>,
 
-    /// List of authorization URLs
+    /// A list of URLs for the authorizations required to fulfill this order.
     pub authorizations: Vec<String>,
 
-    /// Finalization URL
+    /// The URL to which the CSR should be posted to finalize the order.
     pub finalize: String,
 
-    /// Certificate URL (populated when status is valid)
+    /// The URL from which the issued certificate can be downloaded.
     #[serde(default)]
     pub certificate: Option<String>,
 
-    /// Combined data for convenience
+    /// A convenience field for storing combined authorization data.
     #[serde(skip)]
     pub combined_authorizations: Option<Vec<Authorization>>,
 }
 
 impl Order {
-    /// Get status as OrderStatus enum
+    /// Parses the status string into an `OrderStatus` enum.
     pub fn status_enum(&self) -> Option<OrderStatus> {
         self.status.parse().ok()
     }
 
-    /// Check if order is ready for finalization
+    /// Returns true if the order is in the 'ready' status.
     pub fn is_ready(&self) -> bool {
         matches!(self.status_enum(), Some(OrderStatus::Ready))
     }
 
-    /// Check if order is valid (certificate issued)
+    /// Returns true if the order is in the 'valid' status (certificate issued).
     pub fn is_valid(&self) -> bool {
         matches!(self.status_enum(), Some(OrderStatus::Valid))
     }
 
-    /// Check if order is pending (needs authorization)
+    /// Returns true if the order is in the 'pending' status.
     pub fn is_pending(&self) -> bool {
         matches!(self.status_enum(), Some(OrderStatus::Pending))
     }
 }
 
-/// New order request
+/// A request to create a new certificate order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewOrderRequest {
-    /// Identifiers to order
+    /// The identifiers (domains) to be included in the order.
     pub identifiers: Vec<Identifier>,
 
-    /// Not before (optional)
+    /// Optional requested 'not before' timestamp for the certificate.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "notBefore")]
     pub not_before: Option<String>,
 
-    /// Not after (optional)
+    /// Optional requested 'not after' timestamp for the certificate.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "notAfter")]
     pub not_after: Option<String>,
 }
 
 impl NewOrderRequest {
-    /// Create a new order request for given domains
+    /// Creates a new order request for the specified list of domains.
     pub fn new(domains: Vec<String>) -> Self {
+        tracing::debug!("Creating NewOrderRequest for domains: {:?}", domains);
         let identifiers = domains.into_iter().map(Identifier::dns).collect();
 
         Self {
@@ -151,23 +154,23 @@ impl NewOrderRequest {
         }
     }
 
-    /// Set not before timestamp
+    /// Sets the 'not before' timestamp for the order request.
     pub fn with_not_before(mut self, not_before: String) -> Self {
         self.not_before = Some(not_before);
         self
     }
 
-    /// Set not after timestamp
+    /// Sets the 'not after' timestamp for the order request.
     pub fn with_not_after(mut self, not_after: String) -> Self {
         self.not_after = Some(not_after);
         self
     }
 }
 
-/// Finalization request
+/// A request to finalize an order by submitting a CSR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalizationRequest {
-    /// Certificate Signing Request (base64url encoded DER)
+    /// The Certificate Signing Request (CSR) in base64url-encoded DER format.
     pub csr: String,
 }
 

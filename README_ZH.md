@@ -1,119 +1,89 @@
 # AcmeX
 
-[English](./README.md) | [中文](./README_ZH.md)
+[![Crates.io](https://img.shields.io/crates/v/acmex.svg)](https://crates.io/crates/acmex)
+[![Documentation](https://docs.rs/acmex/badge.svg)](https://docs.rs/acmex)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-一个使用 Rust 编写的简单 ACME v2 客户端，用于获取 TLS 证书。支持 TLS-ALPN-01、HTTP-01 和 DNS-01 挑战，与 rustls 集成，并支持
-Let's Encrypt、Google Trust Services 和 ZeroSSL。
+**AcmeX** 是一个使用 Rust 编写的模块化、企业级 ACME v2 (RFC 8555) 客户端和服务器生态系统。它专为高性能、可靠性和可扩展性而设计，支持多种 DNS 提供商、存储后端和加密库。
 
-[![AcmeX](https://img.shields.io/badge/version-v0.7.0--dev-blue)](https://github.com/houseme/acmex)
+## 🏗 架构设计
 
-**AcmeX** 是一个企业级 ACME v2 (RFC 8555) 客户端和管理服务器。
+AcmeX 采用分层设计，以确保关注点分离和易于维护：
 
-## 🚀 核心特性 (v0.7.0)
+- **应用层 (Application Layer)**: CLI 和基于 Axum 的 REST API 入口。
+- **编排层 (Orchestration Layer)**: 用于配置、验证和续订的高级工作流管理。
+- **调度层 (Scheduling Layer)**: 任务执行和并发管理。
+- **协议层 (Protocol Layer)**: 底层 ACME 实现（JWS、Nonce 管理、目录）。
+- **存储层 (Storage Tier)**: 可插拔后端（文件、Redis、内存、加密存储）。
+- **证书层 (Certificate Tier)**: 证书链验证、CSR 生成和 OCSP 状态检查。
 
-- **异步任务架构**: 通过 202 Accepted 轮询模式实现非阻塞证书签发。
-- **企业级 API 服务器**: 由 Axum 驱动的 RESTful API，支持 `X-API-Key` 认证。
-- **广阔的 DNS 生态**: 内置支持 11 个提供商，包括 AWS Route53、阿里云、华为云、腾讯云等。
-- **Nonce 池管理**: 高性能的 ACME Nonce 预取和缓存机制。
-- **实时 OCSP 监控**: 自动检查已签发证书的撤销状态。
-- **多后端存储**: 支持文件、Redis 和内存存储。
+## 🚀 核心特性
 
-## 特性
+- **完整 ACME v2 支持**: 完整实现 RFC 8555 协议。
+- **异步任务执行**: 针对耗时操作采用非阻塞任务轮询模式。
+- **多种验证方式**: 支持 `HTTP-01`、`DNS-01` 和 `TLS-ALPN-01`。
+- **广泛的 DNS 支持**: 内置 Cloudflare、AWS Route53、阿里云、Azure 等多家提供商。
+- **灵活的存储方案**: 支持本地文件、Redis 和加密存储。
+- **可观测性**: 集成指标监控 (Prometheus)、结构化日志 (Tracing) 和 OpenTelemetry 支持。
+- **安全优先**: 基于 Rust 的内存安全，使用 `zeroize` 处理敏感数据，遵循 RFC 7807 错误报告规范。
 
-- 完整的 ACME v2 支持 (RFC 8555)
-- 支持 TLS-ALPN-01, HTTP-01, 和 DNS-01 挑战验证
-- 与 rustls 集成，确保内存安全的 TLS 处理
-- 支持基于文件的持久化（默认）和 Redis 缓存（可选）
-- 默认支持 Let's Encrypt，通过 feature 开启 Google Trust Services 和 ZeroSSL
-- 提供 CLI 工具和库 (Library) 两种使用方式
-- 生产环境就绪：内置 Axum 服务器，支持 Prometheus 指标监控和 Tracing 链路追踪
+## 🛠 安装
 
-## 安装
-
-在 `Cargo.toml` 中添加：
+在你的 `Cargo.toml` 中添加 AcmeX：
 
 ```toml
 [dependencies]
 acmex = "0.7.0"
 ```
 
-开启 Redis 支持：
-
-```toml
-[dependencies]
-acmex = { version = "0.7.0", features = ["redis"] }
-```
-
-## 用法
-
-### 作为库使用
+## 📖 快速上手
 
 ```rust
-use acmex::{AcmeClient, AcmeConfig, ChallengeType};
+use acmex::prelude::*;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AcmeConfig::new(vec!["example.com".to_string()])
-        .contact(vec!["mailto:user@example.com".to_string()])
-        .prod(false);
-    let client = AcmeClient::new(config);
-    let (cert, key) = client.provision_certificate(ChallengeType::TlsAlpn01, None).await?;
-    // 在 rustls 中使用 cert 和 key
+async fn main() -> Result<()> {
+    // 1. 配置客户端
+    let config = AcmeConfig::lets_encrypt_staging()
+        .with_contact(Contact::email("admin@example.com"))
+        .with_tos_agreed(true);
+
+    let mut client = AcmeClient::new(config)?;
+
+    // 2. 签发证书
+    let domains = vec!["example.com".to_string()];
+    let mut solver_registry = ChallengeSolverRegistry::new();
+    // 在此处添加你的验证器 (例如 Http01Solver, Dns01Solver)
+
+    let bundle = client.issue_certificate(domains, &mut solver_registry).await?;
+
+    // 3. 保存证书
+    bundle.save_to_files("cert.pem", "key.pem")?;
+
     Ok(())
 }
 ```
 
-### 作为命令行工具使用
+## 🛠 开发指南
 
+### 前置条件
+- Rust 1.75+
+- Docker (用于 Redis/测试)
+
+### 运行测试
 ```bash
-cargo run -- --domains example.com --email user@example.com --cache-dir ./acmex_cache
+cargo test
 ```
 
-使用 Redis:
+## 📄 项目文档
 
-```bash
-cargo run --features redis -- --domains example.com --email user@example.com --redis-url redis://127.0.0.1:6379
-```
-
-## 📦 服务模式
-
-启动 AcmeX 管理服务器：
-
-```bash
-# 设置 API Key 用于身份验证
-export ACMEX_API_KEYS="admin-token-1,admin-token-2"
-
-# 启动服务器
-acmex serve 0.0.0.0:8080 --config acmex.toml
-```
-
-## 🛠 接口使用示例 (API)
-
-通过 REST API 申请证书：
-
-```bash
-curl -X POST http://localhost:8080/api/orders \
-     -H "X-API-Key: admin-token-1" \
-     -H "Content-Type: application/json" \
-     -d '{"domains": ["example.com", "*.example.com"]}'
-
-# 响应: 202 Accepted {"task_id": "abc-123"}
-```
-
-## 📚 文档
-
+详细文档请参阅 `docs` 目录：
 - [架构概览](docs/ARCHITECTURE.md)
 - [可观测性指南](docs/OBSERVABILITY.md)
-- [REST API 参考](docs/api/openapi.yaml)
-- [如何实现 DNS 提供商](docs/DNS-01_IMPLEMENTATION.md)
+- [V0.7.0 规划](docs/V0.7.0_PLANNING.md)
 
-## 许可证
+## 📜 开源协议
 
-本项目采用双许可证协议：
-
-- [MIT 许可证](LICENSE-MIT)
-- [Apache 许可证 2.0 版](LICENSE-APACHE)
-
-您可以根据需要选择其中任意一个许可证来使用本项目。除非您明确声明，您为本项目提交的任何贡献将默认采用上述双许可证协议，无需附加其他条款或条件。
-
-详细内容请参阅 [LICENSE-MIT](./LICENSE-MIT) 和 [LICENSE-APACHE](./LICENSE-APACHE) 文件。
+本项目采用以下协议授权：
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) 或 http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
