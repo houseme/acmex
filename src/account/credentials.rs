@@ -1,50 +1,66 @@
-/// Account credentials and key pair management
+/// Account credentials and key pair management.
+/// This module provides a wrapper around cryptographic key pairs used for
+/// ACME account identification and request signing.
 use crate::error::Result;
 use rcgen::KeyPair as RcgenKeyPair;
 use std::fs;
 use std::path::Path;
 
-/// KeyPair wrapper for Ed25519 keys (from rcgen)
+/// A wrapper for cryptographic key pairs (primarily Ed25519).
+/// This structure is used to sign ACME requests and identify the account.
 pub struct KeyPair(pub RcgenKeyPair);
 
 impl KeyPair {
-    /// Generate a new key pair
+    /// Generates a new random Ed25519 key pair.
     pub fn generate() -> Result<Self> {
+        tracing::debug!("Generating new Ed25519 key pair");
         let key_pair = RcgenKeyPair::generate().map_err(|e| {
+            tracing::error!("Failed to generate key pair: {}", e);
             crate::error::AcmeError::crypto(format!("Failed to generate key pair: {}", e))
         })?;
         Ok(Self(key_pair))
     }
 
-    /// Create from PEM encoded string
+    /// Creates a `KeyPair` from a PEM-encoded string.
     pub fn from_pem(pem_str: &str) -> Result<Self> {
+        tracing::debug!("Parsing KeyPair from PEM string");
         let key_pair = RcgenKeyPair::from_pem(pem_str).map_err(|e| {
+            tracing::error!("Failed to parse PEM key: {}", e);
             crate::error::AcmeError::pem(format!("Failed to parse PEM: {}", e))
         })?;
         Ok(Self(key_pair))
     }
 
-    /// Save key pair to PEM file
+    /// Saves the key pair to a file in PEM format.
     pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path_ref = path.as_ref();
+        tracing::info!("Saving key pair to file: {:?}", path_ref);
         let pem_str = self.0.serialize_pem();
-        fs::write(path, pem_str)?;
+        fs::write(path_ref, pem_str).map_err(|e| {
+            tracing::error!("Failed to write key file {:?}: {}", path_ref, e);
+            e.into()
+        })?;
         Ok(())
     }
 
-    /// Load key pair from PEM file
+    /// Loads a key pair from a PEM-encoded file.
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
+        let path_ref = path.as_ref();
+        tracing::info!("Loading key pair from file: {:?}", path_ref);
+        let content = fs::read_to_string(path_ref).map_err(|e| {
+            tracing::error!("Failed to read key file {:?}: {}", path_ref, e);
+            e.into()
+        })?;
         Self::from_pem(&content)
     }
 
-    /// Serialize to PEM format
+    /// Serializes the key pair to a PEM-formatted string.
     pub fn serialize_pem(&self) -> String {
         self.0.serialize_pem()
     }
 
-    /// Get public key bytes
+    /// Returns the raw bytes of the public key.
     pub fn public_key_bytes(&self) -> Vec<u8> {
-        // In rcgen 0.14, public_key_raw() returns the raw public key bytes
         self.0.public_key_raw().to_vec()
     }
 }
