@@ -1,4 +1,5 @@
-/// Built-in DNS providers
+/// Built-in DNS providers for various cloud platforms.
+/// Each provider implements the `DnsProvider` trait to handle TXT record management.
 pub mod alibaba;
 pub mod azure;
 pub mod cloudflare;
@@ -11,7 +12,7 @@ pub mod linode;
 pub mod route53;
 pub mod tencent;
 
-// Re-exports with feature gates
+// Re-exports with feature gates to provide a clean public API.
 #[cfg(feature = "dns-alibaba")]
 pub use alibaba::AlibabaCloudDnsProvider;
 #[cfg(feature = "dns-azure")]
