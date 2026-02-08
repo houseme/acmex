@@ -1,31 +1,36 @@
+/// Storage backends for certificates, account data, and session state.
+/// This module provides a pluggable storage architecture with support for
+/// local files, Redis, in-memory, and encrypted wrappers.
 pub mod cert_store;
 pub mod encrypted;
-/// Storage backends for certificates and account data
 pub mod file;
 pub mod memory;
 pub mod migration;
+
 #[cfg(feature = "redis")]
 pub mod redis;
 
 use crate::error::Result;
 use async_trait::async_trait;
 
-/// Storage backend trait
+/// A trait defining the interface for all storage backends.
+/// Implementations must be thread-safe and support asynchronous operations.
 #[async_trait]
 pub trait StorageBackend: Send + Sync {
-    /// Store a value by key
+    /// Stores a binary value associated with the given key.
     async fn store(&self, key: &str, value: &[u8]) -> Result<()>;
 
-    /// Load a value by key
+    /// Loads a binary value by its key. Returns `None` if the key does not exist.
     async fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
 
-    /// Delete a value by key
+    /// Deletes the value associated with the given key.
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// List all keys with a prefix
+    /// Lists all keys that start with the specified prefix.
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 }
 
+/// Blanket implementation for `Arc<T>` to allow easy sharing of storage backends.
 #[async_trait]
 impl<T: StorageBackend + ?Sized> StorageBackend for std::sync::Arc<T> {
     async fn store(&self, key: &str, value: &[u8]) -> Result<()> {
