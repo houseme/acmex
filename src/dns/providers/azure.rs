@@ -6,7 +6,7 @@
 use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Azure DNS Provider configuration
 #[derive(Debug, Clone)]
@@ -83,8 +83,6 @@ impl AzureDnsProvider {
     fn parse_zone_name(&self, domain: &str) -> String {
         let parts: Vec<&str> = domain.split('.').collect();
         if parts.len() > 2 {
-            // Simple logic: take the last two parts as the zone name
-            // In production, this might need to handle TLDs like .co.uk
             parts[parts.len() - 2..].join(".")
         } else {
             domain.to_string()

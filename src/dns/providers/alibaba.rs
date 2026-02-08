@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use base64::Engine;
 use hmac::{Hmac, Mac, KeyInit};
 use jiff::Zoned;
-use sha2::Sha256;
+use sha1::Sha1;
 use std::collections::BTreeMap;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Alibaba Cloud DNS Provider configuration
 #[derive(Debug, Clone)]
@@ -56,10 +56,7 @@ impl AlibabaCloudDnsProvider {
             self.percent_encode(&canonical_query_string)
         );
 
-        // 3. Calculate HMAC-SHA1 signature (Alibaba Cloud uses SHA1 for this style)
-        // Note: Some newer APIs support SHA256, but SHA1 is the standard for RPC style.
-        use hmac::Hmac;
-        use sha1::Sha1;
+        // 3. Calculate HMAC-SHA1 signature
         type HmacSha1 = Hmac<Sha1>;
 
         let secret = format!("{}&", self.access_key_secret);
@@ -95,7 +92,7 @@ impl AlibabaCloudDnsProvider {
             .unwrap_or("")
             .to_string();
         if name.is_empty() && domain != domain_name {
-             domain.strip_suffix(domain_name).unwrap_or("").trim_end_matches('.').to_string()
+             domain.strip_suffix(&domain_name).unwrap_or("").trim_end_matches('.').to_string()
         } else {
             name
         }
@@ -197,8 +194,8 @@ impl DnsProvider for AlibabaCloudDnsProvider {
 
         let body = self.do_request(params).await?;
 
-        if let Some(records) = body["DomainRecords"]["Record"].as_array() {
-            for record in records {
+        if let Some(domain_records) = body["DomainRecords"]["Record"].as_array() {
+            for record in domain_records {
                 if record["Value"].as_str() == Some(value) {
                     return Ok(true);
                 }

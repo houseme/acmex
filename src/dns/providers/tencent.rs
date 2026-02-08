@@ -107,7 +107,7 @@ impl TencentCloudDnsProvider {
             .unwrap_or("")
             .to_string();
         if name.is_empty() && full_domain != domain {
-             full_domain.strip_suffix(domain).unwrap_or("").trim_end_matches('.').to_string()
+             full_domain.strip_suffix(&domain).unwrap_or("").trim_end_matches('.').to_string()
         } else {
             name
         }

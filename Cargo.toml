@@ -32,6 +32,7 @@ rustls = { version = "0.23", default-features = false, features = ["logging", "s
 rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha1 = "0.11.0-rc.5"
 sha2 = "0.11.0-rc.5"
 thiserror = "2.0"
 toml = "0.9.11"
@@ -46,7 +47,7 @@ opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic"] }
 urlencoding = "2.1"
 x509-parser = "0.18"
 
-# 加密后端 - 优先使用 aws-lc-rs
+# Encrypted backend - aws-lc-rs is preferred
 [dependencies.aws-lc-rs]
 version = "1.15.4"
 optional = true
@@ -56,7 +57,7 @@ features = ["fips"]
 version = "0.17"
 optional = true
 
-# DNS 解析
+# DNS resolution
 [dependencies.hickory-proto]
 version = "0.25"
 
@@ -69,11 +70,11 @@ optional = true
 version = "1.106"
 optional = true
 
-# HTTP 服务器
+# HTTP server
 [dependencies.hyper]
 version = "1.8"
 
-# Redis 可选支持
+# Redis Optional Support
 [dependencies.redis]
 version = "1.0.3"
 features = ["tokio-comp", "connection-manager", "aio"]
