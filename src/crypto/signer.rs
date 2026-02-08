@@ -1,6 +1,8 @@
 //! 签名器 - 提供统一的签名接口
 
-use crate::error::Result;
+use crate::error::{AcmeError, Result};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 /// 数字签名
 #[derive(Debug, Clone)]
@@ -38,9 +40,8 @@ pub trait Signer: Send + Sync {
     }
 }
 
-/// HMAC 签名器 (简化实现)
+/// HMAC 签名器
 pub struct HmacSigner {
-    #[allow(dead_code)]
     key: Vec<u8>,
     algorithm: String,
 }
@@ -51,25 +52,43 @@ impl HmacSigner {
         Self { key, algorithm }
     }
 
-    /// 使用 SHA256 创建 HMAC 签名器
-    pub fn sha256(key: Vec<u8>) -> Self {
-        Self::new(key, "HMAC-SHA256".to_string())
+    /// 使用 SHA256 创建 HMAC 签名器 (HS256)
+    pub fn hs256(key: Vec<u8>) -> Self {
+        Self::new(key, "HS256".to_string())
     }
 }
 
 impl Signer for HmacSigner {
     fn sign(&self, data: &[u8]) -> Result<Signature> {
-        // 简化实现：实际 HMAC 签名需要依赖
-        // 这里使用占位符，实现需要加入正确的 hmac 库
-        let mut result = Vec::with_capacity(32);
-        for b in data.iter() {
-            result.push(b.wrapping_add(1));
+        match self.algorithm.as_str() {
+            "HS256" | "HMAC-SHA256" => {
+                let mut mac = Hmac::<Sha256>::new_from_slice(&self.key)
+                    .map_err(|e| AcmeError::crypto(format!("HMAC key error: {}", e)))?;
+                mac.update(data);
+                let result = mac.finalize().into_bytes().to_vec();
+                Ok(Signature::new(result, self.algorithm.clone()))
+            }
+            _ => Err(AcmeError::crypto(format!(
+                "Unsupported HMAC algorithm: {}",
+                self.algorithm
+            ))),
         }
-        Ok(Signature::new(result, self.algorithm.clone()))
     }
 
     fn algorithm(&self) -> &str {
         &self.algorithm
+    }
+
+    fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
+        match self.algorithm.as_str() {
+            "HS256" | "HMAC-SHA256" => {
+                let mut mac = Hmac::<Sha256>::new_from_slice(&self.key)
+                    .map_err(|e| AcmeError::crypto(format!("HMAC key error: {}", e)))?;
+                mac.update(data);
+                Ok(mac.verify_slice(signature).is_ok())
+            }
+            _ => Ok(false),
+        }
     }
 }
 
@@ -82,5 +101,23 @@ mod tests {
         let sig = Signature::new(vec![1, 2, 3, 4], "test".to_string());
         let base64 = sig.to_base64();
         assert!(!base64.is_empty());
+    }
+
+    #[test]
+    fn test_hmac_signer() {
+        let key = b"secret-key".to_vec();
+        let signer = HmacSigner::hs256(key);
+        let data = b"hello world";
+
+        let sig = signer.sign(data).unwrap();
+        assert_eq!(sig.algorithm, "HS256");
+        assert_eq!(sig.data.len(), 32);
+
+        let verified = signer.verify(data, &sig.data).unwrap();
+        assert!(verified);
+
+        let wrong_data = b"wrong data";
+        let verified_wrong = signer.verify(wrong_data, &sig.data).unwrap();
+        assert!(!verified_wrong);
     }
 }
