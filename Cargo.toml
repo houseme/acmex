@@ -55,7 +55,7 @@ hickory-resolver = { version = "0.25", features = ["serde"] }
 # Utilities
 clap = { version = "4.5", features = ["derive"] }
 jiff = { version = "0.2.19", features = ["serde"] }
-rand = "0.10.0-rc.9"
+rand = "0.10.0"
 regex = "1.12"
 
 # Error Handling
