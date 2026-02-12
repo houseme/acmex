@@ -69,7 +69,7 @@ ring = { version = "0.17", optional = true }
 
 # AWS Route53 Support
 aws-config = { version = "1.8", optional = true }
-aws-sdk-route53 = { version = "1.106", optional = true }
+aws-sdk-route53 = { version = "1.107", optional = true }
 
 # Storage Backends
 redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
