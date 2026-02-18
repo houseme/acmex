@@ -2,7 +2,7 @@
 name = "acmex"
 version = "0.8.0"
 edition = "2024"
-rust-version = "1.92.0"
+rust-version = "1.93.0"
 description = "AcmeX: High-performance, extensible ACME v2 (RFC 8555) client and server in Rust, supporting multiple DNS providers, storage backends, and crypto libraries."
 license = "MIT OR Apache-2.0"
 authors = ["houseme <housemecn@gmail.com>"]
@@ -38,7 +38,7 @@ tokio-rustls = "0.26"
 # Serialization & Configuration
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "1.0.1+spec-1.1.0"
+toml = "1.0.2"
 
 # Observability & Metrics
 tracing = "0.1"
@@ -69,7 +69,7 @@ ring = { version = "0.17", optional = true }
 
 # AWS Route53 Support
 aws-config = { version = "1.8", optional = true }
-aws-sdk-route53 = { version = "1.107", optional = true }
+aws-sdk-route53 = { version = "1.108", optional = true }
 
 # Storage Backends
 redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
