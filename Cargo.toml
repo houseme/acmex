@@ -72,7 +72,7 @@ aws-config = { version = "1.8", optional = true }
 aws-sdk-route53 = { version = "1.108", optional = true }
 
 # Storage Backends
-redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
+redis = { version = "1.0.4", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
 
 [features]
 default = ["aws-lc-rs"]
