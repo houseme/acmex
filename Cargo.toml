@@ -15,7 +15,7 @@ categories = ["web-programming", "api-bindings", "asynchronous", "cryptography",
 
 [dependencies]
 # Core Async & Runtime
-tokio = { version = "1.49", features = ["full"] }
+tokio = { version = "1.50", features = ["full"] }
 async-trait = "0.1"
 
 # Web & API Server
