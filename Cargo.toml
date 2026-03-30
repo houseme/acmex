@@ -30,7 +30,7 @@ pem = "3.0"
 base64 = "0.22"
 hex = "0.4"
 hmac = { version = "0.13.0-rc.6" }
-sha1 = "0.11.0-rc.5"
+sha1 = "0.11.0"
 sha2 = "0.11.0-rc.5"
 rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12"] }
 tokio-rustls = "0.26"
