@@ -1,5 +1,6 @@
 use hickory_resolver::config::ResolverConfig;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RData;
 /// DNS query caching implementation
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -147,10 +148,13 @@ impl CachingDnsResolver {
     /// Create a new caching resolver
     pub fn new() -> Result<Self> {
         let resolver = hickory_resolver::TokioResolver::builder_with_config(
-            ResolverConfig::new(),
-            TokioConnectionProvider::default(),
+            ResolverConfig::default(),
+            TokioRuntimeProvider::default(),
         )
-        .build();
+        .build()
+        .map_err(|e| {
+            crate::error::AcmeError::transport(format!("DNS resolver setup failed: {}", e))
+        })?;
 
         Ok(Self {
             resolver,
@@ -185,7 +189,14 @@ impl CachingDnsResolver {
             crate::error::AcmeError::transport(format!("DNS TXT lookup failed: {}", e))
         })?;
 
-        let txts: Vec<String> = response.iter().map(|txt| txt.to_string()).collect();
+        let txts: Vec<String> = response
+            .answers()
+            .iter()
+            .filter_map(|record| match &record.data {
+                RData::TXT(txt) => Some(txt.to_string()),
+                _ => None,
+            })
+            .collect();
 
         self.cache.set_txt(domain, txts.clone(), None).await;
 
