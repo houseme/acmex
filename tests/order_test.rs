@@ -34,7 +34,7 @@ async fn test_certificate_order_flow() -> Result<()> {
         .await;
 
     // 1. Setup client
-    let config = AcmeConfig::new(&format!("{}/directory", url))
+    let config = AcmeConfig::new(format!("{}/directory", url))
         .with_contact(Contact::email("admin@example.com"))
         .with_tos_agreed(true);
 

@@ -11,7 +11,7 @@ async fn test_full_account_lifecycle() -> Result<()> {
     let _m_account = mock_server.mock_new_account().await;
 
     // 1. Setup client
-    let config = AcmeConfig::new(&format!("{}/directory", mock_server.url()))
+    let config = AcmeConfig::new(format!("{}/directory", mock_server.url()))
         .with_contact(Contact::email("admin@example.com"))
         .with_tos_agreed(true);
 
