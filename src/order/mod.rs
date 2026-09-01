@@ -4,7 +4,10 @@ pub mod manager;
 pub mod objects;
 pub mod revocation;
 
-pub use csr::{CsrGenerator, parse_certificate_chain, verify_certificate_domains};
+pub use csr::{
+    CsrGenerator, parse_certificate_chain, verify_certificate_domains,
+    verify_certificate_identifiers,
+};
 pub use manager::OrderManager;
 pub use objects::{Authorization, Challenge, FinalizationRequest, NewOrderRequest, Order};
 pub use revocation::CertificateRevocation;

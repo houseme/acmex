@@ -1,5 +1,8 @@
 use crate::certificate::OcspVerifier;
 /// Certificate chain verification and management
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use crate::domain::{DnsIdentifier, Identifier};
 use crate::error::{AcmeError, Result};
 use jiff::Zoned;
 use x509_parser::asn1_rs::FromDer;
@@ -8,6 +11,32 @@ use x509_parser::prelude::*;
 
 /* Use ::pem to avoid ambiguity with modules in x509_parser */
 use ::pem::parse_many;
+
+/// Typed Subject Alternative Names from a certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CertificateSubjectAltNames {
+    /// DNSName SAN entries.
+    pub dns_names: Vec<String>,
+    /// iPAddress SAN entries.
+    pub ip_addresses: Vec<IpAddr>,
+}
+
+impl CertificateSubjectAltNames {
+    fn identifiers(&self) -> Vec<Identifier> {
+        let mut identifiers = self
+            .dns_names
+            .iter()
+            .map(|name| {
+                Identifier::try_dns(name)
+                    .unwrap_or_else(|_| Identifier::Dns(DnsIdentifier::parse_lenient(name)))
+            })
+            .chain(self.ip_addresses.iter().copied().map(Identifier::Ip))
+            .collect::<Vec<_>>();
+        identifiers.sort();
+        identifiers.dedup();
+        identifiers
+    }
+}
 
 /// Certificate chain structure
 #[derive(Debug, Clone)]
@@ -112,34 +141,51 @@ impl CertificateChain {
 
     /// Get Subject Alternative Names (SANs)
     pub fn subject_alt_names(&self) -> Result<Vec<String>> {
+        let typed = self.typed_subject_alt_names()?;
+        let mut sans = typed.dns_names;
+        sans.extend(typed.ip_addresses.into_iter().map(|ip| ip.to_string()));
+        Ok(sans)
+    }
+
+    /// Get typed Subject Alternative Names (SANs).
+    pub fn typed_subject_alt_names(&self) -> Result<CertificateSubjectAltNames> {
         let (_, cert) = X509Certificate::from_der(&self.leaf)
             .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
 
-        let mut sans = Vec::new();
+        let mut sans = CertificateSubjectAltNames::default();
 
         for ext in cert.extensions() {
             if let ParsedExtension::SubjectAlternativeName(san_ext) = ext.parsed_extension() {
                 for name in &san_ext.general_names {
                     if let GeneralName::DNSName(dns) = name {
-                        sans.push(dns.to_string());
-                    } else if let GeneralName::IPAddress(ip) = name {
-                        // Convert IP bytes to string representation
-                        if ip.len() == 4 {
-                            let ip_addr = std::net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]);
-                            sans.push(ip_addr.to_string());
-                        } else if ip.len() == 16 {
-                            let ip_addr = std::net::Ipv6Addr::from([
-                                ip[0], ip[1], ip[2], ip[3], ip[4], ip[5], ip[6], ip[7], ip[8],
-                                ip[9], ip[10], ip[11], ip[12], ip[13], ip[14], ip[15],
-                            ]);
-                            sans.push(ip_addr.to_string());
-                        }
+                        sans.dns_names.push(dns.to_string());
+                    } else if let GeneralName::IPAddress(ip) = name
+                        && let Some(ip_addr) = decode_ip_san(ip)
+                    {
+                        sans.ip_addresses.push(ip_addr);
                     }
                 }
             }
         }
 
         Ok(sans)
+    }
+
+    /// Verify the leaf certificate SAN set exactly matches typed identifiers.
+    pub fn verify_identifiers_exact(&self, expected: &[Identifier]) -> Result<()> {
+        let mut actual = self.typed_subject_alt_names()?.identifiers();
+        let mut expected = expected.to_vec();
+        actual.sort();
+        actual.dedup();
+        expected.sort();
+        expected.dedup();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(AcmeError::certificate(format!(
+                "certificate SAN mismatch: actual={actual:?}, expected={expected:?}"
+            )))
+        }
     }
 
     /// Get OCSP URL
@@ -189,10 +235,22 @@ impl CertificateChain {
     }
 }
 
+fn decode_ip_san(bytes: &[u8]) -> Option<IpAddr> {
+    match bytes {
+        [a, b, c, d] => Some(IpAddr::V4(Ipv4Addr::new(*a, *b, *c, *d))),
+        bytes if bytes.len() == 16 => {
+            let mut octets = [0_u8; 16];
+            octets.copy_from_slice(bytes);
+            Some(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcgen::CertificateParams;
+    use rcgen::{CertificateParams, SanType};
 
     #[test]
     fn test_certificate_chain_parsing() {
@@ -211,5 +269,42 @@ mod tests {
 
         assert_eq!(chain.common_name().unwrap(), "example.com");
         assert_eq!(chain.subject_alt_names().unwrap(), vec!["example.com"]);
+    }
+
+    #[test]
+    fn typed_sans_preserve_ip_type_and_exact_verification() {
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = vec![
+            SanType::DnsName("example.com".try_into().unwrap()),
+            SanType::IpAddress("192.0.2.1".parse().unwrap()),
+        ];
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let chain = CertificateChain {
+            leaf: cert.der().to_vec(),
+            intermediates: Vec::new(),
+            root: None,
+        };
+
+        let typed = chain.typed_subject_alt_names().unwrap();
+        assert_eq!(typed.dns_names, vec!["example.com"]);
+        assert_eq!(
+            typed.ip_addresses,
+            vec!["192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
+        chain
+            .verify_identifiers_exact(&[
+                Identifier::try_dns("example.com").unwrap(),
+                Identifier::try_ip("192.0.2.1").unwrap(),
+            ])
+            .unwrap();
+        assert!(
+            chain
+                .verify_identifiers_exact(&[
+                    Identifier::try_dns("example.com").unwrap(),
+                    Identifier::try_dns("192.0.2.1").unwrap(),
+                ])
+                .is_err()
+        );
     }
 }

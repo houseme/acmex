@@ -198,6 +198,24 @@ impl AcmeClient {
         solver_registry: &mut ChallengeSolverRegistry,
     ) -> Result<CertificateBundle> {
         tracing::info!("Starting certificate issuance for domains: {:?}", domains);
+        self.issue_order(
+            NewOrderRequest::new(domains.clone()),
+            CsrGenerator::new(domains.clone()),
+            domains,
+            None,
+            solver_registry,
+        )
+        .await
+    }
+
+    async fn issue_order(
+        &mut self,
+        order_req: NewOrderRequest,
+        csr_generator: CsrGenerator,
+        bundle_domains: Vec<String>,
+        expected_identifiers: Option<Vec<Identifier>>,
+        solver_registry: &mut ChallengeSolverRegistry,
+    ) -> Result<CertificateBundle> {
         // Ensure account is registered
         if self.account_id.is_none() {
             self.register_account().await?;
@@ -219,8 +237,6 @@ impl AcmeClient {
             account_id.clone(),
         );
 
-        // Create order (DNS-only compatibility path).
-        let order_req = NewOrderRequest::new(domains.clone());
         let (order_url, mut order) = order_mgr.create_order(&order_req).await?;
         tracing::info!("Order created: {}", order_url);
 
@@ -305,10 +321,8 @@ impl AcmeClient {
             ));
         }
 
-        // Generate CSR
-        tracing::info!("Generating CSR for domains: {:?}", domains);
-        let csr_gen = CsrGenerator::new(domains.clone());
-        let (csr_der, private_key_pem) = csr_gen.generate()?;
+        tracing::info!("Generating CSR");
+        let (csr_der, private_key_pem) = csr_generator.generate()?;
 
         // Finalize order
         tracing::info!("Finalizing order at URL: {}", order.finalize);
@@ -347,40 +361,40 @@ impl AcmeClient {
             } else {
                 tracing::info!("Certificate chain verified successfully");
             }
+            if let Some(expected) = &expected_identifiers {
+                chain.verify_identifiers_exact(expected)?;
+            }
         }
 
         tracing::info!("Certificate issuance completed successfully");
         Ok(CertificateBundle {
             certificate_pem: cert_pem,
             private_key_pem,
-            domains,
+            domains: bundle_domains,
         })
     }
 
     /// Issues a certificate for strong-typed identifiers.
     ///
-    /// DNS identifiers (including wildcards, which require a DNS-01 solver)
-    /// run through the existing issuance flow. IP identifiers are rejected
-    /// with a clear error until RFC 8738 network validation lands (roadmap
-    /// T07) — they are never silently treated as DNS names.
+    /// DNS and IP identifiers stay typed through order creation, validation,
+    /// CSR generation and final certificate SAN verification.
     pub async fn issue_identifiers(
         &mut self,
         identifiers: Vec<Identifier>,
         solver_registry: &mut ChallengeSolverRegistry,
     ) -> Result<CertificateBundle> {
-        let mut domains = Vec::with_capacity(identifiers.len());
-        for identifier in &identifiers {
-            match identifier {
-                Identifier::Dns(dns) => domains.push(dns.to_wire_value()),
-                Identifier::Ip(addr) => {
-                    return Err(crate::error::AcmeError::InvalidInput(format!(
-                        "IP identifier `{addr}` requires RFC 8738 validation, which is not yet \
-                         available in the legacy client flow; DNS identifiers are supported"
-                    )));
-                }
-            }
-        }
-        self.issue_certificate(domains, solver_registry).await
+        let bundle_domains = identifiers
+            .iter()
+            .map(Identifier::acme_value)
+            .collect::<Vec<_>>();
+        self.issue_order(
+            NewOrderRequest::from_identifiers(identifiers.clone()),
+            CsrGenerator::for_identifiers(identifiers.clone()),
+            bundle_domains,
+            Some(identifiers),
+            solver_registry,
+        )
+        .await
     }
 
     /// Enables and initializes a nonce pool for better performance.
