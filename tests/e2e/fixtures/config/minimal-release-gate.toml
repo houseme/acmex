@@ -1,0 +1,21 @@
+[acme]
+ca = "letsencrypt"
+ca_environment = "staging"
+contact = ["mailto:release-gate@example.com"]
+tos_agreed = true
+
+[repository]
+backend = "file"
+
+[repository.file]
+path = ".acmex/e2e-repository"
+
+[challenge]
+challenge_type = "dns-01"
+
+[renewal]
+check_interval = 60
+renew_before_days = 30
+max_retries = 3
+retry_delay_secs = 5
+concurrency = 2
