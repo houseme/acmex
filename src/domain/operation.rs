@@ -244,6 +244,9 @@ pub struct StepRecord {
     /// Compensation state.
     #[serde(default)]
     pub compensation: CompensationState,
+    /// Compensation attempt counter.
+    #[serde(default)]
+    pub compensation_attempts: u32,
 }
 
 impl StepRecord {
@@ -259,6 +262,7 @@ impl StepRecord {
             output_ref: None,
             error: None,
             compensation: CompensationState::NotRequired,
+            compensation_attempts: 0,
         }
     }
 }
