@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +23,14 @@ use crate::domain::{
     OperationKind, OperationStatus, TargetId, VersionId, VersionState,
 };
 use crate::repository::{CasOutcome, LeaseOutcome, RepositorySet};
+
+const ACTIVE_RENEWAL_STATUSES: &[OperationStatus] = &[
+    OperationStatus::Queued,
+    OperationStatus::Running,
+    OperationStatus::Waiting,
+    OperationStatus::CancelRequested,
+    OperationStatus::Compensating,
+];
 
 /// A trait for defining custom hooks that are triggered during the renewal process.
 pub trait RenewalHook: Send + Sync {
@@ -479,6 +488,7 @@ impl RenewalController {
         let page_size = self.config.page_size.max(1);
         let page = lineages.into_iter().skip(offset).take(page_size);
         let next_cursor = (offset + page_size < total).then(|| (offset + page_size).to_string());
+        let active_renewal_lineages = self.active_renewal_lineages().await?;
 
         let mut report = RenewalScanReport {
             next_cursor,
@@ -505,7 +515,7 @@ impl RenewalController {
             if !should_create {
                 continue;
             }
-            if self.active_renewal_operation_exists(&lineage.id).await? {
+            if active_renewal_lineages.contains(&lineage.id) {
                 continue;
             }
             if self.config.shadow_mode {
@@ -524,29 +534,20 @@ impl RenewalController {
         Ok(report)
     }
 
-    async fn active_renewal_operation_exists(&self, lineage_id: &LineageId) -> Result<bool> {
-        for status in [
-            OperationStatus::Queued,
-            OperationStatus::Running,
-            OperationStatus::Waiting,
-            OperationStatus::CancelRequested,
-            OperationStatus::Compensating,
-        ] {
-            if self
-                .repositories
-                .operations
-                .list_by_status(status, usize::MAX)
-                .await?
-                .into_iter()
-                .any(|stored| {
-                    stored.value.kind == OperationKind::Renew
-                        && stored.value.subject.lineage_id.as_ref() == Some(lineage_id)
-                })
-            {
-                return Ok(true);
-            }
+    async fn active_renewal_lineages(&self) -> Result<BTreeSet<LineageId>> {
+        let mut lineages = BTreeSet::new();
+        for status in ACTIVE_RENEWAL_STATUSES {
+            lineages.extend(
+                self.repositories
+                    .operations
+                    .list_by_status(*status, usize::MAX)
+                    .await?
+                    .into_iter()
+                    .filter(|stored| stored.value.kind == OperationKind::Renew)
+                    .filter_map(|stored| stored.value.subject.lineage_id),
+            );
         }
-        Ok(false)
+        Ok(lineages)
     }
 
     async fn create_renewal_operation_with_lease(
@@ -565,38 +566,57 @@ impl RenewalController {
             LeaseOutcome::HeldByOther { .. } => return Ok(false),
         };
 
-        let operation = self
-            .application
-            .renew(RenewCertificate {
-                context: ActorContext {
-                    tenant_id: lineage.tenant_id.clone(),
-                    actor: self.config.owner.clone(),
-                },
-                lineage_id: Some(lineage.id.clone()),
-                identifiers: Vec::new(),
-                force: false,
-                idempotency_key: format!("renewal:{}:{}", lineage.id, active_version_id),
-            })
-            .await?;
-        self.repositories
-            .outbox
-            .append(
-                "renewal.operation_created",
-                serde_json::json!({
-                    "lineage_id": lineage.id.as_str(),
-                    "active_version_id": active_version_id.as_str(),
-                    "operation_id": operation.id.as_str(),
-                    "owner": self.config.owner,
-                    "fencing_token": grant.fencing_token,
-                }),
-                None,
-            )
-            .await?;
-        self.repositories
+        let operation_result = async {
+            let operation = self
+                .application
+                .renew(RenewCertificate {
+                    context: ActorContext {
+                        tenant_id: lineage.tenant_id.clone(),
+                        actor: self.config.owner.clone(),
+                    },
+                    lineage_id: Some(lineage.id.clone()),
+                    identifiers: Vec::new(),
+                    force: false,
+                    idempotency_key: format!("renewal:{}:{}", lineage.id, active_version_id),
+                })
+                .await?;
+            self.repositories
+                .outbox
+                .append(
+                    "renewal.operation_created",
+                    serde_json::json!({
+                        "lineage_id": lineage.id.as_str(),
+                        "active_version_id": active_version_id.as_str(),
+                        "operation_id": operation.id.as_str(),
+                        "owner": self.config.owner,
+                        "fencing_token": grant.fencing_token,
+                    }),
+                    None,
+                )
+                .await?;
+            Ok::<_, AcmeError>(())
+        }
+        .await;
+        let release_result = self
+            .repositories
             .leases
             .release(&lease_key, &grant.owner, grant.fencing_token)
-            .await?;
-        Ok(true)
+            .await;
+
+        match (operation_result, release_result) {
+            (Ok(()), Ok(())) => Ok(true),
+            (Ok(()), Err(err)) => Err(err),
+            (Err(err), Ok(())) => Err(err),
+            (Err(err), Err(release_err)) => {
+                tracing::warn!(
+                    lineage_id = %lineage.id,
+                    owner = %grant.owner,
+                    error = %release_err,
+                    "failed to release renewal lease after operation creation failed"
+                );
+                Err(err)
+            }
+        }
     }
 
     /// Promotes a renewed version only after required deployments succeeded.

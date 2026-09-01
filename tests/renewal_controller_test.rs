@@ -5,19 +5,24 @@ use std::time::Duration;
 use async_trait::async_trait;
 use jiff::Timestamp;
 
-use acmex::application::{ApplicationServiceBuilder, CertificateApplication};
+use acmex::application::{
+    ApplicationServiceBuilder, CancelOperation, CertificateApplication, CreateCertificateIntent,
+    DeployCertificate, IntentView, IssueCertificate, OperationView, RenewCertificate,
+    RevokeCertificate,
+};
 use acmex::ca_backend::RenewalWindow;
 use acmex::domain::{
     CertificateIntent, CertificateLineage, CertificateVersion, DeliveryTarget, DeliveryTargetKind,
     DeploymentId, DeploymentRecord, DeploymentState, IdentifierSet, IntentId, KeyAlgorithm, KeyId,
-    KeyRef, LineageId, OperationKind, RenewalPolicy, TargetId, TenantId, VersionId, VersionState,
+    KeyRef, LineageId, OperationId, OperationKind, OperationRecord, OperationRef, OperationSubject,
+    RenewalPolicy, TargetId, TenantId, VersionId, VersionState,
 };
-use acmex::error::Result;
+use acmex::error::{AcmeError, Result};
 use acmex::renewal::{
     RenewalActivationOutcome, RenewalController, RenewalControllerConfig, RenewalInfoProvider,
     RenewalPriority, RenewalWindowSource, calculate_decision,
 };
-use acmex::repository::{CreateOutcome, FakeClock, MemoryRepository, RepositorySet};
+use acmex::repository::{CreateOutcome, FakeClock, LeaseOutcome, MemoryRepository, RepositorySet};
 
 fn ts(value: &str) -> Timestamp {
     Timestamp::from_str(value).unwrap()
@@ -229,6 +234,35 @@ impl RenewalInfoProvider for StaticAri {
     }
 }
 
+struct FailingRenewApplication;
+
+#[async_trait]
+impl CertificateApplication for FailingRenewApplication {
+    async fn create_intent(&self, _command: CreateCertificateIntent) -> Result<IntentView> {
+        Err(AcmeError::transport("forced create failure"))
+    }
+
+    async fn issue(&self, _command: IssueCertificate) -> Result<OperationRef> {
+        Err(AcmeError::transport("forced issue failure"))
+    }
+
+    async fn renew(&self, _command: RenewCertificate) -> Result<OperationRef> {
+        Err(AcmeError::transport("forced renewal failure"))
+    }
+
+    async fn revoke(&self, _command: RevokeCertificate) -> Result<OperationRef> {
+        Err(AcmeError::transport("forced revoke failure"))
+    }
+
+    async fn deploy(&self, _command: DeployCertificate) -> Result<OperationRef> {
+        Err(AcmeError::transport("forced deploy failure"))
+    }
+
+    async fn cancel_operation(&self, _command: CancelOperation) -> Result<OperationView> {
+        Err(AcmeError::transport("forced cancel failure"))
+    }
+}
+
 async fn seeded_controller(
     now: Timestamp,
 ) -> (
@@ -421,6 +455,70 @@ async fn renewal_scan_shadow_mode_does_not_create_operation() {
     assert_eq!(report.shadowed, 1);
     assert_eq!(report.operations_created, 0);
     assert!(created.is_none());
+}
+
+#[tokio::test]
+async fn renewal_scan_skips_lineage_with_existing_active_renewal_operation() {
+    let (repositories, application, lineage_id, version_id) =
+        seeded_controller(ts("2026-01-09T12:00:00Z")).await;
+    let operation = OperationRecord::new(
+        OperationId::new("op_existing_renewal").unwrap(),
+        OperationKind::Renew,
+        OperationSubject {
+            intent_id: None,
+            lineage_id: Some(lineage_id.clone()),
+            version_id: None,
+        },
+        Some("existing-renewal".to_string()),
+        None,
+        repositories.clock.now(),
+    );
+    repositories.operations.create(operation).await.unwrap();
+    let controller = RenewalController::new(
+        repositories.clone(),
+        application,
+        RenewalControllerConfig::default(),
+    );
+
+    let report = controller.scan_once().await.unwrap();
+    let created = repositories
+        .operations
+        .find_by_idempotency_key(&format!("renewal:{lineage_id}:{version_id}"))
+        .await
+        .unwrap();
+
+    assert_eq!(report.decisions.len(), 1);
+    assert_eq!(report.operations_created, 0);
+    assert_eq!(report.leases_skipped, 0);
+    assert!(created.is_none());
+}
+
+#[tokio::test]
+async fn renewal_scan_releases_lineage_lease_when_operation_creation_fails() {
+    let (repositories, _application, lineage_id, _version_id) =
+        seeded_controller(ts("2026-01-09T12:00:00Z")).await;
+    let controller = RenewalController::new(
+        repositories.clone(),
+        Arc::new(FailingRenewApplication),
+        RenewalControllerConfig {
+            owner: "scanner-a".to_string(),
+            ..RenewalControllerConfig::default()
+        },
+    );
+
+    let result = controller.scan_once().await;
+    let reacquired = repositories
+        .leases
+        .acquire(
+            &format!("renewal/lineage/{lineage_id}"),
+            "scanner-b",
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_err());
+    assert!(matches!(reacquired, LeaseOutcome::Granted(_)));
 }
 
 #[tokio::test]
