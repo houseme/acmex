@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use acmex::domain::{
     AccountRecord, AccountStatus, CertificateIntent, CertificateLineage, CertificateVersion,
-    IdentifierSet, KeyAlgorithm, KeyId, KeyRef, LineageId, OperationKind, OperationRecord,
-    OperationStatus, OperationSubject, TenantId, VersionId, VersionState,
+    IdentifierSet, KeyAlgorithm, KeyId, KeyRef, LineageId, OperationRecord, OperationStatus,
+    OperationSubject, TenantId, VersionId, VersionState,
 };
 use std::str::FromStr;
 

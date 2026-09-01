@@ -105,8 +105,7 @@ async fn provider_errors_are_classified_not_panics() {
             idempotency_key: "s".to_string(),
         })
         .await
-        .err()
-        .expect("scripted failure must surface as an error");
+        .expect_err("scripted failure must surface as an error");
     // Stable classification, not a panic; credentials never appear.
     assert!(err.to_string().contains("PROVIDER_AUTH_FAILED"));
 }

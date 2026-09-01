@@ -38,6 +38,9 @@ use crate::repository::RepositorySet;
 pub use engine::{EngineConfig, WorkflowEngine};
 pub use issue::IssueWorkflow;
 
+type ExecuteFn = dyn for<'ctx> Fn(StepContext<'ctx>) -> StepResult + Send + Sync;
+type CompensateFn = dyn for<'ctx> Fn(StepContext<'ctx>) -> CompensationResult + Send + Sync;
+
 /// Input to a step executor.
 pub struct StepContext<'a> {
     /// The operation being advanced (latest persisted state).
@@ -143,16 +146,16 @@ pub trait StepExecutor: Send + Sync {
 /// A closure-backed executor, handy for tests and simple steps.
 pub struct FnStepExecutor {
     step_kind: WorkflowStepKind,
-    execute_fn: Arc<dyn Fn(StepContext<'_>) -> StepResult + Send + Sync>,
-    compensate_fn: Option<Arc<dyn Fn(StepContext<'_>) -> CompensationResult + Send + Sync>>,
+    execute_fn: Arc<ExecuteFn>,
+    compensate_fn: Option<Arc<CompensateFn>>,
 }
 
 impl FnStepExecutor {
     /// Creates an executor from an execution closure.
-    pub fn new(
-        step_kind: WorkflowStepKind,
-        execute_fn: impl Fn(StepContext<'_>) -> StepResult + Send + Sync + 'static,
-    ) -> Self {
+    pub fn new<F>(step_kind: WorkflowStepKind, execute_fn: F) -> Self
+    where
+        F: for<'ctx> Fn(StepContext<'ctx>) -> StepResult + Send + Sync + 'static,
+    {
         Self {
             step_kind,
             execute_fn: Arc::new(execute_fn),
@@ -161,10 +164,10 @@ impl FnStepExecutor {
     }
 
     /// Attaches a compensation closure.
-    pub fn with_compensate(
-        mut self,
-        compensate_fn: impl Fn(StepContext<'_>) -> CompensationResult + Send + Sync + 'static,
-    ) -> Self {
+    pub fn with_compensate<F>(mut self, compensate_fn: F) -> Self
+    where
+        F: for<'ctx> Fn(StepContext<'ctx>) -> CompensationResult + Send + Sync + 'static,
+    {
         self.compensate_fn = Some(Arc::new(compensate_fn));
         self
     }
@@ -194,13 +197,13 @@ impl StepExecutor for FnStepExecutor {
 /// capped at `max`. Jitter is deterministic per (attempt, seed) so tests
 /// stay reproducible.
 pub fn compute_backoff(attempt: u32, base: Duration, max: Duration, seed: u64) -> Duration {
-    let exp = attempt.saturating_sub(1).min(16) as u32;
+    let exp = attempt.saturating_sub(1).min(16);
     let factor = 2u64.saturating_pow(exp);
     let raw = base
         .as_millis()
         .saturating_mul(factor as u128)
         .max(1)
-        .min(max.as_millis().max(1) as u128);
+        .min(max.as_millis().max(1));
     // Deterministic jitter in [0.75, 1.25) of the raw delay.
     let jitter_unit = raw / 8;
     let jitter = if jitter_unit == 0 {
@@ -225,15 +228,15 @@ mod tests {
         let max = Duration::from_secs(60);
         for attempt in 1..=10 {
             let delay = compute_backoff(attempt, base, max, 42);
-            let expected = (base.as_millis() as u128 * 2u128.pow((attempt - 1).min(16)))
-                .min(max.as_millis() as u128);
+            let expected =
+                (base.as_millis() * 2u128.pow((attempt - 1).min(16))).min(max.as_millis());
             // Jitter stays within [0.75, 1.25) of the exponential value.
             assert!(
-                delay.as_millis() as u128 >= expected * 3 / 4,
+                delay.as_millis() >= expected * 3 / 4,
                 "attempt {attempt}: {delay:?} below lower bound"
             );
             assert!(
-                delay.as_millis() as u128 <= expected * 5 / 4,
+                delay.as_millis() <= expected * 5 / 4,
                 "attempt {attempt}: {delay:?} above upper bound"
             );
             assert!(delay <= max * 2, "delay is capped near max");

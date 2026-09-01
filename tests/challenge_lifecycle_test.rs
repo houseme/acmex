@@ -16,8 +16,7 @@ use acmex::challenge::{
     WaitAuthorizationsStep, WaitPropagationStep,
 };
 use acmex::domain::{
-    ChallengeLeaseState, Identifier, OperationId, OperationKind, OperationRecord, OperationStatus,
-    OperationSubject,
+    Identifier, OperationId, OperationKind, OperationRecord, OperationStatus, OperationSubject,
 };
 use acmex::protocol::Jwk;
 use acmex::repository::{Clock, FakeClock, MemoryRepository, RepositorySet};
@@ -177,10 +176,10 @@ impl Fixture {
     async fn drive_to_terminal(&self, operation: &OperationId) -> OperationRecord {
         let mut guard = 0;
         loop {
-            if let Some(stored) = self.repositories.operations.get(operation).await.unwrap() {
-                if stored.value.status.is_terminal() {
-                    return stored.value;
-                }
+            if let Some(stored) = self.repositories.operations.get(operation).await.unwrap()
+                && stored.value.status.is_terminal()
+            {
+                return stored.value;
             }
             let advanced = self.engine.run_step(operation).await.unwrap();
             if !advanced {

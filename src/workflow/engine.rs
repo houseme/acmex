@@ -124,7 +124,7 @@ impl WorkflowEngine {
             let next = stored
                 .value
                 .transition(OperationStatus::CancelRequested)
-                .map_err(|e| AcmeError::Storage(e))?;
+                .map_err(AcmeError::Storage)?;
             match self
                 .repositories
                 .operations
@@ -185,10 +185,10 @@ impl WorkflowEngine {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             self.run_step(id).await?;
-            if let Some(stored) = self.repositories.operations.get(id).await? {
-                if stored.value.status.is_terminal() {
-                    return Ok(stored.value);
-                }
+            if let Some(stored) = self.repositories.operations.get(id).await?
+                && stored.value.status.is_terminal()
+            {
+                return Ok(stored.value);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(AcmeError::Timeout(format!(

@@ -35,9 +35,9 @@ impl IssueWorkflow {
     ) -> Vec<Arc<dyn StepExecutor>> {
         WorkflowStepKind::issuance_spine()
             .iter()
-            .filter_map(|kind| match overrides.get(kind) {
-                Some(executor) => Some(Arc::clone(executor)),
-                None => Some(Self::noop(*kind)),
+            .map(|kind| match overrides.get(kind) {
+                Some(executor) => Arc::clone(executor),
+                None => Self::noop(*kind),
             })
             .collect()
     }

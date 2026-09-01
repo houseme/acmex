@@ -219,15 +219,15 @@ impl CaBackend for AcmeCaBackend {
     async fn ensure_account(&self, account: &AccountRef) -> Result<AccountHandle> {
         let repo_id = self.account_repo_id();
         // Reuse: an account with a persisted URL is never re-registered.
-        if let Some(existing) = self.repositories.accounts.get(&repo_id).await? {
-            if let Some(url) = existing.value.account_url {
-                tracing::debug!(ca = self.ca_id, "reusing persisted ACME account");
-                return Ok(AccountHandle {
-                    ca_id: self.ca_id.clone(),
-                    account_url: url,
-                    key_id: existing.value.key_ref.key_id.to_string(),
-                });
-            }
+        if let Some(existing) = self.repositories.accounts.get(&repo_id).await?
+            && let Some(url) = existing.value.account_url
+        {
+            tracing::debug!(ca = self.ca_id, "reusing persisted ACME account");
+            return Ok(AccountHandle {
+                ca_id: self.ca_id.clone(),
+                account_url: url,
+                key_id: existing.value.key_ref.key_id.to_string(),
+            });
         }
 
         let session = self.registration_session();
@@ -276,10 +276,7 @@ impl CaBackend for AcmeCaBackend {
                 ca_id: self.ca_id.clone(),
                 directory_url: self.directory_url.clone(),
                 account_url: Some(account_url.clone()),
-                key_ref: KeyRef::software(
-                    KeyId::new(key_id.clone()).map_err(AcmeError::from)?,
-                    KeyAlgorithm::Ed25519,
-                ),
+                key_ref: KeyRef::software(KeyId::new(key_id.clone())?, KeyAlgorithm::Ed25519),
                 contacts: account.contacts.clone(),
                 eab_bound: account.external_account_binding.is_some(),
                 status: AccountStatus::Active,

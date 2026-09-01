@@ -27,7 +27,7 @@ use crate::domain::{
     CertificateLineage, CertificateVersion, DnsIdentifier, Identifier, IdentifierSet, KeyAlgorithm,
     KeyId, KeyRef, LineageId, TenantId, VersionId, VersionState,
 };
-use crate::error::{AcmeError, Result};
+use crate::error::Result;
 use crate::storage::StorageBackend;
 
 /// How the migrator should run.
@@ -176,9 +176,9 @@ impl LegacyBundleMigrator {
                 source_key: key,
                 source_hash,
                 domains: parsed.map(|b| b.domains).unwrap_or_default(),
-                lineage_id: LineageId::new(ids.0).map_err(|e| e)?,
-                version_id: VersionId::new(ids.1).map_err(|e| e)?,
-                key_id: KeyId::new(ids.2).map_err(|e| e)?,
+                lineage_id: LineageId::new(ids.0)?,
+                version_id: VersionId::new(ids.1)?,
+                key_id: KeyId::new(ids.2)?,
                 status,
             });
         }
@@ -285,8 +285,7 @@ impl LegacyBundleMigrator {
             intent_id: crate::domain::IntentId::new(format!(
                 "int_legacy_{}",
                 &item.source_hash[..16.min(item.source_hash.len())]
-            ))
-            .map_err(AcmeError::from)?,
+            ))?,
             identifiers,
             active_version_id: Some(item.version_id.clone()),
         };

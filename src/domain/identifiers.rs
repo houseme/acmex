@@ -592,7 +592,7 @@ mod tests {
         assert!(Identifier::try_dns("example..com").is_err());
         assert!(Identifier::try_dns("-bad.example.com").is_err());
         assert!(Identifier::try_dns("bad-.example.com").is_err());
-        assert!(Identifier::try_dns(&"a".repeat(64)).is_err());
+        assert!(Identifier::try_dns("a".repeat(64)).is_err());
         assert!(Identifier::try_dns("under_score.example.com").is_err());
     }
 

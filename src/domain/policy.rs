@@ -71,10 +71,7 @@ impl ChallengeSet {
     {
         let mut set = BTreeSet::new();
         for item in items {
-            let parsed: ChallengeType = item
-                .as_ref()
-                .parse()
-                .map_err(|err| AcmeError::InvalidInput(err))?;
+            let parsed: ChallengeType = item.as_ref().parse().map_err(AcmeError::InvalidInput)?;
             set.insert(parsed);
         }
         Ok(Self(set))
@@ -82,7 +79,7 @@ impl ChallengeSet {
 }
 
 /// Which CA(s) an intent may be issued by.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct CaPolicy {
     /// Pin the intent to a single configured CA (by `ca_id`).
@@ -103,18 +100,6 @@ pub struct CaPolicy {
     pub allow_fallback: bool,
 }
 
-impl Default for CaPolicy {
-    fn default() -> Self {
-        Self {
-            ca_id: None,
-            allowed_cas: Vec::new(),
-            environment: None,
-            profile: None,
-            allow_fallback: false,
-        }
-    }
-}
-
 /// CA environment selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,7 +111,7 @@ pub enum CaEnvironment {
 }
 
 /// How domain/IP validation may be performed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct ValidationPolicy {
     /// Challenge types the caller is willing to perform. Empty means "any
@@ -142,17 +127,6 @@ pub struct ValidationPolicy {
     /// Propagation observation settings.
     #[serde(default)]
     pub propagation: PropagationPolicy,
-}
-
-impl Default for ValidationPolicy {
-    fn default() -> Self {
-        Self {
-            allowed_challenges: ChallengeSet::default(),
-            dns_provider: None,
-            edge_agent: None,
-            propagation: PropagationPolicy::default(),
-        }
-    }
 }
 
 /// DNS propagation observation policy.

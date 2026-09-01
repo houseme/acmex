@@ -703,7 +703,7 @@ impl<S: EntityStore + 'static> OperationRepository for GenericRepository<S> {
     ) -> Result<Vec<Versioned<OperationRecord>>> {
         let mut all = self.list_as::<OperationRecord>("operations").await?;
         all.retain(|v| v.value.is_ready_at(now));
-        all.sort_by(|a, b| a.value.created_at.cmp(&b.value.created_at));
+        all.sort_by_key(|a| a.value.created_at);
         all.truncate(limit);
         Ok(all)
     }
@@ -715,7 +715,7 @@ impl<S: EntityStore + 'static> OperationRepository for GenericRepository<S> {
     ) -> Result<Vec<Versioned<OperationRecord>>> {
         let mut all = self.list_as::<OperationRecord>("operations").await?;
         all.retain(|v| v.value.status == status);
-        all.sort_by(|a, b| a.value.created_at.cmp(&b.value.created_at));
+        all.sort_by_key(|a| a.value.created_at);
         all.truncate(limit);
         Ok(all)
     }

@@ -162,6 +162,12 @@ impl MemoryRepository {
     }
 }
 
+impl Default for MemoryRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl LeaseManager for MemoryRepository {
     async fn acquire(&self, key: &str, owner: &str, ttl: Duration) -> Result<LeaseOutcome> {

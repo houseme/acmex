@@ -77,12 +77,13 @@ impl CertificateIntent {
                 "external-CSR keys are never exportable".to_string(),
             ));
         }
-        if let (Some(ca), allowed) = (&self.ca_policy.ca_id, &self.ca_policy.allowed_cas) {
-            if !allowed.is_empty() && !allowed.contains(ca) {
-                return Err(AcmeError::InvalidInput(format!(
-                    "pinned CA `{ca}` is not in the allowed CA set"
-                )));
-            }
+        if let (Some(ca), allowed) = (&self.ca_policy.ca_id, &self.ca_policy.allowed_cas)
+            && !allowed.is_empty()
+            && !allowed.contains(ca)
+        {
+            return Err(AcmeError::InvalidInput(format!(
+                "pinned CA `{ca}` is not in the allowed CA set"
+            )));
         }
         let mut seen = std::collections::BTreeSet::new();
         for target in &self.delivery_targets {
@@ -94,13 +95,13 @@ impl CertificateIntent {
             }
         }
         for target in &self.delivery_targets {
-            if let DeliveryRequirement::Quorum(n) = target.requirement {
-                if n == 0 || n > self.delivery_targets.len() {
-                    return Err(AcmeError::InvalidInput(format!(
-                        "delivery quorum {n} is out of range for {} targets",
-                        self.delivery_targets.len()
-                    )));
-                }
+            if let DeliveryRequirement::Quorum(n) = target.requirement
+                && (n == 0 || n > self.delivery_targets.len())
+            {
+                return Err(AcmeError::InvalidInput(format!(
+                    "delivery quorum {n} is out of range for {} targets",
+                    self.delivery_targets.len()
+                )));
             }
         }
         Ok(())

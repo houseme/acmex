@@ -133,19 +133,6 @@ impl FakeZoneResolver {
         self
     }
 
-    fn ns_addresses(&self, apex: &str) -> Vec<IpAddr> {
-        self.ns
-            .get(apex)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(|n| self.ns_addrs.get(n).cloned())
-                    .flatten()
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// Walks up labels querying the scripted SOA map.
     pub fn walk_soa(&self, name: &str) -> Option<String> {
         let normalized = normalize_name(name);
@@ -301,7 +288,7 @@ impl ZoneResolver for HickoryZoneResolver {
         // NS delegation on the challenge name.
         let ns_records = self.query(&final_name, RecordType::NS).await?;
         let delegated = matches!(ns_records, Some(records) if !records.is_empty()
-            && final_name != normalize_name(&final_name.split_once('.').map(|x| x.1).unwrap_or(&final_name)));
+            && final_name != normalize_name(final_name.split_once('.').map(|x| x.1).unwrap_or(&final_name)));
 
         // SOA walk-up.
         let mut current = final_name.clone();

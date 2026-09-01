@@ -403,8 +403,8 @@ impl StepExecutor for PrepareChallengesStep {
             // exists are not re-prepared. A `Preparing` session (transient
             // failure or crash mid-prepare) IS re-attempted — prepare is
             // idempotent per session id and resource value.
-            if let Ok(Some(stored)) = repositories.challenge_sessions.get(&id).await {
-                if matches!(
+            if let Ok(Some(stored)) = repositories.challenge_sessions.get(&id).await
+                && matches!(
                     stored.value.state,
                     ChallengeSessionState::Prepared
                         | ChallengeSessionState::Observing
@@ -412,9 +412,9 @@ impl StepExecutor for PrepareChallengesStep {
                         | ChallengeSessionState::Acknowledged
                         | ChallengeSessionState::Processing
                         | ChallengeSessionState::Valid
-                ) {
-                    continue;
-                }
+                )
+            {
+                continue;
             }
 
             // Choose the challenge for this identifier.
