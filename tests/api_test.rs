@@ -12,6 +12,7 @@ use acmex::config::Config;
 use acmex::notifications::WebhookManager;
 use acmex::orchestrator::OrchestrationStatus;
 use acmex::server::api::{AppState, TaskInfo};
+use acmex::server::auth::ApiKeySet;
 
 fn test_webhook() -> Arc<acmex::server::WebhookHandler> {
     Arc::new(acmex::server::WebhookHandler::new(Arc::new(
@@ -27,7 +28,7 @@ fn legacy_state(tasks: Arc<RwLock<HashMap<String, TaskInfo>>>) -> AppState {
         health: Arc::new(acmex::server::HealthCheck::new()),
         webhook: test_webhook(),
         tasks,
-        api_keys: Arc::new(vec!["test-key".to_string()]),
+        api_keys: Arc::new(ApiKeySet::from_plaintext_keys(["test-key"])),
         scheduler: None,
         repositories: None,
         application: None,
@@ -46,7 +47,7 @@ fn application_state() -> AppState {
         health: Arc::new(acmex::server::HealthCheck::new()),
         webhook: test_webhook(),
         tasks: Arc::new(RwLock::new(HashMap::new())),
-        api_keys: Arc::new(vec!["test-key".to_string()]),
+        api_keys: Arc::new(ApiKeySet::from_plaintext_keys(["test-key"])),
         scheduler: None,
         repositories: Some(repositories),
         application: Some(application),
