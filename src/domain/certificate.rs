@@ -57,6 +57,18 @@ pub enum VersionState {
     Revoked,
 }
 
+impl VersionState {
+    /// Stable wire name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Issued => "issued",
+            Self::Active => "active",
+            Self::Superseded => "superseded",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
 /// One immutable issued certificate.
 ///
 /// Versions are never mutated after persistence except for the explicitly
@@ -257,6 +269,14 @@ mod tests {
         let superseded = active.transition(VersionState::Superseded).unwrap();
         assert!(superseded.transition(VersionState::Active).is_err());
         assert!(superseded.transition(VersionState::Issued).is_err());
+    }
+
+    #[test]
+    fn version_state_wire_names_are_stable() {
+        assert_eq!(VersionState::Issued.as_str(), "issued");
+        assert_eq!(VersionState::Active.as_str(), "active");
+        assert_eq!(VersionState::Superseded.as_str(), "superseded");
+        assert_eq!(VersionState::Revoked.as_str(), "revoked");
     }
 
     #[test]

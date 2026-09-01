@@ -182,10 +182,7 @@ impl From<CertificateVersion> for VersionView {
             not_before: version.not_before,
             not_after: version.not_after,
             issued_by: version.issued_by,
-            state: serde_json::to_value(version.state)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| "unknown".to_string()),
+            state: version.state.as_str().to_string(),
             key_provider: version.key_ref.provider,
             key_id: version.key_ref.key_id.to_string(),
         }
