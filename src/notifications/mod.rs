@@ -3,9 +3,15 @@
 //! This module provides event-driven webhook notifications for certificate events.
 //! Supports multiple webhook endpoints, retry logic, and event filtering.
 
-use crate::error::Result;
+use crate::dns::spec::{EnvFileSecretResolver, SecretRef, SecretResolver};
+use crate::error::{AcmeError, Result};
+use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet};
+use async_trait::async_trait;
+use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -88,7 +94,8 @@ pub struct WebhookConfig {
     pub url: String,
     pub events: Vec<EventType>,
     pub format: WebhookFormat,
-    pub auth_token: Option<String>,
+    pub auth_token: Option<SecretRef>,
+    pub signing_secret: Option<SecretRef>,
     pub timeout_secs: u64,
     pub max_retries: u32,
 }
@@ -107,14 +114,21 @@ pub enum WebhookFormat {
 pub struct WebhookClient {
     config: WebhookConfig,
     client: reqwest::Client,
+    secrets: Arc<dyn SecretResolver>,
 }
 
 impl WebhookClient {
     /// Create a new webhook client
     pub fn new(config: WebhookConfig) -> Self {
+        Self::new_with_resolver(config, Arc::new(EnvFileSecretResolver))
+    }
+
+    /// Create a new webhook client with an explicit secret resolver.
+    pub fn new_with_resolver(config: WebhookConfig, secrets: Arc<dyn SecretResolver>) -> Self {
         Self {
             config,
             client: reqwest::Client::new(),
+            secrets,
         }
     }
 
@@ -234,7 +248,7 @@ impl WebhookClient {
         let timeout = Duration::from_secs(self.config.timeout_secs);
 
         for attempt in 1..=self.config.max_retries {
-            match self.send_once(&body, timeout).await {
+            match self.send_once(&body, timeout, None).await {
                 Ok(_) => {
                     info!("Webhook {} sent successfully", self.config.name);
                     return Ok(());
@@ -263,16 +277,41 @@ impl WebhookClient {
     }
 
     /// Send webhook once
-    async fn send_once(&self, body: &serde_json::Value, timeout: Duration) -> Result<()> {
+    async fn send_once(
+        &self,
+        body: &serde_json::Value,
+        timeout: Duration,
+        outbox: Option<&OutboxEvent>,
+    ) -> Result<()> {
+        let body_bytes = serde_json::to_vec(body)?;
         let mut request = self
             .client
             .post(&self.config.url)
             .timeout(timeout)
-            .json(body);
+            .header("content-type", "application/json")
+            .body(body_bytes.clone());
 
         // Add authorization header if provided
-        if let Some(ref token) = self.config.auth_token {
-            request = request.header("Authorization", format!("Bearer {}", token));
+        if let Some(ref token_ref) = self.config.auth_token {
+            let token = self.secrets.resolve(token_ref).await?;
+            let token = token.expose_utf8().ok_or_else(|| {
+                AcmeError::configuration(format!(
+                    "webhook {} auth token is not valid UTF-8",
+                    self.config.name
+                ))
+            })?;
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+
+        if let (Some(secret_ref), Some(event)) = (&self.config.signing_secret, outbox) {
+            let timestamp = signing_timestamp();
+            let secret = self.secrets.resolve(secret_ref).await?;
+            let signature = webhook_signature(secret.expose(), &timestamp, &body_bytes)?;
+            request = request
+                .header("X-AcmeX-Event-Id", &event.event_id)
+                .header("X-AcmeX-Event-Type", &event.event_type)
+                .header("X-AcmeX-Signature-Timestamp", timestamp)
+                .header("X-AcmeX-Signature", signature);
         }
 
         let response = request
@@ -289,6 +328,22 @@ impl WebhookClient {
 
         Ok(())
     }
+
+    async fn send_outbox(&self, event: &OutboxEvent) -> Result<()> {
+        let body = serde_json::json!({
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "sequence": event.sequence,
+            "created_at": event.created_at.to_string(),
+            "payload": event.payload,
+        });
+        self.send_once(
+            &body,
+            Duration::from_secs(self.config.timeout_secs),
+            Some(event),
+        )
+        .await
+    }
 }
 
 /// Webhook manager for multiple webhooks
@@ -302,6 +357,10 @@ impl WebhookManager {
         let webhooks = configs.into_iter().map(WebhookClient::new).collect();
 
         Self { webhooks }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.webhooks.is_empty()
     }
 
     /// Send event to all matching webhooks
@@ -320,6 +379,184 @@ impl WebhookManager {
 
         Ok(())
     }
+}
+
+#[async_trait]
+impl OutboxDelivery for WebhookManager {
+    async fn deliver(&self, event: &OutboxEvent) -> Result<()> {
+        for webhook in &self.webhooks {
+            webhook.send_outbox(event).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Delivery boundary used by the durable outbox consumer.
+#[async_trait]
+pub trait OutboxDelivery: Send + Sync {
+    async fn deliver(&self, event: &OutboxEvent) -> Result<()>;
+}
+
+/// Durable outbox consumer settings.
+#[derive(Debug, Clone)]
+pub struct OutboxConsumerConfig {
+    pub owner: String,
+    pub lease_ttl: Duration,
+    pub batch_size: usize,
+    pub max_attempts: u32,
+    pub retry_backoff_base: Duration,
+    pub retry_backoff_max: Duration,
+}
+
+impl Default for OutboxConsumerConfig {
+    fn default() -> Self {
+        Self {
+            owner: format!("outbox-{}", std::process::id()),
+            lease_ttl: Duration::from_secs(30),
+            batch_size: 32,
+            max_attempts: 6,
+            retry_backoff_base: Duration::from_secs(1),
+            retry_backoff_max: Duration::from_secs(300),
+        }
+    }
+}
+
+/// Summary of one consumer pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboxConsumerReport {
+    pub delivered: usize,
+    pub failed: usize,
+    pub dead_lettered: usize,
+    pub leased_elsewhere: usize,
+}
+
+/// At-least-once durable outbox consumer guarded by repository leases.
+pub struct OutboxConsumer<D> {
+    repositories: RepositorySet,
+    delivery: Arc<D>,
+    config: OutboxConsumerConfig,
+}
+
+impl<D> OutboxConsumer<D>
+where
+    D: OutboxDelivery + 'static,
+{
+    pub fn new(
+        repositories: RepositorySet,
+        delivery: Arc<D>,
+        config: OutboxConsumerConfig,
+    ) -> Self {
+        Self {
+            repositories,
+            delivery,
+            config,
+        }
+    }
+
+    pub async fn run_once(&self) -> Result<OutboxConsumerReport> {
+        let pending = self
+            .repositories
+            .outbox
+            .list_pending(self.config.batch_size)
+            .await?;
+        let mut report = OutboxConsumerReport::default();
+        for event in pending {
+            let lease_key = format!("outbox/{}", event.sequence);
+            let grant = match self
+                .repositories
+                .leases
+                .acquire(&lease_key, &self.config.owner, self.config.lease_ttl)
+                .await?
+            {
+                LeaseOutcome::Granted(grant) => grant,
+                LeaseOutcome::HeldByOther { .. } => {
+                    report.leased_elsewhere += 1;
+                    continue;
+                }
+            };
+
+            let result = self.delivery.deliver(&event).await;
+            match result {
+                Ok(()) => {
+                    self.repositories
+                        .outbox
+                        .mark_processed(event.sequence)
+                        .await?;
+                    report.delivered += 1;
+                }
+                Err(err) => {
+                    let next_attempt = event.attempts + 1;
+                    let error = stable_delivery_error(&err);
+                    if next_attempt >= self.config.max_attempts {
+                        self.repositories
+                            .outbox
+                            .mark_failed(event.sequence, &error, None)
+                            .await?;
+                        self.repositories
+                            .outbox
+                            .dead_letter(event.sequence, &error)
+                            .await?;
+                        report.dead_lettered += 1;
+                    } else {
+                        let retry_at = self
+                            .repositories
+                            .clock
+                            .now()
+                            .checked_add(
+                                jiff::Span::new()
+                                    .milliseconds(self.backoff(next_attempt).as_millis() as i64),
+                            )
+                            .expect("outbox retry backoff overflow");
+                        self.repositories
+                            .outbox
+                            .mark_failed(event.sequence, &error, Some(retry_at))
+                            .await?;
+                        report.failed += 1;
+                    }
+                }
+            }
+
+            self.repositories
+                .leases
+                .release(&lease_key, &grant.owner, grant.fencing_token)
+                .await?;
+        }
+        Ok(report)
+    }
+
+    fn backoff(&self, attempt: u32) -> Duration {
+        let shift = attempt.saturating_sub(1).min(16);
+        self.config
+            .retry_backoff_base
+            .saturating_mul(2_u32.saturating_pow(shift))
+            .min(self.config.retry_backoff_max)
+    }
+}
+
+fn stable_delivery_error(err: &AcmeError) -> String {
+    match err {
+        AcmeError::RateLimited(_) => "RATE_LIMITED".to_string(),
+        AcmeError::Timeout(_) => "TIMEOUT".to_string(),
+        AcmeError::Transport(_) => "WEBHOOK_TRANSPORT".to_string(),
+        AcmeError::Configuration(_) => "WEBHOOK_CONFIGURATION".to_string(),
+        _ => "WEBHOOK_DELIVERY_FAILED".to_string(),
+    }
+}
+
+fn signing_timestamp() -> String {
+    Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+fn webhook_signature(secret: &[u8], timestamp: &str, body: &[u8]) -> Result<String> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret)
+        .map_err(|err| AcmeError::crypto(format!("invalid webhook signing key: {err}")))?;
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    Ok(format!(
+        "sha256={}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
 }
 
 #[cfg(test)]
@@ -362,6 +599,7 @@ mod tests {
             events: vec![EventType::RenewalSuccess],
             format: WebhookFormat::Json,
             auth_token: None,
+            signing_secret: None,
             timeout_secs: 30,
             max_retries: 3,
         };
@@ -379,6 +617,7 @@ mod tests {
             events: vec![EventType::RenewalSuccess],
             format: WebhookFormat::Slack,
             auth_token: None,
+            signing_secret: None,
             timeout_secs: 30,
             max_retries: 3,
         };
@@ -393,5 +632,12 @@ mod tests {
 
         let formatted = client.format_event(&event);
         assert!(formatted["attachments"].is_array());
+    }
+
+    #[test]
+    fn webhook_signatures_are_stable_and_prefixed() {
+        let sig = webhook_signature(b"secret", "2026-01-01T00:00:00Z", br#"{"ok":true}"#).unwrap();
+        assert!(sig.starts_with("sha256="));
+        assert_eq!(sig.len(), "sha256=".len() + 64);
     }
 }

@@ -19,7 +19,7 @@ use super::spec::{DnsProviderSpec, SecretResolver};
 #[async_trait]
 pub trait DnsProviderFactory: Send + Sync {
     /// Builds a provider instance. Credential resolution happens here.
-    fn create(
+    async fn create(
         &self,
         spec: &DnsProviderSpec,
         secrets: &dyn SecretResolver,
@@ -33,7 +33,7 @@ pub struct DefaultDnsProviderFactory;
 
 #[async_trait]
 impl DnsProviderFactory for DefaultDnsProviderFactory {
-    fn create(
+    async fn create(
         &self,
         spec: &DnsProviderSpec,
         _secrets: &dyn SecretResolver,
@@ -50,7 +50,7 @@ impl DnsProviderFactory for DefaultDnsProviderFactory {
                         spec.id
                     ))
                 })?;
-                let token = _secrets.resolve(credential)?;
+                let token = _secrets.resolve(credential).await?;
                 let token = token.expose_utf8().ok_or_else(|| {
                     AcmeError::Configuration("credential is not valid UTF-8".to_string())
                 })?;

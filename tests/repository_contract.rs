@@ -476,7 +476,15 @@ async fn outbox_contract(set: &RepositorySet) {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].sequence, seq2);
 
-    set.outbox.mark_failed(seq2, "webhook 500").await.unwrap();
+    let retry_at = set
+        .clock
+        .now()
+        .checked_sub(jiff::Span::new().seconds(1))
+        .unwrap();
+    set.outbox
+        .mark_failed(seq2, "webhook 500", Some(retry_at))
+        .await
+        .unwrap();
     let pending = set.outbox.list_pending(10).await.unwrap();
     assert_eq!(pending[0].attempts, 1);
     assert_eq!(pending[0].last_error.as_deref(), Some("webhook 500"));
@@ -486,11 +494,37 @@ async fn outbox_contract(set: &RepositorySet) {
         .await
         .unwrap();
     assert!(set.outbox.list_pending(10).await.unwrap().is_empty());
+    set.outbox.requeue(seq2).await.unwrap();
+    assert_eq!(set.outbox.list_pending(10).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn outbox_memory() {
     outbox_contract(&memory_set().await).await;
+}
+
+#[tokio::test]
+async fn outbox_retry_delay_hides_event_until_next_attempt() {
+    let clock = Arc::new(FakeClock::at(
+        Timestamp::from_str("2026-01-01T00:00:00Z").unwrap(),
+    ));
+    let set = MemoryRepository::with_clock(clock.clone()).into_set();
+    let seq = set
+        .outbox
+        .append("operation.finished", serde_json::json!({"id": 1}), None)
+        .await
+        .unwrap();
+    let retry_at = clock
+        .now()
+        .checked_add(jiff::Span::new().seconds(30))
+        .unwrap();
+    set.outbox
+        .mark_failed(seq, "webhook 500", Some(retry_at))
+        .await
+        .unwrap();
+    assert!(set.outbox.list_pending(10).await.unwrap().is_empty());
+    clock.advance_secs(31);
+    assert_eq!(set.outbox.list_pending(10).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

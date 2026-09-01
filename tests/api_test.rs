@@ -7,12 +7,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+use acmex::application::Permission;
 use acmex::application::{ApplicationServiceBuilder, CertificateApplication, CertificateQuery};
 use acmex::config::Config;
+use acmex::domain::TenantId;
 use acmex::notifications::WebhookManager;
 use acmex::orchestrator::OrchestrationStatus;
 use acmex::server::api::{AppState, TaskInfo};
-use acmex::server::auth::ApiKeySet;
+use acmex::server::auth::{ApiKeyCredential, ApiKeySet, PermissionAuthorizer, api_key_auth};
 
 fn test_webhook() -> Arc<acmex::server::WebhookHandler> {
     Arc::new(acmex::server::WebhookHandler::new(Arc::new(
@@ -29,6 +31,7 @@ fn legacy_state(tasks: Arc<RwLock<HashMap<String, TaskInfo>>>) -> AppState {
         webhook: test_webhook(),
         tasks,
         api_keys: Arc::new(ApiKeySet::from_plaintext_keys(["test-key"])),
+        authorizer: Arc::new(PermissionAuthorizer),
         scheduler: None,
         repositories: None,
         application: None,
@@ -40,19 +43,40 @@ fn application_state() -> AppState {
     let (service, repositories) = ApplicationServiceBuilder::new().build().unwrap();
     let query: Arc<dyn CertificateQuery> = service.clone();
     let application: Arc<dyn CertificateApplication> = service;
+    let config = r#"
+[acme]
+ca = "letsencrypt"
+ca_environment = "staging"
+"#
+    .parse::<Config>()
+    .unwrap();
     AppState {
-        config: Arc::new(Config::default()),
+        config: Arc::new(config),
         client: None,
         storage: None,
         health: Arc::new(acmex::server::HealthCheck::new()),
         webhook: test_webhook(),
         tasks: Arc::new(RwLock::new(HashMap::new())),
         api_keys: Arc::new(ApiKeySet::from_plaintext_keys(["test-key"])),
+        authorizer: Arc::new(PermissionAuthorizer),
         scheduler: None,
         repositories: Some(repositories),
         application: Some(application),
         query: Some(query),
     }
+}
+
+fn read_only_application_state() -> AppState {
+    let mut state = application_state();
+    let credential = ApiKeyCredential::from_plaintext(
+        "reader",
+        TenantId::default_tenant(),
+        "read-key",
+        vec![Permission::IntentRead],
+    )
+    .unwrap();
+    state.api_keys = Arc::new(ApiKeySet::from_credentials(vec![credential]));
+    state
 }
 
 #[tokio::test]
@@ -275,4 +299,110 @@ async fn api_v1_replays_same_idempotency_payload_and_rejects_conflict() {
         .await
         .unwrap();
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn api_key_auth_enforces_route_permissions() {
+    let app = axum::Router::new()
+        .nest(
+            "/api/v1",
+            acmex::server::api_v1::routes().layer(axum::middleware::from_fn_with_state(
+                read_only_application_state(),
+                api_key_auth,
+            )),
+        )
+        .with_state(read_only_application_state());
+
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/operations")
+                .header("X-API-Key", "read-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    let forbidden = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/certificate-versions/ver_test/revoke")
+                .header("X-API-Key", "read-key")
+                .header("Idempotency-Key", "revoke-key")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn readiness_reports_missing_management_credentials() {
+    let mut state = application_state();
+    state.api_keys = Arc::new(ApiKeySet::default());
+    let app = axum::Router::new()
+        .route(
+            "/ready",
+            axum::routing::get(acmex::server::health::ready_handler),
+        )
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let ready: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ready["status"], "not_ready");
+    assert_eq!(ready["checks"]["management_credentials"], "missing");
+}
+
+#[tokio::test]
+async fn diagnostics_are_available_behind_api_key_auth() {
+    let state = application_state();
+    let app = axum::Router::new()
+        .route(
+            "/api/diagnostics",
+            axum::routing::get(acmex::server::health::diagnostics_handler),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            api_key_auth,
+        ))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/diagnostics")
+                .header("X-API-Key", "test-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let diagnostics: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(diagnostics["configured_metrics"].is_array());
+    assert_eq!(diagnostics["pending_outbox"], 0);
 }

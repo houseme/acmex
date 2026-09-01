@@ -1,10 +1,12 @@
 /// Health check implementation
-use axum::{Json, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::error::AcmeError;
 use crate::metrics::HealthStatus;
+use crate::server::api::AppState;
 
 /// Health check response
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +20,21 @@ pub struct HealthResponse {
     /// Component status
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadinessResponse {
+    pub status: String,
+    pub checks: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticsResponse {
+    pub repository_backend: String,
+    pub scheduler_configured: bool,
+    pub pending_outbox: usize,
+    pub cleanup_pending: usize,
+    pub configured_metrics: &'static [&'static str],
 }
 
 /// Health check handler
@@ -101,4 +118,86 @@ pub async fn health_handler(
     };
 
     (code, Json(status))
+}
+
+/// Readiness check for load balancers. It intentionally returns coarse
+/// dependency names and avoids secret values or provider-specific reasons.
+pub async fn ready_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut checks = std::collections::HashMap::new();
+    let mut ready = true;
+
+    match state.config.validate() {
+        Ok(()) => {
+            checks.insert("configuration".to_string(), "ready".to_string());
+        }
+        Err(_) => {
+            checks.insert("configuration".to_string(), "not_ready".to_string());
+            ready = false;
+        }
+    }
+
+    if state.repositories.is_some() {
+        checks.insert("repository".to_string(), "ready".to_string());
+    } else {
+        checks.insert("repository".to_string(), "not_ready".to_string());
+        ready = false;
+    }
+
+    if state.scheduler.is_some() {
+        checks.insert("worker".to_string(), "ready".to_string());
+    } else {
+        checks.insert("worker".to_string(), "not_configured".to_string());
+    }
+
+    if state.api_keys.is_empty() {
+        checks.insert("management_credentials".to_string(), "missing".to_string());
+        ready = false;
+    } else {
+        checks.insert("management_credentials".to_string(), "ready".to_string());
+    }
+
+    let body = ReadinessResponse {
+        status: if ready { "ready" } else { "not_ready" }.to_string(),
+        checks,
+    };
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(body))
+}
+
+/// Authenticated operational diagnostics. This is intentionally separate
+/// from readiness so external dependency flaps do not eject all API pods.
+pub async fn diagnostics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let result = async {
+        let repositories = state
+            .repositories
+            .as_ref()
+            .ok_or_else(|| AcmeError::configuration("repository is not configured"))?;
+        let pending_outbox = repositories.outbox.list_pending(1000).await?.len();
+        let cleanup_pending = repositories
+            .challenge_leases
+            .list_needing_cleanup()
+            .await?
+            .len();
+        Ok::<_, AcmeError>(DiagnosticsResponse {
+            repository_backend: state.config.repository.backend.clone(),
+            scheduler_configured: state.scheduler.is_some(),
+            pending_outbox,
+            cleanup_pending,
+            configured_metrics: crate::metrics::MetricsRegistry::registered_metric_names(),
+        })
+    }
+    .await;
+
+    match result {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "unavailable"})),
+        )
+            .into_response(),
+    }
 }

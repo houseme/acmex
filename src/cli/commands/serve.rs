@@ -78,6 +78,7 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         events: vec![],
         format: WebhookFormat::Json,
         auth_token: None,
+        signing_secret: None,
         timeout_secs: 10,
         max_retries: 3,
     };

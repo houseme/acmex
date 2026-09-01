@@ -62,7 +62,7 @@ pub use account::{Account, AccountManager, KeyPair, KeyRollover};
 pub use application::{
     ActorContext, ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
     CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate, OperationView,
-    RenewCertificate, RepositoryCertificateApplication, RevokeCertificate, VersionView,
+    Permission, RenewCertificate, RepositoryCertificateApplication, RevokeCertificate, VersionView,
 };
 pub use ca::{CAConfig, CertificateAuthority, Environment};
 pub use certificate::{CertificateChain, CertificateSubjectAltNames};
@@ -118,7 +118,10 @@ pub use key::{
     KeyProvider, PublicKeyInfo, SecretBytes, SoftwareKeyProvider,
 };
 pub use metrics::{HealthStatus, MetricsRegistry};
-pub use notifications::{EventType, WebhookClient, WebhookConfig, WebhookEvent, WebhookManager};
+pub use notifications::{
+    EventType, OutboxConsumer, OutboxConsumerConfig, OutboxConsumerReport, OutboxDelivery,
+    WebhookClient, WebhookConfig, WebhookEvent, WebhookManager,
+};
 pub use orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator};
 pub use order::{
     Authorization, CertificateRevocation, Challenge, CsrGenerator, FinalizationRequest,
@@ -153,7 +156,7 @@ pub mod prelude {
         account::{Account, AccountManager, KeyPair, KeyRollover},
         application::{
             ActorContext, ApplicationServiceBuilder, CertificateApplication,
-            CreateCertificateIntent, IssueCertificate, RenewCertificate,
+            CreateCertificateIntent, IssueCertificate, Permission, RenewCertificate,
         },
         certificate::{CertificateChain, CertificateSubjectAltNames},
         crypto::{Base64Encoding, Sha256Hash},

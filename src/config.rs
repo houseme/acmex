@@ -1,4 +1,5 @@
 use crate::ca::{CAConfig, CertificateAuthority, Environment};
+use crate::dns::spec::SecretRef;
 /// Configuration management for AcmeX.
 /// This module provides comprehensive configuration support, including TOML parsing,
 /// environment variable overrides, and validation for multi-CA setups.
@@ -140,7 +141,7 @@ impl AcmeSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalAccountBinding {
     pub key_id: String,
-    pub hmac_key: String,
+    pub hmac_key: SecretRef,
 }
 
 /// Repository settings for the v0.9 domain persistence layer.
@@ -256,7 +257,7 @@ pub struct EncryptedStorageConfig {
     /// The underlying backend to encrypt.
     pub inner_backend: String,
     /// Encryption key (supports ${VAR} syntax).
-    pub encryption_key: String,
+    pub encryption_key: SecretRef,
     /// Key format: "hex" or "base64".
     #[serde(default = "default_key_format")]
     pub key_format: String,
@@ -298,7 +299,7 @@ pub struct Dns01Config {
     /// Primary DNS provider name.
     pub provider: Option<String>,
     /// API token/key.
-    pub api_token: Option<String>,
+    pub api_token: Option<SecretRef>,
     /// Zone ID or domain.
     pub zone_id: Option<String>,
     /// Multiple provider configurations.
@@ -313,7 +314,7 @@ pub struct Dns01Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsProviderConfig {
     pub name: String,
-    pub api_token: Option<String>,
+    pub api_token: Option<SecretRef>,
     pub zone_id: Option<String>,
     #[serde(default)]
     pub extra: HashMap<String, String>,
@@ -388,7 +389,9 @@ pub struct WebhookConfig {
     pub events: Vec<String>,
     #[serde(default = "default_webhook_format")]
     pub format: String,
-    pub auth_token: Option<String>,
+    pub auth_token: Option<SecretRef>,
+    #[serde(default)]
+    pub signing_secret: Option<SecretRef>,
     #[serde(default = "default_webhook_timeout")]
     pub timeout_secs: u64,
 }
@@ -404,7 +407,7 @@ pub struct EmailConfig {
     #[serde(default)]
     pub events: Vec<String>,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<SecretRef>,
 }
 
 /// CLI settings.
@@ -802,5 +805,55 @@ ca_environment = "staging"
             config.acme_directory(),
             "https://acme-staging-v02.api.letsencrypt.org/directory"
         );
+    }
+
+    #[test]
+    fn secret_fields_deserialize_as_references() {
+        let toml = r#"
+[acme]
+ca = "letsencrypt"
+ca_environment = "staging"
+
+[acme.external_account_binding]
+key_id = "kid-1"
+hmac_key = "env:EAB_HMAC"
+
+[challenge.dns01]
+provider = "cloudflare"
+api_token = "file:/run/secrets/cf-token"
+
+[[notifications.webhooks]]
+url = "https://hooks.example.test/acmex"
+auth_token = "env:WEBHOOK_TOKEN"
+signing_secret = "vault:secret:acmex/webhooks:signing"
+
+[[notifications.email]]
+smtp_host = "smtp.example.test"
+from = "acmex@example.test"
+to = ["ops@example.test"]
+password = "env:SMTP_PASSWORD"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        assert!(matches!(
+            config.acme.external_account_binding.unwrap().hmac_key,
+            SecretRef::Env { .. }
+        ));
+        assert!(matches!(
+            config.challenge.dns01.unwrap().api_token.unwrap(),
+            SecretRef::File { .. }
+        ));
+        let notifications = config.notifications.unwrap();
+        assert!(matches!(
+            notifications.webhooks[0].auth_token,
+            Some(SecretRef::Env { .. })
+        ));
+        assert!(matches!(
+            notifications.webhooks[0].signing_secret,
+            Some(SecretRef::Vault { .. })
+        ));
+        assert!(matches!(
+            notifications.email[0].password,
+            Some(SecretRef::Env { .. })
+        ));
     }
 }

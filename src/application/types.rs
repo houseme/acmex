@@ -10,21 +10,100 @@ use crate::domain::{
 use crate::error::Result;
 use crate::repository::Versioned;
 
+/// Fine-grained permission required by management API and application commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    IntentRead,
+    IntentWrite,
+    Issue,
+    Renew,
+    Revoke,
+    Deploy,
+    KeyExport,
+    Admin,
+}
+
+impl Permission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IntentRead => "intent.read",
+            Self::IntentWrite => "intent.write",
+            Self::Issue => "issue",
+            Self::Renew => "renew",
+            Self::Revoke => "revoke",
+            Self::Deploy => "deploy",
+            Self::KeyExport => "key.export",
+            Self::Admin => "admin",
+        }
+    }
+
+    pub fn admin_set() -> Vec<Self> {
+        vec![Self::Admin]
+    }
+}
+
 /// Authenticated caller context after the transport layer has checked access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActorContext {
     /// Tenant whose resources are being accessed.
     pub tenant_id: TenantId,
-    /// Stable actor identifier for audit/outbox events.
+    /// Stable subject identifier for audit/outbox events.
+    pub subject: String,
+    /// Backward-compatible actor alias.
     pub actor: String,
+    /// Caller roles, intentionally low cardinality.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// Caller permissions after authorization expansion.
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+    /// Transport request id for audit/trace correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Source IP or agent summary, controlled by privacy policy at transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl Default for ActorContext {
     fn default() -> Self {
         Self {
             tenant_id: TenantId::default_tenant(),
+            subject: "system".to_string(),
             actor: "system".to_string(),
+            roles: vec!["system".to_string()],
+            permissions: Permission::admin_set(),
+            request_id: None,
+            source: None,
         }
+    }
+}
+
+impl ActorContext {
+    /// Creates a context from a verified transport principal.
+    pub fn new(
+        tenant_id: TenantId,
+        subject: impl Into<String>,
+        roles: Vec<String>,
+        permissions: Vec<Permission>,
+        request_id: Option<String>,
+        source: Option<String>,
+    ) -> Self {
+        let subject = subject.into();
+        Self {
+            tenant_id,
+            actor: subject.clone(),
+            subject,
+            roles,
+            permissions,
+            request_id,
+            source,
+        }
+    }
+
+    pub fn has_permission(&self, required: Permission) -> bool {
+        self.permissions.contains(&Permission::Admin) || self.permissions.contains(&required)
     }
 }
 
