@@ -151,6 +151,7 @@ impl MemoryRepository {
             versions: mk(),
             operations: mk(),
             challenge_leases: mk(),
+            challenge_sessions: mk(),
             deployments: mk(),
             accounts: arc.clone(),
             outbox: arc.clone(),

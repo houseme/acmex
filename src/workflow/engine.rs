@@ -487,9 +487,16 @@ impl WorkflowEngine {
                 Ok(true)
             }
             StepResult::Fail(error) => {
-                *record = record.clone();
-                self.finish(record, revision, OperationStatus::Failed, Some(error))
-                    .await
+                // Failures still owe compensation for created resources
+                // (prepare registered it); only after cleanup does the
+                // operation reach its terminal state.
+                self.finish_with_compensation(
+                    record,
+                    revision,
+                    OperationStatus::Failed,
+                    Some(error),
+                )
+                .await
             }
         }
     }
@@ -507,6 +514,37 @@ impl WorkflowEngine {
             return Ok(false);
         }
 
+        if !self.run_compensations(record, revision).await? {
+            return Ok(true); // another cleanup pass is scheduled
+        }
+        let compensation_failed = record
+            .steps
+            .iter()
+            .any(|s| s.compensation == CompensationState::Failed);
+        let terminal = if compensation_failed {
+            OperationStatus::CompensationFailed
+        } else {
+            OperationStatus::Cancelled
+        };
+        let error = if compensation_failed {
+            Some(ClassifiedError {
+                code: error_codes::CHALLENGE_CLEANUP_FAILED,
+                class: ErrorClass::OperatorActionRequired,
+                detail: Some("cleanup of external resources failed".to_string()),
+            })
+        } else {
+            None
+        };
+        self.finish(record, revision, terminal, error).await
+    }
+
+    /// One compensation pass over pending steps (reverse order).
+    /// Returns `false` when another pass was scheduled via `wake_at`.
+    async fn run_compensations(
+        &self,
+        record: &mut OperationRecord,
+        revision: &mut Revision,
+    ) -> Result<bool> {
         let mut compensation_failed = false;
         for index in (0..record.steps.len()).rev() {
             if record.steps[index].compensation != CompensationState::Pending {
@@ -570,28 +608,70 @@ impl WorkflowEngine {
         {
             // More compensation passes needed later.
             record.updated_at = self.repositories.clock.now();
-            return Ok(self.save(record, revision).await?);
+            self.save(record, revision).await?;
+            return Ok(false);
         }
-        compensation_failed |= record
+        let _ = compensation_failed;
+        Ok(true)
+    }
+
+    /// Runs pending compensations (if any) and then terminates the
+    /// operation with `status`. Used for failures; cancellation goes through
+    /// `handle_cancellation`.
+    async fn finish_with_compensation(
+        &self,
+        record: &mut OperationRecord,
+        revision: &mut Revision,
+        status: OperationStatus,
+        error: Option<ClassifiedError>,
+    ) -> Result<bool> {
+        let has_pending = record
             .steps
             .iter()
-            .any(|s| s.compensation == CompensationState::Failed);
+            .any(|s| s.compensation == CompensationState::Pending);
+        if !has_pending {
+            return self.finish(record, revision, status, error).await;
+        }
 
-        let terminal = if compensation_failed {
-            OperationStatus::CompensationFailed
-        } else {
-            OperationStatus::Cancelled
-        };
-        let error = if compensation_failed {
-            Some(ClassifiedError {
+        // Enter Compensating first (legal from any non-terminal state).
+        if record.status != OperationStatus::Compensating {
+            *record = record
+                .transition(OperationStatus::Compensating)
+                .map_err(AcmeError::Storage)?;
+            if !self.save(record, revision).await? {
+                return Ok(false);
+            }
+        }
+        loop {
+            if !self.run_compensations(record, revision).await? {
+                return Ok(true); // cleanup pass rescheduled via wake_at
+            }
+            if record
+                .steps
+                .iter()
+                .any(|s| s.compensation == CompensationState::Pending)
+            {
+                continue;
+            }
+            break;
+        }
+        if record
+            .steps
+            .iter()
+            .any(|s| s.compensation == CompensationState::Failed)
+        {
+            record.error = Some(ClassifiedError {
                 code: error_codes::CHALLENGE_CLEANUP_FAILED,
                 class: ErrorClass::OperatorActionRequired,
                 detail: Some("cleanup of external resources failed".to_string()),
-            })
-        } else {
-            None
-        };
-        self.finish(record, revision, terminal, error).await
+            });
+            return self
+                .finish(record, revision, OperationStatus::CompensationFailed, None)
+                .await;
+        }
+        // Compensating -> Failed/Cancelled is a legal terminal transition
+        // once compensation has drained.
+        self.finish(record, revision, status, error).await
     }
 
     /// Moves the operation to a terminal state, emitting an outbox event.

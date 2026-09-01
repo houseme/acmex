@@ -5,14 +5,29 @@ use crate::types::{ChallengeType, Identifier};
 use async_trait::async_trait;
 
 // Re-export challenge types
+pub mod cleanup;
 pub mod dns01;
 pub mod dns_cache;
 pub mod http01;
+pub mod presenter;
+pub mod session;
+pub mod steps;
 pub mod tls_alpn01;
 
+pub use cleanup::{ChallengeCleanupScanner, ScanOutcome};
 pub use dns_cache::{CachingDnsResolver, DnsCache};
 pub use dns01::{Dns01Solver, DnsProvider, MockDnsProvider};
 pub use http01::Http01Solver;
+pub use presenter::{
+    ChallengePresenter, CleanupOutcome, LegacySolverPresenter, MemoryPresenter,
+    MemoryPresenterBehavior, Observation, PrepareChallenge, PresenterRegistry,
+};
+pub use session::{ChallengeSession, ChallengeSessionState};
+pub use steps::{
+    AcknowledgeChallengesStep, ChallengeStepDeps, CleanupChallengesStep, CreateOrderStep,
+    EnsureAccountStep, LoadAuthorizationsStep, PrepareChallengesStep, WaitAuthorizationsStep,
+    WaitPropagationStep, cleanup_operation_leases,
+};
 pub use tls_alpn01::TlsAlpn01Solver;
 
 /// Trait for implementing different challenge types
