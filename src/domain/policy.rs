@@ -53,6 +53,16 @@ impl ChallengeSet {
         Self(self.0.intersection(&other.0).copied().collect())
     }
 
+    /// Union with another set.
+    pub fn union(&self, other: &Self) -> Self {
+        Self(self.0.union(&other.0).copied().collect())
+    }
+
+    /// Inserts a member.
+    pub fn insert(&mut self, item: ChallengeType) {
+        self.0.insert(item);
+    }
+
     /// Parses from wire strings (`http-01`, `dns-01`, `tls-alpn-01`).
     pub fn parse<I, S>(items: I) -> Result<Self>
     where

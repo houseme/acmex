@@ -24,7 +24,7 @@ reqwest = { version = "0.13.4", features = ["json", "gzip", "query", "form", "bl
 urlencoding = "2.1.3"
 
 # Cryptography & Security
-rcgen = { version = "0.14.9", features = ["crypto", "aws_lc_rs", "pem"], default-features = false }
+rcgen = { version = "0.14.10", features = ["crypto", "aws_lc_rs", "pem"], default-features = false }
 x509-parser = "0.18"
 pem = "4.0.0"
 base64 = "0.23.1"
@@ -69,8 +69,8 @@ aws-lc-rs = { version = "1.18.0", optional = true, features = ["fips"] }
 ring = { version = "0.17.14", optional = true }
 
 # AWS Route53 Support
-aws-config = { version = "1.10.1", optional = true }
-aws-sdk-route53 = { version = "1.119.0", optional = true }
+aws-config = { version = "1.11.0", optional = true }
+aws-sdk-route53 = { version = "1.121.0", optional = true }
 
 # Storage Backends
 redis = { version = "1.6.0", features = ["tokio-comp", "connection-manager", "aio"], optional = true }

@@ -316,6 +316,26 @@ pub trait ChallengeLeaseRepository: Send + Sync {
     async fn list_needing_cleanup(&self) -> Result<Vec<Versioned<ChallengeLease>>>;
 }
 
+/// Challenge session persistence.
+#[async_trait]
+pub trait ChallengeSessionRepository: Send + Sync {
+    /// Creates a session.
+    async fn create(&self, session: crate::challenge::ChallengeSession) -> Result<CreateOutcome>;
+    /// Loads a session by id.
+    async fn get(&self, id: &str) -> Result<Option<Versioned<crate::challenge::ChallengeSession>>>;
+    /// Compare-and-set update.
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        session: crate::challenge::ChallengeSession,
+    ) -> Result<CasOutcome>;
+    /// All sessions of one operation.
+    async fn list_by_operation(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<Vec<Versioned<crate::challenge::ChallengeSession>>>;
+}
+
 /// Deployment persistence.
 #[async_trait]
 pub trait DeploymentRepository: Send + Sync {
@@ -396,6 +416,8 @@ pub struct RepositorySet {
     pub operations: Arc<dyn OperationRepository>,
     /// Challenge leases.
     pub challenge_leases: Arc<dyn ChallengeLeaseRepository>,
+    /// Challenge sessions.
+    pub challenge_sessions: Arc<dyn ChallengeSessionRepository>,
     /// Deployments.
     pub deployments: Arc<dyn DeploymentRepository>,
     /// CA accounts.
@@ -742,6 +764,43 @@ impl<S: EntityStore + 'static> ChallengeLeaseRepository for GenericRepository<S>
     async fn list_needing_cleanup(&self) -> Result<Vec<Versioned<ChallengeLease>>> {
         let mut all = self.list_as::<ChallengeLease>("challenge-leases").await?;
         all.retain(|v| v.value.needs_cleanup());
+        Ok(all)
+    }
+}
+
+#[async_trait]
+impl<S: EntityStore + 'static> ChallengeSessionRepository for GenericRepository<S> {
+    async fn create(&self, session: crate::challenge::ChallengeSession) -> Result<CreateOutcome> {
+        self.create_as("challenge-sessions", &session.id, &session)
+            .await
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<Versioned<crate::challenge::ChallengeSession>>> {
+        self.get_as("challenge-sessions", id).await
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        session: crate::challenge::ChallengeSession,
+    ) -> Result<CasOutcome> {
+        self.cas_as(
+            "challenge-sessions",
+            &session.id,
+            expected_revision,
+            &session,
+        )
+        .await
+    }
+
+    async fn list_by_operation(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<Vec<Versioned<crate::challenge::ChallengeSession>>> {
+        let mut all = self
+            .list_as::<crate::challenge::ChallengeSession>("challenge-sessions")
+            .await?;
+        all.retain(|s| s.value.operation_id == *operation_id);
         Ok(all)
     }
 }
