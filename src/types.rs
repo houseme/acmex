@@ -74,33 +74,17 @@ pub struct AcmeSubproblem {
     pub identifier: Option<Identifier>,
 }
 
-/// An identifier used in ACME authorizations (e.g., a DNS domain name).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Identifier {
-    /// The type of identifier (e.g., "dns" or "ip").
-    #[serde(rename = "type")]
-    pub id_type: String,
-    /// The value of the identifier (e.g., "example.com").
-    pub value: String,
-}
-
-impl Identifier {
-    /// Creates a new DNS identifier for the given domain.
-    pub fn dns(domain: impl Into<String>) -> Self {
-        Self {
-            id_type: "dns".to_string(),
-            value: domain.into(),
-        }
-    }
-
-    /// Creates a new IP identifier for the given IP address.
-    pub fn ip(ip: impl Into<String>) -> Self {
-        Self {
-            id_type: "ip".to_string(),
-            value: ip.into(),
-        }
-    }
-}
+/// An identifier used in ACME authorizations.
+///
+/// Strongly typed since 0.9: DNS names (optionally wildcard) and IP
+/// addresses are separate variants and cannot be mixed up. Serialization
+/// remains the ACME wire form `{"type":"dns"|"ip","value":"..."}`.
+///
+/// The historical public fields `id_type`/`value` are gone; use
+/// [`Identifier::acme_type`] and [`Identifier::acme_value`] for the wire
+/// representation, and [`Identifier::try_dns`]/[`Identifier::try_ip`] to
+/// construct validated identifiers.
+pub use crate::domain::identifiers::Identifier;
 
 /// Reasons for revoking a certificate (RFC 5280).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -190,7 +174,7 @@ impl Contact {
 }
 
 /// Supported ACME challenge types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ChallengeType {
     /// Validation via a file served over HTTP.
     Http01,
@@ -208,6 +192,19 @@ impl ChallengeType {
             ChallengeType::Dns01 => "dns-01",
             ChallengeType::TlsAlpn01 => "tls-alpn-01",
         }
+    }
+}
+
+impl Serialize for ChallengeType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ChallengeType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -342,9 +339,10 @@ mod tests {
 
     #[test]
     fn test_identifier_dns() {
+        #[allow(deprecated)]
         let id = Identifier::dns("example.com");
-        assert_eq!(id.id_type, "dns");
-        assert_eq!(id.value, "example.com");
+        assert_eq!(id.acme_type(), "dns");
+        assert_eq!(id.acme_value(), "example.com");
     }
 
     #[test]

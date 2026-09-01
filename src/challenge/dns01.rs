@@ -215,7 +215,7 @@ mod tests {
             updated: None,
             error: None,
         };
-        let identifier = Identifier::dns("example.com");
+        let identifier = Identifier::try_dns("example.com").unwrap();
 
         let result = solver
             .prepare(&challenge, &identifier, "test-token.test-auth")

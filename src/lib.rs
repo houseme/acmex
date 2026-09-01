@@ -37,6 +37,7 @@ pub mod client;
 pub mod config;
 pub mod crypto;
 pub mod dns;
+pub mod domain;
 pub mod error;
 pub mod metrics;
 pub mod notifications;
@@ -82,6 +83,11 @@ pub use dns::LinodeDnsProvider;
 pub use dns::Route53DnsProvider;
 #[cfg(feature = "dns-tencent")]
 pub use dns::TencentCloudDnsProvider;
+pub use domain::{
+    CaPolicy, CertificateIntent, CertificateLineage, CertificateVersion, ChallengeSet,
+    DnsIdentifier, IdentifierSet, KeyPolicy, KeyRef, RenewalPolicy, ValidationPolicy,
+    compatible_challenges, validate_order_policy,
+};
 pub use error::{AcmeError, Result};
 pub use metrics::{HealthStatus, MetricsRegistry};
 pub use notifications::{EventType, WebhookClient, WebhookConfig, WebhookEvent, WebhookManager};
@@ -108,6 +114,10 @@ pub mod prelude {
         account::{Account, AccountManager, KeyPair, KeyRollover},
         certificate::CertificateChain,
         crypto::{Base64Encoding, Sha256Hash},
+        domain::{
+            CertificateIntent, CertificateLineage, CertificateVersion, DnsIdentifier, Identifier,
+            IdentifierSet, KeyRef, compatible_challenges, validate_order_policy,
+        },
         error::{AcmeError, Result},
         orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator},
         order::{
@@ -117,8 +127,6 @@ pub mod prelude {
         protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager},
         scheduler::{AdvancedRenewalScheduler, CleanupScheduler},
         transport::HttpClient,
-        types::{
-            AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,
-        },
+        types::{AuthorizationStatus, ChallengeType, Contact, OrderStatus, RevocationReason},
     };
 }

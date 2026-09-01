@@ -16,6 +16,7 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "hmac",
+ "idna",
  "jiff",
  "mockito",
  "opentelemetry",

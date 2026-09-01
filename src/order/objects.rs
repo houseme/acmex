@@ -1,6 +1,8 @@
 /// Order-related objects for the ACME protocol.
 /// This module defines the structures for orders, authorizations, and challenges
 /// as specified in RFC 8555.
+use crate::domain::DnsIdentifier;
+use crate::error::{AcmeError, Result};
 use crate::types::{AuthorizationStatus, Identifier, OrderStatus};
 use serde::{Deserialize, Serialize};
 
@@ -142,16 +144,49 @@ pub struct NewOrderRequest {
 }
 
 impl NewOrderRequest {
-    /// Creates a new order request for the specified list of domains.
+    /// Creates a new order request from domain-name strings.
+    ///
+    /// **DNS-only compatibility entry**: every input is treated as a DNS
+    /// identifier (leniently normalized). Strings that parse as IP addresses
+    /// are *not* silently promoted — use [`NewOrderRequest::parse_names`] or
+    /// [`NewOrderRequest::from_identifiers`] for typed IP support.
     pub fn new(domains: Vec<String>) -> Self {
         tracing::debug!("Creating NewOrderRequest for domains: {:?}", domains);
-        let identifiers = domains.into_iter().map(Identifier::dns).collect();
+        let identifiers = domains
+            .iter()
+            .map(|d| Identifier::Dns(DnsIdentifier::parse_lenient(d)))
+            .collect();
 
         Self {
             identifiers,
             not_before: None,
             not_after: None,
         }
+    }
+
+    /// Creates an order request from already-validated strong-typed
+    /// identifiers (DNS, wildcard DNS or IP per RFC 8738).
+    pub fn from_identifiers(identifiers: impl IntoIterator<Item = Identifier>) -> Self {
+        Self {
+            identifiers: identifiers.into_iter().collect(),
+            not_before: None,
+            not_after: None,
+        }
+    }
+
+    /// Creates an order request from free-form names, parsing each one as
+    /// DNS or IP and rejecting anything invalid.
+    ///
+    /// Unlike [`NewOrderRequest::new`], a syntactically valid IP string
+    /// becomes an `ip` identifier rather than a bogus DNS one, and invalid
+    /// names are surfaced as errors.
+    pub fn parse_names(names: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self> {
+        let identifiers = names
+            .into_iter()
+            .map(|n| Identifier::parse(n))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|err| AcmeError::InvalidInput(err.to_string()))?;
+        Ok(Self::from_identifiers(identifiers))
     }
 
     /// Sets the 'not before' timestamp for the order request.
@@ -257,7 +292,32 @@ mod tests {
         ]);
 
         assert_eq!(req.identifiers.len(), 2);
-        assert_eq!(req.identifiers[0].value, "example.com");
-        assert_eq!(req.identifiers[0].id_type, "dns");
+        assert_eq!(req.identifiers[0].acme_value(), "example.com");
+        assert_eq!(req.identifiers[0].acme_type(), "dns");
+    }
+
+    #[test]
+    fn test_new_order_request_from_identifiers() {
+        let req = NewOrderRequest::from_identifiers(vec![
+            crate::domain::Identifier::try_dns("*.example.com").unwrap(),
+            crate::domain::Identifier::try_ip("192.0.2.1").unwrap(),
+        ]);
+        assert_eq!(req.identifiers.len(), 2);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json["identifiers"],
+            serde_json::json!([
+                {"type": "dns", "value": "*.example.com"},
+                {"type": "ip", "value": "192.0.2.1"}
+            ])
+        );
+    }
+
+    #[test]
+    fn test_new_order_request_parse_names_promotes_ip() {
+        let req = NewOrderRequest::parse_names(["example.com", "2001:db8::1"]).unwrap();
+        assert!(req.identifiers[0].is_dns());
+        assert!(req.identifiers[1].is_ip());
+        assert!(NewOrderRequest::parse_names(["bad..name"]).is_err());
     }
 }
