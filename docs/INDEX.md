@@ -1,8 +1,42 @@
 # 📚 AcmeX 项目文档索引
 
-**项目版本**: v0.7.0 (Development)  
-**最后更新**: 2026-02-08  
+**当前项目版本**: v0.8.0
+**目标演进版本**: v0.9.0
+**最后更新**: 2026-08-31
 **文档语言**: 中文
+
+---
+
+## 🧭 当前架构事实与 v0.9.0 实施入口
+
+以下文档以 `main@de078b0` 当前代码、实际测试和 ACME 最新规范为基线。旧版本完成报告用于保留历史，不应替代当前生产就绪性判断。
+
+1. **[当前功能、架构评估与目标架构设计](./ACMEX_CURRENT_STATE_AND_TARGET_ARCHITECTURE_ZH.md)**
+   - 当前真实功能与验证边界
+   - 关键断点和风险优先级
+   - 面向上下游接入的目标架构
+   - 域名、Wildcard、IPv4、IPv6 验证设计
+   - 持久化工作流、续签、密钥和部署设计
+
+2. **[v0.9.0 架构演进实施路线图](./roadmap/v0.9.0/README.md)**
+   - 12 个可独立领取的详细任务包
+   - 依赖关系、里程碑和接口冻结策略
+   - 每个任务的实施步骤、测试、验收、风险和交付物
+
+### v0.9.0 独立任务包
+
+- [T01 强类型领域模型与策略规划](./roadmap/v0.9.0/T01_DOMAIN_MODEL_AND_POLICY.md)
+- [T02 Repository、数据模型与迁移](./roadmap/v0.9.0/T02_REPOSITORY_AND_MIGRATION.md)
+- [T03 持久化 Operation 与 Workflow Engine](./roadmap/v0.9.0/T03_DURABLE_WORKFLOW_ENGINE.md)
+- [T04 CA Backend 与 ACME 协议生产化](./roadmap/v0.9.0/T04_CA_BACKEND_AND_PROTOCOL.md)
+- [T05 Challenge Session、Lease 与补偿清理](./roadmap/v0.9.0/T05_CHALLENGE_LIFECYCLE.md)
+- [T06 DNS Provider Factory、Zone 与传播确认](./roadmap/v0.9.0/T06_DNS_PROVIDER_AND_PROPAGATION.md)
+- [T07 HTTP/TLS Edge 与 RFC 8738 IP 支持](./roadmap/v0.9.0/T07_HTTP_TLS_AND_IP_VALIDATION.md)
+- [T08 Application Service 与 API/CLI 统一](./roadmap/v0.9.0/T08_APPLICATION_SERVICE_AND_API.md)
+- [T09 ARI 驱动续签控制器](./roadmap/v0.9.0/T09_RENEWAL_CONTROLLER.md)
+- [T10 KeyProvider 与 Certificate Sink](./roadmap/v0.9.0/T10_KEY_PROVIDER_AND_SINKS.md)
+- [T11 安全、可观测性与多实例强化](./roadmap/v0.9.0/T11_SECURITY_OBSERVABILITY_HA.md)
+- [T12 E2E、故障注入与发布门槛](./roadmap/v0.9.0/T12_E2E_AND_RELEASE_GATES.md)
 
 ---
 
