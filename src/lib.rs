@@ -29,6 +29,7 @@
 
 // Module declarations
 pub mod account;
+pub mod application;
 pub mod ca;
 pub mod ca_backend;
 pub mod certificate;
@@ -56,6 +57,11 @@ pub mod workflow;
 
 // Re-exports for convenience
 pub use account::{Account, AccountManager, KeyPair, KeyRollover};
+pub use application::{
+    ActorContext, ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
+    CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate, OperationView,
+    RenewCertificate, RepositoryCertificateApplication, RevokeCertificate, VersionView,
+};
 pub use ca::{CAConfig, CertificateAuthority, Environment};
 pub use certificate::{CertificateChain, CertificateSubjectAltNames};
 pub use challenge::{
@@ -124,6 +130,10 @@ pub mod prelude {
     pub use crate::{
         AcmeClient, AcmeConfig,
         account::{Account, AccountManager, KeyPair, KeyRollover},
+        application::{
+            ActorContext, ApplicationServiceBuilder, CertificateApplication,
+            CreateCertificateIntent, IssueCertificate, RenewCertificate,
+        },
         certificate::{CertificateChain, CertificateSubjectAltNames},
         crypto::{Base64Encoding, Sha256Hash},
         domain::{

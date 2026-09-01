@@ -21,10 +21,12 @@ use super::health::{HealthCheck, health_handler};
 use super::order::{create_order, get_order, list_orders, trigger_full_renewal};
 use super::webhook::{WebhookHandler, webhook_handler};
 use crate::AcmeClient;
+use crate::application::{ApplicationServiceBuilder, CertificateApplication, CertificateQuery};
 use crate::config::Config;
 use crate::error::Result;
 use crate::notifications::WebhookManager;
 use crate::orchestrator::OrchestrationStatus;
+use crate::repository::RepositorySet;
 use crate::scheduler::RenewalScheduler;
 use crate::storage::StorageBackend;
 
@@ -56,6 +58,12 @@ pub struct AppState {
     pub api_keys: Arc<Vec<String>>,
     /// The certificate renewal scheduler.
     pub scheduler: Option<Arc<dyn RenewalScheduler>>,
+    /// v0.9 aggregate repositories used by Application Service and API v1.
+    pub repositories: Option<RepositorySet>,
+    /// Mutating lifecycle use cases.
+    pub application: Option<Arc<dyn CertificateApplication>>,
+    /// Query-side lifecycle projections.
+    pub query: Option<Arc<dyn CertificateQuery>>,
 }
 
 /// Starts the REST API server on the specified address.
@@ -76,16 +84,28 @@ pub async fn start_server(
     let webhook = Arc::new(WebhookHandler::new(webhook_manager));
     let tasks = Arc::new(RwLock::new(HashMap::new()));
 
-    // Load API keys from environment variable ACMEX_API_KEYS (comma separated)
-    let api_keys_str = std::env::var("ACMEX_API_KEYS").unwrap_or_else(|_| {
-        tracing::warn!("ACMEX_API_KEYS not set, using default insecure key");
-        "secret-admin-key".to_string()
-    });
-    let api_keys: Vec<String> = api_keys_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
+    let (application, repositories) = ApplicationServiceBuilder::from_config(&config)
+        .await?
+        .build()?;
+    let query: Arc<dyn CertificateQuery> = application.clone();
+    let application: Arc<dyn CertificateApplication> = application;
+
+    // Load API keys from environment variable ACMEX_API_KEYS (comma separated).
+    // Without explicit credentials only the unauthenticated health route is
+    // exposed; management APIs are not mounted with a default key.
+    let api_keys: Vec<String> = std::env::var("ACMEX_API_KEYS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let api_keys = Arc::new(api_keys);
+    let api_enabled = !api_keys.is_empty();
 
     let state = AppState {
         config,
@@ -96,6 +116,9 @@ pub async fn start_server(
         tasks,
         api_keys,
         scheduler,
+        repositories: Some(repositories),
+        application: Some(application),
+        query: Some(query),
     };
 
     // Define API routes with authentication middleware
@@ -121,13 +144,22 @@ pub async fn start_server(
             state.clone(),
             api_key_auth,
         ));
+    let api_v1_routes = super::api_v1::routes().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        api_key_auth,
+    ));
 
     // Combine all routes
-    let app = Router::new()
-        .route("/health", get(health_handler))
-        .route("/webhook", post(webhook_handler))
-        .nest("/api", api_routes)
-        .with_state(state);
+    let mut app = Router::new().route("/health", get(health_handler));
+    if !api_enabled {
+        tracing::warn!("ACMEX_API_KEYS not set; management API routes are disabled");
+    } else {
+        app = app
+            .route("/webhook", post(webhook_handler))
+            .nest("/api", api_routes)
+            .nest("/api/v1", api_v1_routes);
+    }
+    let app = app.with_state(state);
 
     // Bind and serve
     let listener = TcpListener::bind(addr).await.map_err(|e| {
