@@ -4,9 +4,8 @@ use crate::config::Config;
 /// Serve command implementation
 use crate::error::Result;
 use crate::notifications::{WebhookConfig, WebhookFormat, WebhookManager};
-use crate::scheduler::AdvancedRenewalScheduler;
 use crate::server::start_server;
-use crate::storage::{CertificateStore, FileStorage, MemoryStorage, StorageBackend};
+use crate::storage::{FileStorage, MemoryStorage, StorageBackend};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -22,6 +21,10 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         tracing::info!("Loading config from: {}", path);
         config = Config::from_file(std::path::Path::new(&path))?;
     }
+    let ca_config = config.acme.to_ca_config()?;
+    config.acme.directory = ca_config
+        .directory_url()
+        .map_err(crate::error::AcmeError::configuration)?;
 
     let config = Arc::new(config);
 
@@ -57,9 +60,6 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         }
     };
 
-    // Initialize certificate store
-    let cert_store = CertificateStore::new(storage.clone());
-
     // Initialize ACME client
     let mut acme_config = crate::client::AcmeConfig::new(&config.acme.directory)
         .with_tos_agreed(config.acme.tos_agreed);
@@ -70,20 +70,6 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         }
     }
     let client = crate::client::AcmeClient::new(acme_config)?;
-
-    // Initialize Advanced Renewal Scheduler
-    let (scheduler, _task_tx) = AdvancedRenewalScheduler::new(
-        client.clone(),
-        cert_store,
-        config.renewal.concurrency as usize,
-    );
-    let scheduler = Arc::new(scheduler);
-
-    // Start scheduler in background
-    let scheduler_clone = scheduler.clone();
-    tokio::spawn(async move {
-        scheduler_clone.run().await;
-    });
 
     // Initialize webhook manager
     let webhook_config = WebhookConfig {
@@ -105,7 +91,7 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         Some(Arc::new(client)),
         Some(storage),
         webhook_manager,
-        Some(scheduler),
+        None,
     )
     .await?;
 

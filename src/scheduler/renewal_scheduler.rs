@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 /// Advanced renewal scheduler with concurrency and priority support.
 /// This module provides the `AdvancedRenewalScheduler` which manages a priority queue
 /// of renewal tasks and executes them concurrently using a semaphore.
@@ -56,6 +58,10 @@ impl PartialOrd for RenewalTask {
 
 /// An advanced scheduler that handles concurrent renewal tasks with priority.
 #[derive(Clone)]
+#[deprecated(
+    since = "0.9.0",
+    note = "use renewal::ControllerRenewalScheduler instead"
+)]
 pub struct AdvancedRenewalScheduler<B: StorageBackend> {
     /// The ACME client used for issuance.
     client: AcmeClient,
@@ -73,6 +79,7 @@ pub struct AdvancedRenewalScheduler<B: StorageBackend> {
     task_tx: mpsc::Sender<RenewalTask>,
 }
 
+#[allow(deprecated)]
 impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
     /// Creates a new `AdvancedRenewalScheduler` and returns the scheduler and a task sender.
     pub fn new(
@@ -238,6 +245,7 @@ impl<B: StorageBackend + 'static> AdvancedRenewalScheduler<B> {
 }
 
 #[async_trait::async_trait]
+#[allow(deprecated)]
 impl<B: StorageBackend + 'static> RenewalScheduler for AdvancedRenewalScheduler<B> {
     async fn run_once(&self) -> Result<()> {
         self.run_once_internal().await

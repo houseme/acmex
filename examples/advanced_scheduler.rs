@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use acmex::client::CertificateBundle;
 use acmex::prelude::*;
 use acmex::renewal::RenewalHook;
