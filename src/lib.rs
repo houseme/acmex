@@ -81,8 +81,9 @@ pub use config::{
 };
 pub use delivery::{
     CertificateMaterial, CertificateMaterialBuilder, CertificateMaterialRef, CertificateSink,
-    CleanupOutcome, DeploymentHealth, DeploymentSpec, FakeAgentCertificateSink,
-    FileCertificateSink, HttpAgentSink, StagedDeployment,
+    CleanupOutcome, DeploymentActivationOutcome, DeploymentGate, DeploymentHealth,
+    DeploymentOrchestrator, DeploymentSpec, FakeAgentCertificateSink, FileCertificateSink,
+    HttpAgentSink, StagedDeployment,
 };
 #[cfg(feature = "dns-alibaba")]
 pub use dns::AlibabaCloudDnsProvider;
@@ -161,8 +162,8 @@ pub mod prelude {
         certificate::{CertificateChain, CertificateSubjectAltNames},
         crypto::{Base64Encoding, Sha256Hash},
         delivery::{
-            CertificateMaterialBuilder, CertificateSink, DeploymentSpec, FakeAgentCertificateSink,
-            FileCertificateSink, HttpAgentSink,
+            CertificateMaterialBuilder, CertificateSink, DeploymentOrchestrator, DeploymentSpec,
+            FakeAgentCertificateSink, FileCertificateSink, HttpAgentSink,
         },
         domain::{
             CertificateIntent, CertificateLineage, CertificateVersion, DnsIdentifier, Identifier,

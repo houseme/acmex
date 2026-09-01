@@ -132,6 +132,14 @@ pub enum WorkflowStepKind {
     PersistVersion,
     /// Create deployment child operations for delivery targets.
     ScheduleDeployments,
+    /// Stage certificate material into a deployment target.
+    StageDeployment,
+    /// Activate staged certificate material at a deployment target.
+    ActivateDeployment,
+    /// Verify a deployment target serves the expected version.
+    VerifyDeployment,
+    /// Roll back a partially activated deployment target.
+    RollbackDeployment,
     /// Clean up challenge resources.
     CleanupChallenges,
     /// Final bookkeeping.
@@ -157,6 +165,10 @@ impl WorkflowStepKind {
             Self::VerifyCertificate => "verify_certificate",
             Self::PersistVersion => "persist_version",
             Self::ScheduleDeployments => "schedule_deployments",
+            Self::StageDeployment => "stage_deployment",
+            Self::ActivateDeployment => "activate_deployment",
+            Self::VerifyDeployment => "verify_deployment",
+            Self::RollbackDeployment => "rollback_deployment",
             Self::CleanupChallenges => "cleanup_challenges",
             Self::Complete => "complete",
         }
@@ -466,8 +478,9 @@ impl OperationRecord {
                 WorkflowStepKind::Complete,
             ],
             OperationKind::Deploy => &[
-                WorkflowStepKind::Plan,
-                WorkflowStepKind::PersistVersion,
+                WorkflowStepKind::StageDeployment,
+                WorkflowStepKind::ActivateDeployment,
+                WorkflowStepKind::VerifyDeployment,
                 WorkflowStepKind::Complete,
             ],
             OperationKind::ChallengeCleanup => &[
