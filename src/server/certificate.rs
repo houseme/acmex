@@ -1,15 +1,13 @@
-use crate::certificate::OcspVerifier;
+use crate::application::{ActorContext, RenewCertificate};
+use crate::domain::{LineageId, VersionId};
 use crate::error::ProblemDetails;
-use crate::orchestrator::OrchestrationStatus;
-use crate::server::api::{AppState, TaskInfo};
+use crate::server::api::AppState;
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
-use rand::RngExt;
-use rand::distr::Alphanumeric;
 use serde::Serialize;
 use tracing::info;
 
@@ -22,37 +20,78 @@ pub struct CertificateResponse {
     pub ocsp_status: Option<String>,
 }
 
-pub async fn list_certificates(State(_state): State<AppState>) -> impl IntoResponse {
-    // Real implementation would list from StorageBackend via CertificateStore
-    Json(vec![CertificateResponse {
-        id: "cert_123".to_string(),
-        serial: "0123456789abcdef".to_string(),
-        expiry: "2026-05-08T00:00:00Z".to_string(),
-        ocsp_status: None,
-    }])
+pub async fn list_certificates(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(repositories) = &state.repositories else {
+        return Json(Vec::<CertificateResponse>::new()).into_response();
+    };
+    let mut response = Vec::new();
+    let lineages = match repositories.lineages.list().await {
+        Ok(lineages) => lineages,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(err.to_problem_details()),
+            )
+                .into_response();
+        }
+    };
+    for lineage in lineages {
+        let Ok(versions) = repositories
+            .versions
+            .list_by_lineage(&lineage.value.id)
+            .await
+        else {
+            continue;
+        };
+        response.extend(versions.into_iter().map(|version| CertificateResponse {
+            id: version.value.id.to_string(),
+            serial: version.value.serial,
+            expiry: version.value.not_after,
+            ocsp_status: None,
+        }));
+    }
+    Json(response).into_response()
 }
 
 pub async fn get_certificate(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    // In a real implementation, we'd load the cert from state.storage
-    // and then check OCSP status.
-
-    let mut ocsp_status = None;
-    if let Some(storage) = &state.storage
-        && let Ok(Some(cert_data)) = storage.load(&format!("cert:{}", id)).await
-        && let Ok(status) = OcspVerifier::verify_status(&cert_data).await
+    if let Some(repositories) = &state.repositories
+        && let Ok(version_id) = VersionId::new(id.clone())
     {
-        ocsp_status = Some(format!("{:?}", status));
+        match repositories.versions.get(&version_id).await {
+            Ok(Some(stored)) => {
+                return Json(CertificateResponse {
+                    id,
+                    serial: stored.value.serial,
+                    expiry: stored.value.not_after,
+                    ocsp_status: None,
+                })
+                .into_response();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(err.to_problem_details()),
+                )
+                    .into_response();
+            }
+        }
     }
 
-    Json(CertificateResponse {
-        id,
-        serial: "0123456789abcdef".to_string(),
-        expiry: "2026-05-08T00:00:00Z".to_string(),
-        ocsp_status,
-    })
+    (
+        StatusCode::NOT_FOUND,
+        Json(ProblemDetails {
+            problem_type: "https://acmex.sh/errors/not-found".into(),
+            title: "Certificate Not Found".into(),
+            status: 404,
+            detail: format!("No certificate version found with ID: {id}"),
+            instance: None,
+        }),
+    )
+        .into_response()
 }
 
 pub async fn renew_certificate(
@@ -61,69 +100,47 @@ pub async fn renew_certificate(
 ) -> impl IntoResponse {
     info!("Triggering manual renewal for certificate: {}", id);
 
-    // 1. Check if client and storage are configured
-    if state.client.is_none() || state.storage.is_none() {
+    let Some(application) = &state.application else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ProblemDetails {
                 problem_type: "https://acmex.sh/errors/config".into(),
                 title: "Server poorly configured".into(),
                 status: 503,
-                detail: "ACME client or Storage backend missing".into(),
+                detail: "Application Service is not configured".into(),
                 instance: None,
             }),
         )
             .into_response();
+    };
+
+    let lineage_id = match LineageId::new(id.clone()) {
+        Ok(id) => id,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(err.to_problem_details())).into_response();
+        }
+    };
+
+    match application
+        .renew(RenewCertificate {
+            context: ActorContext::default(),
+            lineage_id: Some(lineage_id),
+            identifiers: Vec::new(),
+            force: true,
+            idempotency_key: format!("legacy-renew-{id}"),
+        })
+        .await
+    {
+        Ok(op) => (StatusCode::ACCEPTED, Json(op)).into_response(),
+        Err(err) => {
+            let problem = err.to_problem_details();
+            (
+                StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(problem),
+            )
+                .into_response()
+        }
     }
-
-    // 2. Generate task ID
-    let task_id: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(16)
-        .map(char::from)
-        .collect();
-
-    let state_clone = state.clone();
-    let task_id_clone = task_id.clone();
-    let cert_id = id.clone();
-
-    // 3. Spawn background renewal task
-    tokio::spawn(async move {
-        // Initial status
-        {
-            let mut tasks = state_clone.tasks.write().await;
-            tasks.insert(
-                task_id_clone.clone(),
-                TaskInfo {
-                    status: OrchestrationStatus::InProgress {
-                        progress: 0.1,
-                        message: format!("Renewal started for cert {}", cert_id),
-                    },
-                    domains: vec![], // Domains unknown at this trigger point
-                },
-            );
-        }
-
-        // Real renewal logic would use CertificateRenewer or directly call Provisioner
-        // For demonstration, we simulate success
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        let mut tasks = state_clone.tasks.write().await;
-        if let Some(task) = tasks.get_mut(&task_id_clone) {
-            task.status = OrchestrationStatus::Completed;
-        }
-    });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(CertificateResponse {
-            id: task_id,
-            serial: "renewal_in_progress".to_string(),
-            expiry: "pending".to_string(),
-            ocsp_status: None,
-        }),
-    )
-        .into_response()
 }
 
 pub async fn revoke_certificate(

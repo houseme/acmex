@@ -1,11 +1,12 @@
-use crate::config::{AcmeSettings, Config};
 /// Obtain new certificate command implementation.
 /// This module handles the 'obtain' CLI command, coordinating with the
 /// orchestrator and the new multi-CA configuration system.
+use crate::application::{
+    ActorContext, ApplicationServiceBuilder, CertificateApplication, CreateCertificateIntent,
+    IssueCertificate,
+};
+use crate::config::{AcmeSettings, Config};
 use crate::error::{AcmeError, Result};
-use crate::orchestrator::CertificateProvisioner;
-use std::fs;
-use std::path::Path;
 
 /// Handles the 'obtain' command to request a new certificate.
 ///
@@ -15,8 +16,8 @@ pub async fn handle_obtain(
     domains: Vec<String>,
     email: String,
     challenge_type: String,
-    cert_path: String,
-    key_path: String,
+    _cert_path: String,
+    _key_path: String,
     prod: bool,
     dns_provider: Option<String>,
 ) -> Result<()> {
@@ -68,47 +69,41 @@ pub async fn handle_obtain(
     println!("   Environment: {:?}", ca_config.environment);
     println!("   ACME Directory: {}", acme_url);
 
-    // 4. Initialize the Provisioner Orchestrator
-    // In a real scenario, we would use the orchestrator to handle the full flow.
-    // For now, we simulate the steps while using the resolved configuration.
-    let _provisioner = CertificateProvisioner::new(domains.clone());
+    println!("\n⏳ Creating certificate intent and issue operation...");
+    let (service, _repositories) = ApplicationServiceBuilder::from_config(&config)
+        .await?
+        .build()?;
+    let idempotency_seed = domains.join(",");
+    let intent = service
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: domains.clone(),
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: Default::default(),
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            idempotency_key: format!("cli-obtain-intent-{idempotency_seed}"),
+        })
+        .await?;
+    let operation = service
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id.clone(),
+            idempotency_key: format!("cli-obtain-issue-{}", intent.id),
+        })
+        .await?;
 
-    println!("\n⏳ Step 1: Validating system readiness...");
-    // Here we would call orchestrator.execute(&config)
-
-    println!("⏳ Step 2: Executing ACME flow (Account -> Order -> Challenge -> Finalize)...");
-    // For demonstration in this CLI handler, we log the intent.
-    // In production, this calls the high-level issue_certificate logic.
-
-    // 5. Save the results (Simulated for now, would come from AcmeClient bundle)
-    println!("\n⏳ Step 3: Saving certificate and key...");
-
-    if let Some(parent) = Path::new(&cert_path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = Path::new(&key_path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Placeholder for actual certificate data
-    fs::write(
-        &cert_path,
-        "-----BEGIN CERTIFICATE-----\n(Actual data from ACME)\n-----END CERTIFICATE-----\n",
-    )?;
-    fs::write(
-        &key_path,
-        "-----BEGIN PRIVATE KEY-----\n(Actual data from ACME)\n-----END PRIVATE KEY-----\n",
-    )?;
-
-    println!("✓ Certificate saved to: {}", cert_path);
-    println!("✓ Private key saved to: {}", key_path);
-
-    println!("\n✅ Certificate obtained successfully!");
-    tracing::info!("Certificate successfully obtained for {:?}", domains);
+    println!("✓ Intent: {}", intent.id);
+    println!("✓ Issue operation: {}", operation.id);
+    println!(
+        "Certificate material is delivered by configured sinks or controlled export endpoints."
+    );
+    tracing::info!(
+        intent = %intent.id,
+        operation = %operation.id,
+        "certificate issue operation submitted"
+    );
 
     Ok(())
 }

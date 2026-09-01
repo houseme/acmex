@@ -70,6 +70,10 @@ pub enum AcmeError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    /// Errors indicating an idempotency or compare-and-set conflict.
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     /// Errors related to system or client configuration.
     #[error("Configuration error: {0}")]
     Configuration(String),
@@ -163,6 +167,11 @@ impl AcmeError {
         Self::NotFound(msg.into())
     }
 
+    /// Creates a new Conflict error.
+    pub fn conflict<S: Into<String>>(msg: S) -> Self {
+        Self::Conflict(msg.into())
+    }
+
     /// Creates a new Configuration error.
     pub fn configuration<S: Into<String>>(msg: S) -> Self {
         Self::Configuration(msg.into())
@@ -210,6 +219,41 @@ impl AcmeError {
                 title: "Network Transport Error".into(),
                 status: 502,
                 detail: d.clone(),
+                instance: None,
+            },
+            Self::InvalidInput(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/invalid-input".into(),
+                title: "Invalid Input".into(),
+                status: 400,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::NotFound(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/not-found".into(),
+                title: "Resource Not Found".into(),
+                status: 404,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::Conflict(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/conflict".into(),
+                title: "Conflict".into(),
+                status: 409,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::Configuration(d) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/configuration".into(),
+                title: "Configuration Error".into(),
+                status: 503,
+                detail: d.clone(),
+                instance: None,
+            },
+            Self::RateLimited(retry_after) => ProblemDetails {
+                problem_type: "https://acmex.sh/errors/rate-limited".into(),
+                title: "Rate Limited".into(),
+                status: 429,
+                detail: format!("retry after: {retry_after:?}"),
                 instance: None,
             },
             _ => ProblemDetails {

@@ -293,6 +293,11 @@ pub trait OperationRepository: Send + Sync {
         idempotency_key: &str,
         request_hash: &str,
     ) -> Result<Option<Versioned<OperationRecord>>>;
+    /// Finds an operation by idempotency key regardless of request hash.
+    async fn find_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Versioned<OperationRecord>>>;
 }
 
 /// Challenge lease persistence.
@@ -730,6 +735,16 @@ impl<S: EntityStore + 'static> OperationRepository for GenericRepository<S> {
             v.value.idempotency_key.as_deref() == Some(idempotency_key)
                 && v.value.request_hash.as_deref() == Some(request_hash)
         }))
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Versioned<OperationRecord>>> {
+        let all = self.list_as::<OperationRecord>("operations").await?;
+        Ok(all
+            .into_iter()
+            .find(|v| v.value.idempotency_key.as_deref() == Some(idempotency_key)))
     }
 }
 

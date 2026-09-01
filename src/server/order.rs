@@ -1,13 +1,13 @@
+use crate::application::{ActorContext, CreateCertificateIntent, IssueCertificate};
 use crate::error::ProblemDetails;
 use crate::metrics::AcmeEvent;
 use crate::metrics::events::EventAuditor;
-use crate::orchestrator::{CertificateProvisioner, OrchestrationStatus, Orchestrator};
-use crate::server::api::{AppState, TaskInfo};
+use crate::server::api::AppState;
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use rand::RngExt;
 use rand::distr::Alphanumeric;
@@ -37,56 +37,73 @@ pub async fn create_order(
         domains: payload.domains.clone(),
     });
 
-    // Generate a task ID
-    let task_id: String = rand::rng()
+    let request_key: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(16)
         .map(char::from)
         .collect();
 
-    let provisioner = CertificateProvisioner::new(payload.domains.clone());
-    let state_clone = state.clone();
-    let task_id_clone = task_id.clone();
+    let Some(application) = &state.application else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ProblemDetails {
+                problem_type: "https://acmex.sh/errors/config".into(),
+                title: "Server poorly configured".into(),
+                status: 503,
+                detail: "Application Service is not configured".into(),
+                instance: None,
+            }),
+        )
+            .into_response();
+    };
 
-    // Initial status
+    let intent = match application
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: payload.domains.clone(),
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: Default::default(),
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            idempotency_key: format!("legacy-order-intent-{request_key}"),
+        })
+        .await
     {
-        let mut tasks = state.tasks.write().await;
-        tasks.insert(
-            task_id.clone(),
-            TaskInfo {
-                status: OrchestrationStatus::InProgress {
-                    progress: 0.0,
-                    message: "Starting order process".to_string(),
-                },
-                domains: payload.domains.clone(),
-            },
-        );
-    }
-
-    // Spawn the background task
-    tokio::spawn(async move {
-        match provisioner.execute(&state_clone.config).await {
-            Ok(_) => {
-                let mut tasks = state_clone.tasks.write().await;
-                if let Some(task) = tasks.get_mut(&task_id_clone) {
-                    task.status = OrchestrationStatus::Completed;
-                }
-                info!("Order task {} completed successfully", task_id_clone);
-            }
-            Err(e) => {
-                let mut tasks = state_clone.tasks.write().await;
-                if let Some(task) = tasks.get_mut(&task_id_clone) {
-                    task.status = OrchestrationStatus::Failed(e.to_string());
-                }
-                error!("Order task {} failed: {}", task_id_clone, e);
-            }
+        Ok(intent) => intent,
+        Err(err) => {
+            let problem = err.to_problem_details();
+            return (
+                StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(problem),
+            )
+                .into_response();
         }
-    });
+    };
+
+    let op = match application
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id,
+            idempotency_key: format!("legacy-order-issue-{request_key}"),
+        })
+        .await
+    {
+        Ok(op) => op,
+        Err(err) => {
+            let problem = err.to_problem_details();
+            return (
+                StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(problem),
+            )
+                .into_response();
+        }
+    };
 
     (
         StatusCode::ACCEPTED,
         Json(OrderResponse {
-            id: task_id,
+            id: op.id.to_string(),
             status: "accepted".to_string(),
             domains: payload.domains,
         }),
@@ -94,7 +111,22 @@ pub async fn create_order(
         .into_response()
 }
 
-pub async fn list_orders(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn list_orders(State(state): State<AppState>) -> Response {
+    if let Some(query) = &state.query
+        && let Ok(operations) = query.list_operations(100).await
+    {
+        let response: Vec<OrderResponse> = operations
+            .into_iter()
+            .filter(|op| op.kind == "issue" || op.kind == "renew")
+            .map(|op| OrderResponse {
+                id: op.id.to_string(),
+                status: op.status,
+                domains: Vec::new(),
+            })
+            .collect();
+        return Json(response).into_response();
+    }
+
     let tasks = state.tasks.read().await;
     let response: Vec<OrderResponse> = tasks
         .iter()
@@ -105,7 +137,7 @@ pub async fn list_orders(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
 
-    Json(response)
+    Json(response).into_response()
 }
 
 pub async fn trigger_full_renewal(State(state): State<AppState>) -> impl IntoResponse {
@@ -139,6 +171,28 @@ pub async fn trigger_full_renewal(State(state): State<AppState>) -> impl IntoRes
 }
 
 pub async fn get_order(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    if let Some(query) = &state.query
+        && let Ok(operation_id) = crate::domain::OperationId::new(id.clone())
+    {
+        match query.get_operation(&operation_id).await {
+            Ok(Some(op)) => {
+                return (
+                    StatusCode::OK,
+                    Json(OrderResponse {
+                        id,
+                        status: op.status,
+                        domains: Vec::new(),
+                    }),
+                )
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                error!("Failed to read operation {id}: {err}");
+            }
+        }
+    }
+
     let tasks = state.tasks.read().await;
 
     if let Some(info) = tasks.get(&id) {
