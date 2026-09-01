@@ -10,19 +10,18 @@
 //! * `POST {base}/stages/{version}/rollback`
 //! * `DELETE {base}/stages/{version}`
 //!
-//! `tests/certificate_sink_test.rs` runs a fake agent (axum) through the
-//! same contract suite as the file sink.
+//! `tests/certificate_sink_contract.rs` covers the same lifecycle contract
+//! through the in-memory fake agent sink.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::certificate::CertificateChain;
-use crate::domain::CertificateVersion;
+use crate::domain::{CertificateVersion, DeliveryTargetKind};
 use crate::error::{AcmeError, Result};
 
 use super::{
-    CertificateMaterial, CertificateSink, DeploymentHealth, DeploymentSpec, SinkCleanupOutcome,
+    CertificateMaterialRef, CertificateSink, CleanupOutcome, DeploymentHealth, DeploymentSpec,
     StagedDeployment,
 };
 
@@ -30,10 +29,21 @@ use super::{
 struct StageRequest<'a> {
     version_id: &'a str,
     lineage_id: &'a str,
-    full_chain_pem: &'a str,
-    leaf_pem: &'a str,
-    key_pem: Option<&'a str>,
-    fingerprint: String,
+    target_id: &'a str,
+    fullchain_pem: &'a str,
+    cert_pem: &'a str,
+    private_key_pem: Option<&'a str>,
+    leaf_sha256: &'a str,
+}
+
+#[derive(Deserialize)]
+struct StageResponse {
+    #[serde(default)]
+    staged_ref: Option<String>,
+    #[serde(default)]
+    previous_active_ref: Option<String>,
+    #[serde(default)]
+    resource_version: u64,
 }
 
 #[derive(Deserialize)]
@@ -71,16 +81,13 @@ impl HttpAgentSink {
         }
     }
 
-    fn url(&self, suffix: &str) -> String {
-        format!("{}/stages{suffix}", self.base_url.trim_end_matches('/'))
+    /// Stable delivery agent identity used by orchestration and audit logs.
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
     }
 
-    fn fingerprint(material: &CertificateMaterial) -> Result<String> {
-        let chain = CertificateChain::from_pem(material.full_chain_pem.as_bytes())?;
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&chain.leaf);
-        Ok(hex::encode(hasher.finalize()))
+    fn url(&self, suffix: &str) -> String {
+        format!("{}/stages{suffix}", self.base_url.trim_end_matches('/'))
     }
 
     async fn request(
@@ -115,24 +122,32 @@ impl HttpAgentSink {
 
 #[async_trait]
 impl CertificateSink for HttpAgentSink {
-    fn sink_id(&self) -> &str {
-        &self.agent_id
-    }
-
     async fn stage(
         &self,
-        _spec: &DeploymentSpec,
+        spec: &DeploymentSpec,
         version: &CertificateVersion,
-        material: &CertificateMaterial,
+        material: CertificateMaterialRef<'_>,
     ) -> Result<StagedDeployment> {
+        if spec.kind != DeliveryTargetKind::Webhook {
+            return Err(AcmeError::invalid_input(
+                "HTTP agent sink requires webhook target",
+            ));
+        }
         let version_id = version.id.to_string();
+        let target_id = spec.target_id.to_string();
+        let private_key_pem = material.material.private_key_pem.as_ref().map(|key| {
+            std::str::from_utf8(key.expose_secret())
+                .map_err(|err| AcmeError::pem(format!("private key is not UTF-8 PEM: {err}")))
+        });
+        let private_key_pem = private_key_pem.transpose()?;
         let payload = StageRequest {
             version_id: &version_id,
             lineage_id: &version.lineage_id.to_string(),
-            full_chain_pem: &material.full_chain_pem,
-            leaf_pem: &material.leaf_pem,
-            key_pem: material.key_pem.as_deref(),
-            fingerprint: Self::fingerprint(material)?,
+            target_id: &target_id,
+            fullchain_pem: &material.material.fullchain_pem,
+            cert_pem: &material.material.cert_pem,
+            private_key_pem,
+            leaf_sha256: &material.material.leaf_sha256,
         };
         let response = self
             .request(
@@ -142,17 +157,34 @@ impl CertificateSink for HttpAgentSink {
                 Some(&payload),
             )
             .await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        if !status.is_success() {
             return Err(AcmeError::transport(format!(
                 "agent stage failed: HTTP {}",
-                response.status()
+                status
             )));
         }
+        let staged_ref = self.url(&format!("/{version_id}"));
+        let stage_response = if status == reqwest::StatusCode::NO_CONTENT {
+            StageResponse {
+                staged_ref: None,
+                previous_active_ref: None,
+                resource_version: 0,
+            }
+        } else {
+            response
+                .json()
+                .await
+                .map_err(|err| AcmeError::transport(format!("stage body invalid: {err}")))?
+        };
         Ok(StagedDeployment {
-            sink_id: self.agent_id.clone(),
+            kind: spec.kind,
+            target_id: spec.target_id.clone(),
             version_id: version.id.clone(),
-            staged_ref: self.url(&format!("/{version_id}")),
-            deployment_id: None,
+            staged_ref: stage_response.staged_ref.unwrap_or(staged_ref),
+            previous_active_ref: stage_response.previous_active_ref,
+            leaf_sha256: material.material.leaf_sha256.clone(),
+            resource_version: stage_response.resource_version,
         })
     }
 
@@ -165,10 +197,11 @@ impl CertificateSink for HttpAgentSink {
                 None,
             )
             .await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        if !status.is_success() {
             return Err(AcmeError::transport(format!(
                 "agent activate failed: HTTP {}",
-                response.status()
+                status
             )));
         }
         Ok(())
@@ -183,20 +216,25 @@ impl CertificateSink for HttpAgentSink {
                 None,
             )
             .await?;
-        if !response.status().is_success() {
-            return Ok(DeploymentHealth {
-                healthy: false,
-                detail: Some(format!("health endpoint HTTP {}", response.status())),
-            });
+        let status = response.status();
+        if !status.is_success() {
+            return Ok(DeploymentHealth::Unknown(format!(
+                "health endpoint HTTP {status}"
+            )));
         }
         let health: HealthResponse = response
             .json()
             .await
             .map_err(|e| AcmeError::transport(format!("health body invalid: {e}")))?;
-        Ok(DeploymentHealth {
-            healthy: health.healthy,
-            detail: health.detail,
-        })
+        if health.healthy {
+            Ok(DeploymentHealth::Healthy)
+        } else {
+            Ok(DeploymentHealth::Unhealthy(
+                health
+                    .detail
+                    .unwrap_or_else(|| "agent reported unhealthy".into()),
+            ))
+        }
     }
 
     async fn rollback(&self, staged: &StagedDeployment) -> Result<()> {
@@ -208,16 +246,17 @@ impl CertificateSink for HttpAgentSink {
                 None,
             )
             .await?;
-        if !response.status().is_success() {
+        let status = response.status();
+        if !status.is_success() {
             return Err(AcmeError::transport(format!(
                 "agent rollback failed: HTTP {}",
-                response.status()
+                status
             )));
         }
         Ok(())
     }
 
-    async fn cleanup(&self, staged: &StagedDeployment) -> Result<SinkCleanupOutcome> {
+    async fn cleanup(&self, staged: &StagedDeployment) -> Result<CleanupOutcome> {
         let response = self
             .request(
                 reqwest::Method::DELETE,
@@ -227,8 +266,8 @@ impl CertificateSink for HttpAgentSink {
             )
             .await?;
         match response.status().as_u16() {
-            200 | 204 => Ok(SinkCleanupOutcome::Removed),
-            404 => Ok(SinkCleanupOutcome::AlreadyAbsent),
+            200 | 204 => Ok(CleanupOutcome::Cleaned),
+            404 => Ok(CleanupOutcome::AlreadyClean),
             status => Err(AcmeError::transport(format!(
                 "agent cleanup failed: HTTP {status}"
             ))),
