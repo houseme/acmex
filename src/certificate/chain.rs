@@ -162,6 +162,31 @@ impl CertificateChain {
 
         Ok(None)
     }
+
+    /// The leaf certificate's `notBefore` instant.
+    pub fn not_before(&self) -> Result<Zoned> {
+        let (_, cert) = X509Certificate::from_der(&self.leaf)
+            .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
+        let timestamp = jiff::Timestamp::from_second(cert.validity().not_before.timestamp())
+            .map_err(|e| AcmeError::crypto(format!("notBefore conversion failed: {e}")))?;
+        Ok(timestamp.to_zoned(jiff::tz::TimeZone::UTC))
+    }
+
+    /// The leaf certificate's `notAfter` instant.
+    pub fn not_after(&self) -> Result<Zoned> {
+        let (_, cert) = X509Certificate::from_der(&self.leaf)
+            .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
+        let timestamp = jiff::Timestamp::from_second(cert.validity().not_after.timestamp())
+            .map_err(|e| AcmeError::crypto(format!("notAfter conversion failed: {e}")))?;
+        Ok(timestamp.to_zoned(jiff::tz::TimeZone::UTC))
+    }
+
+    /// The leaf certificate serial number, hex-encoded.
+    pub fn serial_hex(&self) -> Result<String> {
+        let (_, cert) = X509Certificate::from_der(&self.leaf)
+            .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
+        Ok(cert.serial.to_str_radix(16))
+    }
 }
 
 #[cfg(test)]

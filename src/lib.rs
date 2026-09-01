@@ -45,6 +45,7 @@ pub mod orchestrator;
 pub mod order;
 pub mod protocol;
 pub mod renewal;
+pub mod repository;
 pub mod scheduler;
 pub mod server;
 pub mod storage;
@@ -60,7 +61,10 @@ pub use challenge::{
     DnsProvider, Http01Solver, MockDnsProvider, TlsAlpn01Solver,
 };
 pub use client::{AcmeClient, AcmeConfig, CertificateBundle};
-pub use config::{AcmeSettings, ChallengeSettings, Config, RenewalSettings, StorageSettings};
+pub use config::{
+    AcmeSettings, ChallengeSettings, Config, FileRepositoryConfig, MigrationSettings,
+    RenewalSettings, RepositorySettings, StorageSettings,
+};
 #[cfg(feature = "dns-alibaba")]
 pub use dns::AlibabaCloudDnsProvider;
 #[cfg(feature = "dns-azure")]

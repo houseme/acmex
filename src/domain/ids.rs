@@ -114,6 +114,18 @@ entity_id!(
     "tgt_",
     "delivery target"
 );
+entity_id!(
+    /// Identity of a challenge lease (external validation resource handle).
+    ChallengeLeaseId,
+    "chl_",
+    "challenge lease"
+);
+entity_id!(
+    /// Identity of a single-target certificate deployment.
+    DeploymentId,
+    "dep_",
+    "deployment"
+);
 
 impl TenantId {
     /// The tenant used when no multi-tenancy is configured.
