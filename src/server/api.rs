@@ -26,6 +26,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::notifications::WebhookManager;
 use crate::orchestrator::OrchestrationStatus;
+use crate::renewal::{ControllerRenewalScheduler, RenewalController, RenewalControllerConfig};
 use crate::repository::RepositorySet;
 use crate::scheduler::RenewalScheduler;
 use crate::storage::StorageBackend;
@@ -84,11 +85,19 @@ pub async fn start_server(
     let webhook = Arc::new(WebhookHandler::new(webhook_manager));
     let tasks = Arc::new(RwLock::new(HashMap::new()));
 
-    let (application, repositories) = ApplicationServiceBuilder::from_config(&config)
+    let (application_service, repositories) = ApplicationServiceBuilder::from_config(&config)
         .await?
         .build()?;
-    let query: Arc<dyn CertificateQuery> = application.clone();
-    let application: Arc<dyn CertificateApplication> = application;
+    let query: Arc<dyn CertificateQuery> = application_service.clone();
+    let application: Arc<dyn CertificateApplication> = application_service;
+    let scheduler = scheduler.or_else(|| {
+        let controller = RenewalController::new(
+            repositories.clone(),
+            application.clone(),
+            RenewalControllerConfig::default(),
+        );
+        Some(Arc::new(ControllerRenewalScheduler::new(controller)) as Arc<dyn RenewalScheduler>)
+    });
 
     // Load API keys from environment variable ACMEX_API_KEYS (comma separated).
     // Without explicit credentials only the unauthenticated health route is
@@ -106,6 +115,22 @@ pub async fn start_server(
         .unwrap_or_default();
     let api_keys = Arc::new(api_keys);
     let api_enabled = !api_keys.is_empty();
+
+    let scheduler_loop = scheduler.clone();
+    let check_interval = config
+        .renewal_check_interval()
+        .max(std::time::Duration::from_secs(1));
+    if let Some(scheduler) = scheduler_loop {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(check_interval);
+            loop {
+                interval.tick().await;
+                if let Err(err) = scheduler.run_once().await {
+                    tracing::error!("renewal controller scan failed: {err}");
+                }
+            }
+        });
+    }
 
     let state = AppState {
         config,

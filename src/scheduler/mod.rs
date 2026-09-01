@@ -4,4 +4,5 @@ pub mod cleanup_scheduler;
 pub mod renewal_scheduler;
 
 pub use cleanup_scheduler::CleanupScheduler;
+#[allow(deprecated)]
 pub use renewal_scheduler::{AdvancedRenewalScheduler, RenewalScheduler};

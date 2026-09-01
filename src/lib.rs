@@ -114,7 +114,14 @@ pub use order::{
     verify_certificate_identifiers,
 };
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
+pub use renewal::{
+    ControllerRenewalScheduler, RenewalActivationOutcome, RenewalController,
+    RenewalControllerConfig, RenewalDecision, RenewalInfoProvider, RenewalPriority, RenewalReason,
+    RenewalScanReport, RenewalWindowSource, calculate_decision,
+};
+#[allow(deprecated)]
 pub use renewal::{RenewalHook, SimpleRenewalScheduler};
+#[allow(deprecated)]
 pub use scheduler::{AdvancedRenewalScheduler, CleanupScheduler, RenewalScheduler};
 pub use server::{HealthCheck, WebhookHandler, start_server};
 #[cfg(feature = "redis")]
@@ -127,6 +134,8 @@ pub use workflow::{EngineConfig, StepExecutor, StepResult, WorkflowEngine};
 
 /// Prelude module with commonly used types
 pub mod prelude {
+    #[allow(deprecated)]
+    pub use crate::scheduler::AdvancedRenewalScheduler;
     pub use crate::{
         AcmeClient, AcmeConfig,
         account::{Account, AccountManager, KeyPair, KeyRollover},
@@ -147,7 +156,11 @@ pub mod prelude {
             Order, verify_certificate_identifiers,
         },
         protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager},
-        scheduler::{AdvancedRenewalScheduler, CleanupScheduler},
+        renewal::{
+            ControllerRenewalScheduler, RenewalActivationOutcome, RenewalController,
+            RenewalControllerConfig, RenewalDecision, RenewalPriority, RenewalWindowSource,
+        },
+        scheduler::CleanupScheduler,
         transport::HttpClient,
         types::{AuthorizationStatus, ChallengeType, Contact, OrderStatus, RevocationReason},
     };
