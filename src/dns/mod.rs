@@ -1,7 +1,14 @@
 /// DNS provider implementations for ACME DNS-01 challenge.
 /// This module contains various DNS provider implementations that allow
 /// automatic creation and deletion of TXT records required for domain validation.
+pub mod factory;
+pub mod presenter;
+pub mod propagation;
 pub mod providers;
+pub mod record;
+pub mod router;
+pub mod spec;
+pub mod zone;
 
 // Re-exports with feature gates for easier access to specific providers.
 #[cfg(feature = "dns-alibaba")]

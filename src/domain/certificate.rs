@@ -212,7 +212,6 @@ pub struct ImportedBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::identifiers::Identifier;
     use crate::domain::{IntentId, LineageId, TenantId, VersionId};
 
     fn sample_version(state: VersionState, identifiers: IdentifierSet) -> CertificateVersion {
