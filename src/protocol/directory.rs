@@ -28,6 +28,25 @@ pub struct Directory {
     #[serde(rename = "keyChange")]
     pub key_change: String,
 
+    /// RFC 9773 renewal-info endpoint (optional).
+    #[serde(
+        rename = "renewalInfo",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub renewal_info: Option<String>,
+
+    /// Advertised certificate profiles (ACME profiles draft, optional).
+    /// Values are kept loose (raw JSON) so draft evolution never breaks
+    /// directory parsing; only the profile *names* are interpreted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<serde_json::Map<String, serde_json::Value>>,
+
+    /// Unknown directory members are preserved here instead of failing the
+    /// parse (forward compatibility).
+    #[serde(flatten, skip_serializing_if = "serde_json::Map::is_empty", default)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+
     /// Optional metadata provided by the ACME server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<DirectoryMeta>,
