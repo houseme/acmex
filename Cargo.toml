@@ -51,6 +51,7 @@ prometheus = "0.14"
 
 # DNS & Networking
 hickory-resolver = { version = "0.26.1", features = ["serde"] }
+idna = "1.1.0"
 
 # Utilities
 clap = { version = "4.6", features = ["derive"] }

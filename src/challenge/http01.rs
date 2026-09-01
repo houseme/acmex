@@ -158,7 +158,7 @@ mod tests {
             updated: None,
             error: None,
         };
-        let identifier = Identifier::dns("example.com");
+        let identifier = Identifier::try_dns("example.com").unwrap();
 
         let mut solver = Http01Solver::new("127.0.0.1:9999".parse().unwrap());
         let result = solver

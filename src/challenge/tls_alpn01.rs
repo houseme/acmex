@@ -177,7 +177,7 @@ impl ChallengeSolver for TlsAlpn01Solver {
         *auth = Some(key_authorization.to_string());
 
         // Use the identifier value as the domain
-        let domain = identifier.value.clone();
+        let domain = identifier.acme_value();
 
         // Start the server
         self.start_server(domain, key_authorization.to_string())

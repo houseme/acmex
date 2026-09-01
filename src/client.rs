@@ -132,8 +132,32 @@ impl AcmeClient {
 
     /// Creates a new certificate order for the specified domains.
     /// Automatically registers the account if it hasn't been registered yet.
+    ///
+    /// **DNS-only compatibility entry**: names are treated as DNS
+    /// identifiers; use [`AcmeClient::create_order_for_identifiers`] for
+    /// wildcard/IP identifiers.
     pub async fn create_order(&mut self, domains: Vec<String>) -> Result<crate::order::Order> {
         tracing::info!("Creating order for domains: {:?}", domains);
+        let order_req = NewOrderRequest::new(domains);
+        self.create_order_for_request(order_req).await
+    }
+
+    /// Creates a new certificate order from strong-typed identifiers
+    /// (DNS, wildcard DNS or IP per RFC 8738).
+    pub async fn create_order_for_identifiers(
+        &mut self,
+        identifiers: Vec<Identifier>,
+    ) -> Result<crate::order::Order> {
+        tracing::info!("Creating order for identifiers: {:?}", identifiers);
+        let order_req = NewOrderRequest::from_identifiers(identifiers);
+        self.create_order_for_request(order_req).await
+    }
+
+    /// Shared order-creation path used by both entry points.
+    async fn create_order_for_request(
+        &mut self,
+        order_req: NewOrderRequest,
+    ) -> Result<crate::order::Order> {
         // Ensure account is registered
         if self.account_id.is_none() {
             self.register_account().await?;
@@ -155,13 +179,6 @@ impl AcmeClient {
             &self.http_client,
             account_id,
         );
-
-        let identifiers: Vec<Identifier> = domains.iter().map(Identifier::dns).collect();
-        let order_req = NewOrderRequest {
-            identifiers,
-            not_before: None,
-            not_after: None,
-        };
 
         let (url, order) = order_mgr.create_order(&order_req).await?;
         tracing::info!("Order created successfully at URL: {}", url);
@@ -202,14 +219,8 @@ impl AcmeClient {
             account_id.clone(),
         );
 
-        // Create order
-        let identifiers: Vec<Identifier> = domains.iter().map(Identifier::dns).collect();
-        let order_req = NewOrderRequest {
-            identifiers,
-            not_before: None,
-            not_after: None,
-        };
-
+        // Create order (DNS-only compatibility path).
+        let order_req = NewOrderRequest::new(domains.clone());
         let (order_url, mut order) = order_mgr.create_order(&order_req).await?;
         tracing::info!("Order created: {}", order_url);
 
@@ -218,20 +229,27 @@ impl AcmeClient {
             let auth = order_mgr.get_authorization(auth_url).await?;
             tracing::info!("Processing authorization for: {:?}", auth.identifier);
 
-            // Find suitable challenge
+            // Find a suitable challenge: must be solvable by the registry AND
+            // compatible with the identifier kind (compatibility matrix from
+            // the domain layer, e.g. wildcard requires dns-01).
+            let compatible = crate::domain::compatible_challenges(&auth.identifier);
             let challenge = auth
                 .challenges
                 .iter()
                 .find(|c| {
                     c.challenge_type
                         .parse::<ChallengeType>()
-                        .map(|ct| solver_registry.get(ct).is_some())
+                        .map(|ct| solver_registry.get(ct).is_some() && compatible.contains(ct))
                         .unwrap_or(false)
                 })
                 .ok_or_else(|| {
                     crate::error::AcmeError::challenge(
                         "unknown".to_string(),
-                        "No suitable challenge solver found".to_string(),
+                        format!(
+                            "No compatible challenge solver for identifier `{}` (compatible: {:?})",
+                            auth.identifier,
+                            compatible.iter().map(|c| c.as_str()).collect::<Vec<_>>()
+                        ),
                     )
                 })?;
 
@@ -337,6 +355,32 @@ impl AcmeClient {
             private_key_pem,
             domains,
         })
+    }
+
+    /// Issues a certificate for strong-typed identifiers.
+    ///
+    /// DNS identifiers (including wildcards, which require a DNS-01 solver)
+    /// run through the existing issuance flow. IP identifiers are rejected
+    /// with a clear error until RFC 8738 network validation lands (roadmap
+    /// T07) — they are never silently treated as DNS names.
+    pub async fn issue_identifiers(
+        &mut self,
+        identifiers: Vec<Identifier>,
+        solver_registry: &mut ChallengeSolverRegistry,
+    ) -> Result<CertificateBundle> {
+        let mut domains = Vec::with_capacity(identifiers.len());
+        for identifier in &identifiers {
+            match identifier {
+                Identifier::Dns(dns) => domains.push(dns.to_wire_value()),
+                Identifier::Ip(addr) => {
+                    return Err(crate::error::AcmeError::InvalidInput(format!(
+                        "IP identifier `{addr}` requires RFC 8738 validation, which is not yet \
+                         available in the legacy client flow; DNS identifiers are supported"
+                    )));
+                }
+            }
+        }
+        self.issue_certificate(domains, solver_registry).await
     }
 
     /// Enables and initializes a nonce pool for better performance.

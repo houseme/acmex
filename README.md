@@ -98,6 +98,13 @@ async fn main() -> Result<()> {
 }
 ```
 
+> **Note (v0.9.0)**: `issue_certificate(Vec<String>, _)` and `NewOrderRequest::new(Vec<String>)`
+> are DNS-only compatibility entries — every string is treated as a DNS name (validated and
+> normalized). For wildcard and IP (RFC 8738) identifiers use the strong-typed entries:
+> `Identifier::try_dns("*.example.com")`, `Identifier::try_ip("2001:db8::1")` with
+> `client.issue_identifiers(...)` / `NewOrderRequest::from_identifiers(...)`. See
+> `docs/roadmap/v0.9.0/T01_MIGRATION_NOTES.md` for the full migration record.
+
 ### Running the API Server
 
 ```bash
