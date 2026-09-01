@@ -1,5 +1,7 @@
 //! Certificate material rendering and downstream delivery sinks.
 
+pub mod http_sink;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,8 @@ use crate::domain::{
 };
 use crate::error::{AcmeError, Result};
 use crate::key::SecretBytes;
+
+pub use http_sink::HttpAgentSink;
 
 /// Rendered certificate material for a sink invocation.
 #[derive(Clone, PartialEq, Eq)]

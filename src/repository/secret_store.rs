@@ -102,6 +102,15 @@ impl FileSecretStore {
         Ok(self.path_for(id).exists())
     }
 
+    /// Removes a secret; returns whether it existed.
+    pub async fn remove(&self, id: &str) -> Result<bool> {
+        match fs::remove_file(self.path_for(id)).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(AcmeError::Storage(format!("secret remove failed: {e}"))),
+        }
+    }
+
     /// Debug output never includes secret contents.
     pub fn debug_summary(&self) -> String {
         format!("FileSecretStore(root={})", self.root.display())
