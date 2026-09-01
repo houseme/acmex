@@ -169,8 +169,14 @@ pub struct OutboxEvent {
     /// Last delivery error, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Earliest retry time after a failed delivery attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<Timestamp>,
     /// Whether delivery succeeded.
     pub processed: bool,
+    /// Whether the event exhausted retries and awaits operator replay.
+    #[serde(default)]
+    pub dead_lettered: bool,
 }
 
 /// Append-only event outbox (at-least-once delivery).
@@ -191,10 +197,18 @@ pub trait OutboxRepository: Send + Sync {
     async fn mark_processed(&self, sequence: u64) -> Result<()>;
 
     /// Records a failed delivery attempt with its error.
-    async fn mark_failed(&self, sequence: u64, error: &str) -> Result<()>;
+    async fn mark_failed(
+        &self,
+        sequence: u64,
+        error: &str,
+        next_attempt_at: Option<Timestamp>,
+    ) -> Result<()>;
 
     /// Marks an event as dead-lettered after exhausting retries.
     async fn dead_letter(&self, sequence: u64, reason: &str) -> Result<()>;
+
+    /// Requeues a dead-lettered event for manual replay.
+    async fn requeue(&self, sequence: u64) -> Result<()>;
 }
 
 /// Intent aggregate persistence.

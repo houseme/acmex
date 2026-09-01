@@ -556,7 +556,9 @@ impl OutboxRepository for FileRepository {
             created_at: self.clock.now(),
             attempts: 0,
             last_error: None,
+            next_attempt_at: None,
             processed: false,
+            dead_lettered: false,
         };
         let path = self
             .store
@@ -588,7 +590,12 @@ impl OutboxRepository for FileRepository {
                 .ok_or_else(|| corrupt("outbox entry vanished"))?;
             let event: OutboxEvent = serde_json::from_value(value)
                 .map_err(|e| corrupt(format!("outbox entry {name}: {e}")))?;
-            if !event.processed {
+            if !event.processed
+                && !event.dead_lettered
+                && event
+                    .next_attempt_at
+                    .is_none_or(|retry_at| retry_at <= self.clock.now())
+            {
                 events.push(event);
             }
         }
@@ -602,18 +609,35 @@ impl OutboxRepository for FileRepository {
             .await
     }
 
-    async fn mark_failed(&self, sequence: u64, error: &str) -> Result<()> {
+    async fn mark_failed(
+        &self,
+        sequence: u64,
+        error: &str,
+        next_attempt_at: Option<jiff::Timestamp>,
+    ) -> Result<()> {
         self.update_outbox(sequence, |event| {
             event.attempts += 1;
             event.last_error = Some(error.to_string());
+            event.next_attempt_at = next_attempt_at;
         })
         .await
     }
 
     async fn dead_letter(&self, sequence: u64, reason: &str) -> Result<()> {
         self.update_outbox(sequence, |event| {
-            event.processed = true;
+            event.dead_lettered = true;
             event.last_error = Some(format!("dead-letter: {reason}"));
+            event.next_attempt_at = None;
+        })
+        .await
+    }
+
+    async fn requeue(&self, sequence: u64) -> Result<()> {
+        self.update_outbox(sequence, |event| {
+            event.dead_lettered = false;
+            event.processed = false;
+            event.last_error = None;
+            event.next_attempt_at = None;
         })
         .await
     }

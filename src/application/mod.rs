@@ -12,5 +12,5 @@ pub use service::{ApplicationServiceBuilder, RepositoryCertificateApplication};
 pub use types::{
     ActorContext, CancelOperation, CertificateApplication, CertificateQuery,
     CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate, OperationView,
-    RenewCertificate, RevokeCertificate, VersionView,
+    Permission, RenewCertificate, RevokeCertificate, VersionView,
 };

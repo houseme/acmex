@@ -1,5 +1,5 @@
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -141,8 +141,8 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String> {
         })
 }
 
-fn actor_context() -> ActorContext {
-    ActorContext::default()
+fn actor_context(actor: Option<Extension<ActorContext>>) -> ActorContext {
+    actor.map(|Extension(actor)| actor).unwrap_or_default()
 }
 
 fn location(path: String) -> HeaderMap {
@@ -168,13 +168,14 @@ fn query(state: &AppState) -> Result<&std::sync::Arc<dyn CertificateQuery>> {
 
 pub async fn create_intent(
     State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
     headers: HeaderMap,
     Json(payload): Json<CreateIntentRequest>,
 ) -> Response {
     let result = async {
         let view = application(&state)?
             .create_intent(CreateCertificateIntent {
-                context: actor_context(),
+                context: actor_context(actor),
                 identifiers: payload.identifiers,
                 ca_policy: payload.ca_policy,
                 validation_policy: payload.validation_policy,
@@ -225,6 +226,7 @@ pub async fn update_intent() -> Response {
 
 pub async fn issue_intent(
     State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
@@ -232,7 +234,7 @@ pub async fn issue_intent(
         let intent_id = IntentId::new(id)?;
         let op = application(&state)?
             .issue(IssueCertificate {
-                context: actor_context(),
+                context: actor_context(actor),
                 intent_id,
                 idempotency_key: idempotency_key(&headers)?,
             })
@@ -272,6 +274,7 @@ pub async fn get_lineage(State(state): State<AppState>, Path(id): Path<String>) 
 
 pub async fn renew_lineage(
     State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(payload): Json<RenewRequest>,
@@ -280,7 +283,7 @@ pub async fn renew_lineage(
         let lineage_id = LineageId::new(id)?;
         let op = application(&state)?
             .renew(RenewCertificate {
-                context: actor_context(),
+                context: actor_context(actor),
                 lineage_id: Some(lineage_id),
                 identifiers: Vec::new(),
                 force: payload.force,
@@ -356,6 +359,7 @@ pub async fn get_version_chain(State(state): State<AppState>, Path(id): Path<Str
 
 pub async fn deploy_version(
     State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(payload): Json<DeployRequest>,
@@ -364,7 +368,7 @@ pub async fn deploy_version(
         let version_id = VersionId::new(id)?;
         let op = application(&state)?
             .deploy(DeployCertificate {
-                context: actor_context(),
+                context: actor_context(actor),
                 version_id,
                 target_ids: payload.target_ids,
                 idempotency_key: idempotency_key(&headers)?,
@@ -389,6 +393,7 @@ pub async fn deploy_version(
 
 pub async fn revoke_version(
     State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(payload): Json<RevokeRequest>,
@@ -397,7 +402,7 @@ pub async fn revoke_version(
         let version_id = VersionId::new(id)?;
         let op = application(&state)?
             .revoke(RevokeCertificate {
-                context: actor_context(),
+                context: actor_context(actor),
                 version_id,
                 reason: payload.reason,
                 idempotency_key: idempotency_key(&headers)?,
@@ -446,12 +451,16 @@ pub async fn get_operation(State(state): State<AppState>, Path(id): Path<String>
     }
 }
 
-pub async fn cancel_operation(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+pub async fn cancel_operation(
+    State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
+    Path(id): Path<String>,
+) -> Response {
     let result = async {
         let operation_id = OperationId::new(id)?;
         application(&state)?
             .cancel_operation(CancelOperation {
-                context: actor_context(),
+                context: actor_context(actor),
                 operation_id,
             })
             .await

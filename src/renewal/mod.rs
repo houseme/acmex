@@ -572,7 +572,12 @@ impl RenewalController {
                 .renew(RenewCertificate {
                     context: ActorContext {
                         tenant_id: lineage.tenant_id.clone(),
+                        subject: self.config.owner.clone(),
                         actor: self.config.owner.clone(),
+                        roles: vec!["scheduler".to_string()],
+                        permissions: crate::application::Permission::admin_set(),
+                        request_id: None,
+                        source: Some("renewal-controller".to_string()),
                     },
                     lineage_id: Some(lineage.id.clone()),
                     identifiers: Vec::new(),

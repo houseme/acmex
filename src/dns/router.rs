@@ -65,10 +65,10 @@ impl ProviderRouterBuilder {
     }
 
     /// Instantiates all providers and builds the router.
-    pub fn build(self) -> Result<ProviderRouter> {
+    pub async fn build(self) -> Result<ProviderRouter> {
         let mut providers = HashMap::new();
         for spec in &self.specs {
-            let provider = self.factory.create(spec, self.secrets.as_ref())?;
+            let provider = self.factory.create(spec, self.secrets.as_ref()).await?;
             providers.insert(spec.id.clone(), provider);
         }
         Ok(ProviderRouter {
@@ -191,29 +191,32 @@ mod tests {
         }
     }
 
-    fn router(specs: Vec<DnsProviderSpec>) -> ProviderRouter {
+    async fn router(specs: Vec<DnsProviderSpec>) -> ProviderRouter {
         ProviderRouterBuilder::new(Box::new(EnvFileSecretResolver))
             .with_specs(specs)
             .build()
+            .await
             .unwrap()
     }
 
-    #[test]
-    fn selector_wins() {
+    #[tokio::test]
+    async fn selector_wins() {
         let router = router(vec![
             spec("a", "fake", &["example.com"], &[]),
             spec("b", "fake", &["example.com"], &[]),
-        ]);
+        ])
+        .await;
         let picked = router.route("example.com", Some("b")).unwrap();
         assert_eq!(picked.provider_id(), "b");
     }
 
-    #[test]
-    fn ambiguous_exact_zones_error() {
+    #[tokio::test]
+    async fn ambiguous_exact_zones_error() {
         let router = router(vec![
             spec("a", "fake", &["example.com"], &[]),
             spec("b", "fake", &["example.com"], &[]),
-        ]);
+        ])
+        .await;
         let err = router
             .route("example.com", None)
             .err()
@@ -221,29 +224,31 @@ mod tests {
         assert!(err.to_string().contains("multiple providers"));
     }
 
-    #[test]
-    fn longest_suffix_wins() {
+    #[tokio::test]
+    async fn longest_suffix_wins() {
         let router = router(vec![
             spec("generic", "fake", &[], &["example.org"]),
             spec("internal", "fake", &[], &["internal.example.org"]),
-        ]);
+        ])
+        .await;
         let picked = router.route("host.internal.example.org", None).unwrap();
         assert_eq!(picked.provider_id(), "internal");
     }
 
-    #[test]
-    fn single_provider_is_default() {
-        let router = router(vec![spec("only", "fake", &["other.com"], &[])]);
+    #[tokio::test]
+    async fn single_provider_is_default() {
+        let router = router(vec![spec("only", "fake", &["other.com"], &[])]).await;
         let picked = router.route("unrelated.net", None).unwrap();
         assert_eq!(picked.provider_id(), "only");
     }
 
-    #[test]
-    fn no_match_with_multiple_providers_errors() {
+    #[tokio::test]
+    async fn no_match_with_multiple_providers_errors() {
         let router = router(vec![
             spec("a", "fake", &["example.com"], &[]),
             spec("b", "fake", &["example.net"], &[]),
-        ]);
+        ])
+        .await;
         let err = router
             .route("example.org", None)
             .err()
@@ -251,9 +256,9 @@ mod tests {
         assert!(err.to_string().contains("no DNS provider"));
     }
 
-    #[test]
-    fn unknown_selector_errors() {
-        let router = router(vec![spec("a", "fake", &["example.com"], &[])]);
+    #[tokio::test]
+    async fn unknown_selector_errors() {
+        let router = router(vec![spec("a", "fake", &["example.com"], &[])]).await;
         assert!(router.route("example.com", Some("ghost")).is_err());
     }
 }

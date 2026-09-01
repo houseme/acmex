@@ -8,6 +8,7 @@ use crate::domain::{
     TenantId, VersionId, validate_order_policy,
 };
 use crate::error::{AcmeError, Result};
+use crate::metrics::{AuditEvent, EventAuditor};
 use crate::repository::{
     CasOutcome, CreateOutcome, FileRepository, MemoryRepository, RepositorySet,
 };
@@ -216,6 +217,7 @@ impl RepositoryCertificateApplication {
 
     async fn submit_operation(
         &self,
+        context: &super::types::ActorContext,
         kind: OperationKind,
         subject: OperationSubject,
         idempotency_key: String,
@@ -246,10 +248,25 @@ impl RepositoryCertificateApplication {
                             "operation_id": record.id.as_str(),
                             "kind": record.kind.as_str(),
                             "subject": record.subject,
+                            "tenant_id": context.tenant_id.as_str(),
+                            "actor": &context.subject,
+                            "request_id": context.request_id.clone(),
                         }),
                         None,
                     )
                     .await?;
+                EventAuditor::track_audit(
+                    &self.repositories,
+                    AuditEvent::success(
+                        context,
+                        format!("operation.{}", record.kind.as_str()),
+                        record.id.as_str(),
+                        Some(record.id.as_str().to_string()),
+                        None,
+                        self.repositories.clock.now(),
+                    ),
+                )
+                .await?;
                 Ok(op_ref(&record))
             }
             CreateOutcome::AlreadyExists => Ok(op_ref(&record)),
@@ -353,7 +370,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
 
         let intent = CertificateIntent {
             id: IntentId::generate(),
-            tenant_id: command.context.tenant_id,
+            tenant_id: command.context.tenant_id.clone(),
             identifiers,
             ca_policy: command.ca_policy,
             validation_policy: command.validation_policy,
@@ -374,11 +391,23 @@ impl CertificateApplication for RepositoryCertificateApplication {
                         serde_json::json!({
                             "intent_id": intent.id.as_str(),
                             "tenant_id": intent.tenant_id.as_str(),
-                            "actor": command.context.actor,
+                            "actor": &command.context.actor,
                         }),
                         None,
                     )
                     .await?;
+                EventAuditor::track_audit(
+                    &self.repositories,
+                    AuditEvent::success(
+                        &command.context,
+                        "intent.create",
+                        intent.id.as_str(),
+                        None,
+                        None,
+                        self.repositories.clock.now(),
+                    ),
+                )
+                .await?;
                 Ok(IntentView::from_intent(&intent))
             }
             CreateOutcome::AlreadyExists => self
@@ -406,6 +435,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
         let lineage = self.lineage_for_intent(&intent).await?;
         let request_hash = command_hash(&(OperationKind::Issue, &command.intent_id))?;
         self.submit_operation(
+            &command.context,
             OperationKind::Issue,
             OperationSubject {
                 intent_id: Some(intent.id),
@@ -428,6 +458,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             &command.identifiers,
         ))?;
         self.submit_operation(
+            &command.context,
             OperationKind::Renew,
             OperationSubject {
                 intent_id: Some(lineage.intent_id),
@@ -447,6 +478,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
         let request_hash =
             command_hash(&(OperationKind::Revoke, &command.version_id, &command.reason))?;
         self.submit_operation(
+            &command.context,
             OperationKind::Revoke,
             OperationSubject {
                 intent_id: None,
@@ -469,6 +501,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             &command.target_ids,
         ))?;
         self.submit_operation(
+            &command.context,
             OperationKind::Deploy,
             OperationSubject {
                 intent_id: None,

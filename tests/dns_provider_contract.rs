@@ -110,8 +110,8 @@ async fn provider_errors_are_classified_not_panics() {
     assert!(err.to_string().contains("PROVIDER_AUTH_FAILED"));
 }
 
-#[test]
-fn factory_rejects_unknown_and_unfeatured_types() {
+#[tokio::test]
+async fn factory_rejects_unknown_and_unfeatured_types() {
     let factory = DefaultDnsProviderFactory;
     let secrets = EnvFileSecretResolver;
     let spec = |provider_type: &str| DnsProviderSpec {
@@ -125,10 +125,10 @@ fn factory_rejects_unknown_and_unfeatured_types() {
         extra: Default::default(),
     };
 
-    let unknown = factory.create(&spec("not-a-provider"), &secrets);
+    let unknown = factory.create(&spec("not-a-provider"), &secrets).await;
     assert!(unknown.is_err());
 
-    let unfeatured = factory.create(&spec("route53"), &secrets);
+    let unfeatured = factory.create(&spec("route53"), &secrets).await;
     // Either implemented (feature on) or an explicit feature error — never
     // a silent fallback to another provider.
     match unfeatured {
@@ -165,6 +165,7 @@ async fn dns01_presenter_end_to_end_with_fakes() {
             extra: Default::default(),
         })
         .build()
+        .await
         .unwrap();
 
     let presenter = Dns01Presenter::new(Arc::new(router), Arc::new(zones), Arc::new(observer));
@@ -259,6 +260,7 @@ async fn presenter_routes_delegated_zone_to_owner() {
             extra: Default::default(),
         })
         .build()
+        .await
         .unwrap();
 
     let presenter = Dns01Presenter::new(Arc::new(router), Arc::new(zones), Arc::new(observer));
@@ -326,6 +328,7 @@ async fn partial_propagation_fails_quorum_then_succeeds() {
             extra: Default::default(),
         })
         .build()
+        .await
         .unwrap();
     let presenter = Dns01Presenter::new(Arc::new(router), Arc::new(zones), Arc::new(observer));
 

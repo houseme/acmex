@@ -273,7 +273,9 @@ impl OutboxRepository for MemoryRepository {
             created_at: self.clock.now(),
             attempts: 0,
             last_error: None,
+            next_attempt_at: None,
             processed: false,
+            dead_lettered: false,
         });
         Ok(sequence)
     }
@@ -283,7 +285,12 @@ impl OutboxRepository for MemoryRepository {
         Ok(outbox
             .events
             .iter()
-            .filter(|e| !e.processed)
+            .filter(|e| {
+                !e.processed
+                    && !e.dead_lettered
+                    && e.next_attempt_at
+                        .is_none_or(|retry_at| retry_at <= self.clock.now())
+            })
             .take(limit)
             .cloned()
             .collect())
@@ -297,11 +304,17 @@ impl OutboxRepository for MemoryRepository {
         Ok(())
     }
 
-    async fn mark_failed(&self, sequence: u64, error: &str) -> Result<()> {
+    async fn mark_failed(
+        &self,
+        sequence: u64,
+        error: &str,
+        next_attempt_at: Option<jiff::Timestamp>,
+    ) -> Result<()> {
         let mut outbox = self.outbox.lock().expect("outbox lock poisoned");
         if let Some(event) = outbox.events.iter_mut().find(|e| e.sequence == sequence) {
             event.attempts += 1;
             event.last_error = Some(error.to_string());
+            event.next_attempt_at = next_attempt_at;
         }
         Ok(())
     }
@@ -309,8 +322,20 @@ impl OutboxRepository for MemoryRepository {
     async fn dead_letter(&self, sequence: u64, reason: &str) -> Result<()> {
         let mut outbox = self.outbox.lock().expect("outbox lock poisoned");
         if let Some(event) = outbox.events.iter_mut().find(|e| e.sequence == sequence) {
-            event.processed = true;
+            event.dead_lettered = true;
             event.last_error = Some(format!("dead-letter: {reason}"));
+            event.next_attempt_at = None;
+        }
+        Ok(())
+    }
+
+    async fn requeue(&self, sequence: u64) -> Result<()> {
+        let mut outbox = self.outbox.lock().expect("outbox lock poisoned");
+        if let Some(event) = outbox.events.iter_mut().find(|e| e.sequence == sequence) {
+            event.dead_lettered = false;
+            event.processed = false;
+            event.last_error = None;
+            event.next_attempt_at = None;
         }
         Ok(())
     }

@@ -5,14 +5,15 @@
 //! [`SecretRef`] and resolved at construction time — plaintext values never
 //! sit in configuration structs or logs.
 
-use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::{AcmeError, Result};
 
 /// A reference to a secret value.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SecretRef {
     /// Read from an environment variable.
@@ -24,6 +25,16 @@ pub enum SecretRef {
     File {
         /// File path.
         path: PathBuf,
+    },
+    /// Vault-style reference, intentionally unresolved by the built-in
+    /// resolver until a deployment wires its own implementation.
+    Vault {
+        /// Vault mount or namespace.
+        mount: String,
+        /// Secret path below the mount.
+        path: String,
+        /// Key within the secret payload.
+        key: String,
     },
     /// Provider-specific scheme (resolved by a dedicated resolver).
     ProviderSpecific {
@@ -48,6 +59,22 @@ impl SecretRef {
                 path: PathBuf::from(path),
             });
         }
+        if let Some(rest) = value.strip_prefix("vault:") {
+            let mut parts = rest.splitn(3, ':');
+            let mount = parts.next().unwrap_or_default();
+            let path = parts.next().unwrap_or_default();
+            let key = parts.next().unwrap_or_default();
+            if mount.is_empty() || path.is_empty() || key.is_empty() {
+                return Err(AcmeError::InvalidInput(format!(
+                    "vault secret needs `vault:<mount>:<path>:<key>`, got {value:?}"
+                )));
+            }
+            return Ok(Self::Vault {
+                mount: mount.to_string(),
+                path: path.to_string(),
+                key: key.to_string(),
+            });
+        }
         if let Some(rest) = value.strip_prefix("provider:") {
             let (scheme, reference) = rest.split_once(':').ok_or_else(|| {
                 AcmeError::InvalidInput(format!(
@@ -69,8 +96,55 @@ impl SecretRef {
         match self {
             Self::Env { name } => format!("env:{name}"),
             Self::File { path } => format!("file:{}", path.display()),
+            Self::Vault { mount, path, key } => format!("vault:{mount}:{path}:{key}"),
             Self::ProviderSpecific { scheme, reference } => {
                 format!("provider:{scheme}:{reference}")
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "kind")]
+        enum TaggedSecretRef {
+            Env {
+                name: String,
+            },
+            File {
+                path: PathBuf,
+            },
+            Vault {
+                mount: String,
+                path: String,
+                key: String,
+            },
+            ProviderSpecific {
+                scheme: String,
+                reference: String,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Text(String),
+            Tagged(TaggedSecretRef),
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Text(value) => SecretRef::parse(&value).map_err(serde::de::Error::custom),
+            Wire::Tagged(TaggedSecretRef::Env { name }) => Ok(SecretRef::Env { name }),
+            Wire::Tagged(TaggedSecretRef::File { path }) => Ok(SecretRef::File { path }),
+            Wire::Tagged(TaggedSecretRef::Vault { mount, path, key }) => {
+                Ok(SecretRef::Vault { mount, path, key })
+            }
+            Wire::Tagged(TaggedSecretRef::ProviderSpecific { scheme, reference }) => {
+                Ok(SecretRef::ProviderSpecific { scheme, reference })
             }
         }
     }
@@ -103,18 +177,26 @@ impl std::fmt::Debug for SecretBytes {
     }
 }
 
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
 /// Resolves [`SecretRef`] references.
+#[async_trait]
 pub trait SecretResolver: Send + Sync {
     /// Resolves a reference; errors mention the reference, never the value.
-    fn resolve(&self, reference: &SecretRef) -> Result<SecretBytes>;
+    async fn resolve(&self, reference: &SecretRef) -> Result<SecretBytes>;
 }
 
 /// Resolves `env:` and `file:` references.
 #[derive(Debug, Clone, Default)]
 pub struct EnvFileSecretResolver;
 
+#[async_trait]
 impl SecretResolver for EnvFileSecretResolver {
-    fn resolve(&self, reference: &SecretRef) -> Result<SecretBytes> {
+    async fn resolve(&self, reference: &SecretRef) -> Result<SecretBytes> {
         match reference {
             SecretRef::Env { name } => std::env::var(name)
                 .map(|value| SecretBytes::new(value.into_bytes()))
@@ -141,6 +223,10 @@ impl SecretResolver for EnvFileSecretResolver {
                         .into_bytes(),
                 ))
             }
+            SecretRef::Vault { .. } => Err(AcmeError::Configuration(format!(
+                "secret {} requires a vault resolver",
+                reference.describe()
+            ))),
             SecretRef::ProviderSpecific { .. } => Err(AcmeError::Configuration(format!(
                 "secret {} requires a provider-specific resolver",
                 reference.describe()
@@ -217,6 +303,10 @@ mod tests {
         assert!(matches!(
             SecretRef::parse("provider:aws-default:prod").unwrap(),
             SecretRef::ProviderSpecific { .. }
+        ));
+        assert!(matches!(
+            SecretRef::parse("vault:secret:acmex/webhook:token").unwrap(),
+            SecretRef::Vault { .. }
         ));
         assert!(SecretRef::parse("raw-token").is_err());
     }

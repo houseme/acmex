@@ -13,11 +13,11 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use super::account::{create_account, deactivate_account, get_account, update_account};
-use super::auth::{ApiKeySet, api_key_auth};
+use super::auth::{ApiKeySet, Authorizer, PermissionAuthorizer, api_key_auth};
 use super::certificate::{
     get_certificate, list_certificates, renew_certificate, revoke_certificate,
 };
-use super::health::{HealthCheck, health_handler};
+use super::health::{HealthCheck, diagnostics_handler, health_handler, ready_handler};
 use super::order::{create_order, get_order, list_orders, trigger_full_renewal};
 use super::webhook::{WebhookHandler, webhook_handler};
 use crate::AcmeClient;
@@ -57,6 +57,8 @@ pub struct AppState {
     pub tasks: Arc<RwLock<HashMap<String, TaskInfo>>>,
     /// List of authorized API keys for authentication.
     pub api_keys: Arc<ApiKeySet>,
+    /// Authorization policy for management API permissions.
+    pub authorizer: Arc<dyn Authorizer>,
     /// The certificate renewal scheduler.
     pub scheduler: Option<Arc<dyn RenewalScheduler>>,
     /// v0.9 aggregate repositories used by Application Service and API v1.
@@ -140,6 +142,7 @@ pub async fn start_server(
         webhook,
         tasks,
         api_keys,
+        authorizer: Arc::new(PermissionAuthorizer),
         scheduler,
         repositories: Some(repositories),
         application: Some(application),
@@ -165,6 +168,7 @@ pub async fn start_server(
         .route("/certificates/:id", get(get_certificate))
         .route("/certificates/:id/renew", post(renew_certificate))
         .route("/certificates/:id/revoke", post(revoke_certificate))
+        .route("/diagnostics", get(diagnostics_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             api_key_auth,
@@ -175,7 +179,9 @@ pub async fn start_server(
     ));
 
     // Combine all routes
-    let mut app = Router::new().route("/health", get(health_handler));
+    let mut app = Router::new()
+        .route("/health", get(health_handler))
+        .route("/ready", get(ready_handler));
     if !api_enabled {
         tracing::warn!("ACMEX_API_KEYS not set; management API routes are disabled");
     } else {
