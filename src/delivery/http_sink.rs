@@ -208,14 +208,24 @@ impl CertificateSink for HttpAgentSink {
     }
 
     async fn health_check(&self, staged: &StagedDeployment) -> Result<DeploymentHealth> {
-        let response = self
+        let response = match self
             .request(
                 reqwest::Method::GET,
                 &self.url(&format!("/{}/health", staged.version_id)),
                 None,
                 None,
             )
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            // Transient outages are Unknown, never Unhealthy: an unreachable
+            // agent must not trigger rollbacks or fail the health gate.
+            Err(err) => {
+                return Ok(DeploymentHealth::Unknown(format!(
+                    "agent unreachable: {err}"
+                )));
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             return Ok(DeploymentHealth::Unknown(format!(
