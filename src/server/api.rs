@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use super::account::{create_account, deactivate_account, get_account, update_account};
-use super::auth::api_key_auth;
+use super::auth::{ApiKeySet, api_key_auth};
 use super::certificate::{
     get_certificate, list_certificates, renew_certificate, revoke_certificate,
 };
@@ -56,7 +56,7 @@ pub struct AppState {
     /// Thread-safe tracker for background tasks.
     pub tasks: Arc<RwLock<HashMap<String, TaskInfo>>>,
     /// List of authorized API keys for authentication.
-    pub api_keys: Arc<Vec<String>>,
+    pub api_keys: Arc<ApiKeySet>,
     /// The certificate renewal scheduler.
     pub scheduler: Option<Arc<dyn RenewalScheduler>>,
     /// v0.9 aggregate repositories used by Application Service and API v1.
@@ -102,7 +102,7 @@ pub async fn start_server(
     // Load API keys from environment variable ACMEX_API_KEYS (comma separated).
     // Without explicit credentials only the unauthenticated health route is
     // exposed; management APIs are not mounted with a default key.
-    let api_keys: Vec<String> = std::env::var("ACMEX_API_KEYS")
+    let api_keys = std::env::var("ACMEX_API_KEYS")
         .ok()
         .map(|value| {
             value
@@ -110,10 +110,10 @@ pub async fn start_server(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let api_keys = Arc::new(api_keys);
+    let api_keys = Arc::new(ApiKeySet::from_plaintext_keys(api_keys));
     let api_enabled = !api_keys.is_empty();
 
     let scheduler_loop = scheduler.clone();

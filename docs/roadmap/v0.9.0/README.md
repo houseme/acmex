@@ -1,9 +1,9 @@
 # AcmeX v0.9.0 架构演进实施路线图
 
-**状态**：待实施
-**基线**：`main@de078b0`
+**状态**：部分实现；T01-T09 已合并，T10-T12 尚未完成
+**基线**：`main@3ead534`
 **目标**：建立可恢复、可扩展、可安全接入上下游的证书生命周期控制平面
-**最后更新**：2026-08-31
+**最后更新**：2026-09-01
 
 ---
 
@@ -23,6 +23,7 @@
 架构总纲：
 
 - [AcmeX 当前功能、架构评估与目标架构设计](../../ACMEX_CURRENT_STATE_AND_TARGET_ARCHITECTURE_ZH.md)
+- [v0.9.0 实现状态核查](./IMPLEMENTATION_STATUS_AUDIT.md)
 
 ---
 
@@ -65,20 +66,20 @@ v0.9.0 的主题不是继续增加 Provider 数量，而是完成以下可运行
 
 ## 4. 子任务清单
 
-| ID | 任务 | 主要产出 | 前置依赖 | 建议里程碑 |
-|---|---|---|---|---|
-| T01 | [强类型领域模型与策略规划](./T01_DOMAIN_MODEL_AND_POLICY.md) | Identifier、Intent、Lineage、兼容矩阵 | 无 | M1 |
-| T02 | [Repository、数据模型与迁移](./T02_REPOSITORY_AND_MIGRATION.md) | 持久化实体、CAS、迁移、FileStorage 修复 | T01 | M1 |
-| T03 | [持久化 Operation 与 Workflow Engine](./T03_DURABLE_WORKFLOW_ENGINE.md) | Step、Lease、Retry、Resume、Cancel | T01、T02 | M2 |
-| T04 | [CA Backend 与 ACME 协议生产化](./T04_CA_BACKEND_AND_PROTOCOL.md) | CA Session、badNonce、Retry-After、Profiles、ARI | T01 | M2 |
-| T05 | [Challenge Session、Lease 与补偿清理](./T05_CHALLENGE_LIFECYCLE.md) | 每授权独立 Session、可靠 cleanup | T01、T03 | M2 |
-| T06 | [DNS Provider Factory、Zone 与传播确认](./T06_DNS_PROVIDER_AND_PROPAGATION.md) | Provider 装配、SOA/CNAME/NS、quorum | T05 | M3 |
-| T07 | [HTTP/TLS Edge 与 RFC 8738 IP 支持](./T07_HTTP_TLS_AND_IP_VALIDATION.md) | Edge Presenter、IPv4/IPv6、TLS reverse SNI | T01、T04、T05 | M3 |
-| T08 | [Application Service 与 API/CLI 统一](./T08_APPLICATION_SERVICE_AND_API.md) | 统一用例、API v1、移除模拟逻辑 | T02、T03、T04、T05 | M3 |
-| T09 | [ARI 驱动续签控制器](./T09_RENEWAL_CONTROLLER.md) | Window、jitter、Lease、优先级续签 | T02、T03、T04、T08 | M4 |
-| T10 | [KeyProvider 与 Certificate Sink](./T10_KEY_PROVIDER_AND_SINKS.md) | Managed/External Key、版本部署、回滚 | T01、T02、T08 | M4 |
-| T11 | [安全、可观测性与多实例强化](./T11_SECURITY_OBSERVABILITY_HA.md) | SecretRef、审计、SLO、分布式 Lease | T02、T03、T08 | M5 |
-| T12 | [E2E、故障注入与发布门槛](./T12_E2E_AND_RELEASE_GATES.md) | Pebble E2E、恢复测试、发布检查 | T01-T11 | M5 |
+| ID | 任务 | 主要产出 | 前置依赖 | 建议里程碑 | 当前状态 |
+|---|---|---|---|---|---|
+| T01 | [强类型领域模型与策略规划](./T01_DOMAIN_MODEL_AND_POLICY.md) | Identifier、Intent、Lineage、兼容矩阵 | 无 | M1 | 已合并 |
+| T02 | [Repository、数据模型与迁移](./T02_REPOSITORY_AND_MIGRATION.md) | 持久化实体、CAS、迁移、FileStorage 修复 | T01 | M1 | 已合并 |
+| T03 | [持久化 Operation 与 Workflow Engine](./T03_DURABLE_WORKFLOW_ENGINE.md) | Step、Lease、Retry、Resume、Cancel | T01、T02 | M2 | 已合并 |
+| T04 | [CA Backend 与 ACME 协议生产化](./T04_CA_BACKEND_AND_PROTOCOL.md) | CA Session、badNonce、Retry-After、Profiles、ARI | T01 | M2 | 已合并 |
+| T05 | [Challenge Session、Lease 与补偿清理](./T05_CHALLENGE_LIFECYCLE.md) | 每授权独立 Session、可靠 cleanup | T01、T03 | M2 | 已合并 |
+| T06 | [DNS Provider Factory、Zone 与传播确认](./T06_DNS_PROVIDER_AND_PROPAGATION.md) | Provider 装配、SOA/CNAME/NS、quorum | T05 | M3 | 已合并 |
+| T07 | [HTTP/TLS Edge 与 RFC 8738 IP 支持](./T07_HTTP_TLS_AND_IP_VALIDATION.md) | Edge Presenter、IPv4/IPv6、TLS reverse SNI | T01、T04、T05 | M3 | 已合并 |
+| T08 | [Application Service 与 API/CLI 统一](./T08_APPLICATION_SERVICE_AND_API.md) | 统一用例、API v1、移除模拟逻辑 | T02、T03、T04、T05 | M3 | 已合并 |
+| T09 | [ARI 驱动续签控制器](./T09_RENEWAL_CONTROLLER.md) | Window、jitter、Lease、优先级续签 | T02、T03、T04、T08 | M4 | 已合并 |
+| T10 | [KeyProvider 与 Certificate Sink](./T10_KEY_PROVIDER_AND_SINKS.md) | Managed/External Key、版本部署、回滚 | T01、T02、T08 | M4 | 未完成 |
+| T11 | [安全、可观测性与多实例强化](./T11_SECURITY_OBSERVABILITY_HA.md) | SecretRef、审计、SLO、分布式 Lease | T02、T03、T08 | M5 | 部分完成 |
+| T12 | [E2E、故障注入与发布门槛](./T12_E2E_AND_RELEASE_GATES.md) | Pebble E2E、恢复测试、发布检查 | T01-T11 | M5 | 未完成 |
 
 ---
 
@@ -233,4 +234,3 @@ v0.9.0 默认不包含：
 - DNS/HTTP/TLS Challenge 均可证明最终清理。
 - 续签不覆盖旧版本，不会因多实例重复执行。
 - 文档不再将占位或模拟路径描述为已完成能力。
-

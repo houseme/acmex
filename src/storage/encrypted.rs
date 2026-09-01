@@ -4,7 +4,6 @@ use crate::error::{AcmeError, Result};
 /// This module provides a transparent encryption layer for any `StorageBackend`,
 /// using AES-256-GCM to protect sensitive data at rest.
 use async_trait::async_trait;
-use rand::Rng;
 
 /// A storage wrapper that encrypts data before storing it in the underlying backend.
 /// It uses AES-256-GCM with a unique 12-byte nonce for each entry.
@@ -12,6 +11,13 @@ pub struct EncryptedStorage<B: StorageBackend> {
     /// The underlying storage backend.
     backend: B,
     /// The 32-byte symmetric key used for encryption and decryption.
+    #[cfg_attr(
+        all(not(feature = "aws-lc-rs"), not(feature = "ring-crypto")),
+        expect(
+            dead_code,
+            reason = "stored for crypto-enabled builds; no-crypto builds reject encryption calls"
+        )
+    )]
     key: [u8; 32],
 }
 
@@ -29,6 +35,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
         #[cfg(feature = "aws-lc-rs")]
         {
             use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+            use rand::Rng;
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
@@ -88,12 +95,12 @@ impl<B: StorageBackend> EncryptedStorage<B> {
             return Err(AcmeError::crypto("Ciphertext too short"));
         }
 
-        let (nonce_bytes, data) = ciphertext.split_at(12);
-        tracing::debug!("Decrypting data ({} bytes)", data.len());
-
         #[cfg(feature = "aws-lc-rs")]
         {
             use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+
+            let (nonce_bytes, data) = ciphertext.split_at(12);
+            tracing::debug!("Decrypting data ({} bytes)", data.len());
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
@@ -114,6 +121,9 @@ impl<B: StorageBackend> EncryptedStorage<B> {
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
             use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+
+            let (nonce_bytes, data) = ciphertext.split_at(12);
+            tracing::debug!("Decrypting data ({} bytes)", data.len());
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
                 .map_err(|_| AcmeError::crypto("Invalid encryption key"))?;
