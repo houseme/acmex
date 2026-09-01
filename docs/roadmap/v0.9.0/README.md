@@ -1,6 +1,6 @@
 # AcmeX v0.9.0 架构演进实施路线图
 
-**状态**：部分实现；T01-T09 已合并，T10-T12 尚未完成
+**状态**：T01-T12 代码与本地门槛已全部合并；L4/L5 外部环境证据(Pebble/真实 CA/云 Sink)按 KNOWN_LIMITATIONS 显式未执行
 **基线**：`main@3ead534`
 **目标**：建立可恢复、可扩展、可安全接入上下游的证书生命周期控制平面
 **最后更新**：2026-09-01
@@ -77,9 +77,9 @@ v0.9.0 的主题不是继续增加 Provider 数量，而是完成以下可运行
 | T07 | [HTTP/TLS Edge 与 RFC 8738 IP 支持](./T07_HTTP_TLS_AND_IP_VALIDATION.md) | Edge Presenter、IPv4/IPv6、TLS reverse SNI | T01、T04、T05 | M3 | 已合并 |
 | T08 | [Application Service 与 API/CLI 统一](./T08_APPLICATION_SERVICE_AND_API.md) | 统一用例、API v1、移除模拟逻辑 | T02、T03、T04、T05 | M3 | 已合并 |
 | T09 | [ARI 驱动续签控制器](./T09_RENEWAL_CONTROLLER.md) | Window、jitter、Lease、优先级续签 | T02、T03、T04、T08 | M4 | 已合并 |
-| T10 | [KeyProvider 与 Certificate Sink](./T10_KEY_PROVIDER_AND_SINKS.md) | Managed/External Key、版本部署、回滚 | T01、T02、T08 | M4 | 未完成 |
-| T11 | [安全、可观测性与多实例强化](./T11_SECURITY_OBSERVABILITY_HA.md) | SecretRef、审计、SLO、分布式 Lease | T02、T03、T08 | M5 | 部分完成 |
-| T12 | [E2E、故障注入与发布门槛](./T12_E2E_AND_RELEASE_GATES.md) | Pebble E2E、恢复测试、发布检查 | T01-T11 | M5 | 未完成 |
+| T10 | [KeyProvider 与 Certificate Sink](./T10_KEY_PROVIDER_AND_SINKS.md) | Managed/External Key、版本部署、回滚 | T01、T02、T08 | M4 | 已合并(#201/#202/#204/#206) |
+| T11 | [安全、可观测性与多实例强化](./T11_SECURITY_OBSERVABILITY_HA.md) | SecretRef、审计、SLO、分布式 Lease | T02、T03、T08 | M5 | 已合并(#200/#205) |
+| T12 | [E2E、故障注入与发布门槛](./T12_E2E_AND_RELEASE_GATES.md) | Pebble E2E、恢复测试、发布检查 | T01-T11 | M5 | 已合并(#203;Pebble/L4/L5 待环境执行) |
 
 ---
 

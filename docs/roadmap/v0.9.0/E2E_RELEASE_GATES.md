@@ -37,7 +37,9 @@ repositories and fake executors.
 Current `origin/main` includes `src/key`, `src/delivery`,
 `tests/key_provider_test.rs`, and `tests/certificate_sink_contract.rs`. Those
 are local contract gates for managed keys, external CSR validation, File Sink,
-and a fake agent sink. They are not yet live L4/L5 deployment evidence.
+and a fake agent sink. `tests/http_agent_sink_test.rs` (PR #206) additionally covers the HTTP agent
+sink against a live local fake agent. These are not yet live L4/L5 deployment
+evidence.
 
 ## L4/L5 Gates
 
