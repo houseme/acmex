@@ -2,70 +2,377 @@ openapi: 3.0.3
 info:
   title: AcmeX API
   description: Enterprise ACME v2 management API for automated TLS certificate lifecycle.
-  version: 0.7.0
+  version: 0.9.0
 servers:
-  - url: http://localhost:8080/api
-    description: Default server
+  - url: http://localhost:8080/api/v1
+    description: Certificate lifecycle API v1
 paths:
-  /accounts:
+  /certificate-intents:
+    get:
+      summary: List certificate intents
+      responses:
+        '200':
+          description: Intent list
     post:
-      summary: Create a new ACME account
+      summary: Create a certificate intent
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIntentRequest'
       responses:
         '201':
-          description: Account created
-  /orders:
+          description: Intent created or idempotently replayed
+        '400':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+  /certificate-intents/{id}:
     get:
-      summary: List all active tasks/orders
+      summary: Get a certificate intent
+      parameters:
+        - $ref: '#/components/parameters/IntentId'
       responses:
         '200':
-          description: List of tasks
+          description: Intent
+    patch:
+      summary: Patch a certificate intent
+      parameters:
+        - $ref: '#/components/parameters/IntentId'
+      responses:
+        '400':
+          $ref: '#/components/responses/Problem'
+  /certificate-intents/{id}/issue:
     post:
-      summary: Create a new certificate order
+      summary: Create an issuance operation for an intent
+      parameters:
+        - $ref: '#/components/parameters/IntentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '202':
-          description: Order accepted, task started
-  /orders/{id}:
+          $ref: '#/components/responses/OperationAccepted'
+  /certificate-lineages/{id}:
     get:
-      summary: Get status of a specific order/task
+      summary: Get a certificate lineage
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: '#/components/parameters/LineageId'
       responses:
         '200':
-          description: Task info
-  /orders/renew-all:
+          description: Lineage
+  /certificate-lineages/{id}/renew:
     post:
-      summary: Trigger renewal for all managed certificates
+      summary: Create a renewal operation for a lineage
+      parameters:
+        - $ref: '#/components/parameters/LineageId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force:
+                  type: boolean
+                  default: false
       responses:
         '202':
-          description: Renewal triggered
-  /certificates:
+          $ref: '#/components/responses/OperationAccepted'
+  /certificate-lineages/{id}/versions:
     get:
-      summary: List managed certificates
-      responses:
-        '200':
-          description: List of bundles
-  /certificates/{id}:
-    get:
-      summary: Download certificate bundle
+      summary: List immutable versions for a lineage
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+        - $ref: '#/components/parameters/LineageId'
       responses:
         '200':
-          description: Certificate and key PEM
+          description: Version list
+  /certificate-versions/{id}:
+    get:
+      summary: Get a certificate version without private key material
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          description: Version
+  /certificate-versions/{id}/chain:
+    get:
+      summary: Get the PEM certificate chain for a version
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          description: Certificate chain only
+  /certificate-versions/{id}/deploy:
+    post:
+      summary: Create a deployment operation for a version
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+  /certificate-versions/{id}/revoke:
+    post:
+      summary: Create a revocation operation for a version
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          $ref: '#/components/responses/OperationAccepted'
+  /operations:
+    get:
+      summary: List operations
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Operation list
+  /operations/{id}:
+    get:
+      summary: Get operation status
+      parameters:
+        - $ref: '#/components/parameters/OperationId'
+      responses:
+        '200':
+          description: Operation
+  /operations/{id}/cancel:
+    post:
+      summary: Request operation cancellation
+      parameters:
+        - $ref: '#/components/parameters/OperationId'
+      responses:
+        '200':
+          description: Updated operation
 components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+    IntentId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^int_'
+    LineageId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^lin_'
+    VersionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^ver_'
+    OperationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^op_'
+  responses:
+    OperationAccepted:
+      description: Durable operation accepted
+      headers:
+        Location:
+          schema:
+            type: string
+          description: URL of the operation status resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OperationView'
+    Problem:
+      description: RFC 7807 problem response with AcmeX stable error code
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    CreateIntentRequest:
+      type: object
+      required:
+        - identifiers
+      properties:
+        identifiers:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        ca_policy:
+          type: object
+        validation_policy:
+          type: object
+        key_policy:
+          type: object
+        renewal_policy:
+          type: object
+        delivery_targets:
+          type: array
+          items:
+            type: object
+    IntentView:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - identifiers
+        - generation
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        identifiers:
+          type: array
+          items:
+            type: string
+        generation:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    VersionView:
+      type: object
+      required:
+        - id
+        - lineage_id
+        - identifiers
+        - serial
+        - not_before
+        - not_after
+        - issued_by
+        - state
+        - key_provider
+        - key_id
+      properties:
+        id:
+          type: string
+        lineage_id:
+          type: string
+        identifiers:
+          type: array
+          items:
+            type: string
+        serial:
+          type: string
+        not_before:
+          type: string
+        not_after:
+          type: string
+        issued_by:
+          type: string
+        state:
+          type: string
+        key_provider:
+          type: string
+        key_id:
+          type: string
+      not:
+        required:
+          - private_key
+    OperationView:
+      type: object
+      required:
+        - id
+        - kind
+        - status
+        - progress
+        - created_at
+        - updated_at
+        - cancel_allowed
+        - subject
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [issue, renew, revoke, deploy, challenge_cleanup]
+        status:
+          type: string
+          enum:
+            - queued
+            - running
+            - waiting
+            - succeeded
+            - failed
+            - cancel_requested
+            - cancelled
+            - compensating
+            - compensation_failed
+        current_step:
+          type: string
+        progress:
+          type: number
+          format: float
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        retry_at:
+          type: string
+          format: date-time
+        cancel_allowed:
+          type: boolean
+        subject:
+          type: object
+        error_code:
+          type: string
+    Problem:
+      type: object
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - error_code
+        - retryable
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        error_code:
+          type: string
+        retryable:
+          type: boolean
+        operation_id:
+          type: string
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
       in: header
       name: X-API-Key
 security:
-  - ApiKeyAuth: [ ]
-
+  - ApiKeyAuth: []
