@@ -38,9 +38,11 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod crypto;
+pub mod delivery;
 pub mod dns;
 pub mod domain;
 pub mod error;
+pub mod key;
 pub mod metrics;
 pub mod notifications;
 pub mod orchestrator;
@@ -77,6 +79,11 @@ pub use config::{
     AcmeSettings, ChallengeSettings, Config, FileRepositoryConfig, MigrationSettings,
     RenewalSettings, RepositorySettings, StorageSettings,
 };
+pub use delivery::{
+    CertificateMaterial, CertificateMaterialBuilder, CertificateMaterialRef, CertificateSink,
+    CleanupOutcome, DeploymentHealth, DeploymentSpec, FakeAgentCertificateSink,
+    FileCertificateSink, StagedDeployment,
+};
 #[cfg(feature = "dns-alibaba")]
 pub use dns::AlibabaCloudDnsProvider;
 #[cfg(feature = "dns-azure")]
@@ -101,10 +108,15 @@ pub use dns::Route53DnsProvider;
 pub use dns::TencentCloudDnsProvider;
 pub use domain::{
     CaPolicy, CertificateIntent, CertificateLineage, CertificateVersion, ChallengeSet,
-    DnsIdentifier, IdentifierSet, KeyPolicy, KeyRef, RenewalPolicy, ValidationPolicy,
-    compatible_challenges, validate_order_policy,
+    DeliveryRequirement, DeliveryTargetKind, DeploymentId, DnsIdentifier, IdentifierSet,
+    KeyAlgorithm, KeyId, KeyManagementMode, KeyPolicy, KeyRef, LineageId, RenewalPolicy, TargetId,
+    ValidationPolicy, VersionId, VersionState, compatible_challenges, validate_order_policy,
 };
 pub use error::{AcmeError, Result};
+pub use key::{
+    CreateCsr, CreateKey, CsrArtifact, DestroyOutcome, ExportAuthorization, ExternalCsr,
+    KeyProvider, PublicKeyInfo, SecretBytes, SoftwareKeyProvider,
+};
 pub use metrics::{HealthStatus, MetricsRegistry};
 pub use notifications::{EventType, WebhookClient, WebhookConfig, WebhookEvent, WebhookManager};
 pub use orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator};
@@ -145,11 +157,17 @@ pub mod prelude {
         },
         certificate::{CertificateChain, CertificateSubjectAltNames},
         crypto::{Base64Encoding, Sha256Hash},
+        delivery::{
+            CertificateMaterialBuilder, CertificateSink, DeploymentSpec, FakeAgentCertificateSink,
+            FileCertificateSink,
+        },
         domain::{
             CertificateIntent, CertificateLineage, CertificateVersion, DnsIdentifier, Identifier,
-            IdentifierSet, KeyRef, compatible_challenges, validate_order_policy,
+            IdentifierSet, KeyAlgorithm, KeyId, KeyManagementMode, KeyRef, LineageId, TargetId,
+            VersionId, VersionState, compatible_challenges, validate_order_policy,
         },
         error::{AcmeError, Result},
+        key::{KeyProvider, SecretBytes, SoftwareKeyProvider},
         orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator},
         order::{
             Authorization, CertificateRevocation, Challenge, FinalizationRequest, NewOrderRequest,
