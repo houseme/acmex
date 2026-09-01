@@ -1,0 +1,32 @@
+name: v0.9.0 release gates
+
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  local-release-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Unit and integration tests
+        run: cargo test
+      - name: All features check
+        run: cargo check --all-features
+      - name: No default features check
+        run: cargo check --no-default-features
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings
+      - name: Restart recovery matrix
+        run: scripts/run_restart_matrix.sh
+      - name: Docs, config, OpenAPI, feature matrix
+        run: scripts/verify_docs_and_openapi.sh
+      - name: Diff whitespace
+        run: git diff --check
