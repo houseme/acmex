@@ -22,6 +22,50 @@ pub enum OrchestrationStatus {
     Failed(String),
 }
 
+impl OrchestrationStatus {
+    /// Maps a durable [`OperationStatus`](crate::domain::OperationStatus)
+    /// onto the legacy orchestration view.
+    ///
+    /// The operation repository is the source of truth as of v0.9; this
+    /// mapping exists so old callers keep their status shape during the
+    /// migration period (roadmap T03/T08).
+    pub fn from_operation(
+        status: crate::domain::OperationStatus,
+        steps_completed: usize,
+        steps_total: usize,
+    ) -> Self {
+        let progress = if steps_total == 0 {
+            1.0
+        } else {
+            steps_completed as f32 / steps_total as f32
+        };
+        match status {
+            crate::domain::OperationStatus::Queued => OrchestrationStatus::Pending,
+            crate::domain::OperationStatus::Running => OrchestrationStatus::InProgress {
+                progress,
+                message: "running".to_string(),
+            },
+            crate::domain::OperationStatus::Waiting => OrchestrationStatus::InProgress {
+                progress,
+                message: "waiting for external event".to_string(),
+            },
+            crate::domain::OperationStatus::Succeeded => OrchestrationStatus::Completed,
+            crate::domain::OperationStatus::Failed
+            | crate::domain::OperationStatus::CompensationFailed => {
+                OrchestrationStatus::Failed(format!("{:?}", status))
+            }
+            crate::domain::OperationStatus::CancelRequested
+            | crate::domain::OperationStatus::Compensating => OrchestrationStatus::InProgress {
+                progress,
+                message: "cancelling".to_string(),
+            },
+            crate::domain::OperationStatus::Cancelled => {
+                OrchestrationStatus::Failed("cancelled".to_string())
+            }
+        }
+    }
+}
+
 /// Orchestrator trait for executing workflows
 #[async_trait]
 pub trait Orchestrator: Send + Sync {

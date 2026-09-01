@@ -51,6 +51,7 @@ pub mod server;
 pub mod storage;
 pub mod transport;
 pub mod types;
+pub mod workflow;
 
 // Re-exports for convenience
 pub use account::{Account, AccountManager, KeyPair, KeyRollover};
@@ -110,6 +111,7 @@ pub use storage::{EncryptedStorage, FileStorage};
 pub use types::{
     AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,
 };
+pub use workflow::{EngineConfig, StepExecutor, StepResult, WorkflowEngine};
 
 /// Prelude module with commonly used types
 pub mod prelude {
