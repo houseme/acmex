@@ -76,8 +76,12 @@ impl StorageBackend for FileStorage {
         {
             let file_name = entry.file_name();
             let file_name = file_name.to_string_lossy();
-            if file_name.starts_with(prefix) {
-                keys.push(file_name.to_string());
+            // `store()` appends a `.bin` suffix; strip it so returned keys can
+            // be fed straight back into `load()` (before 0.9 the suffix was
+            // leaked, making every listed key unreadable).
+            let key = file_name.strip_suffix(".bin").unwrap_or(&file_name);
+            if key.starts_with(prefix) {
+                keys.push(key.to_string());
             }
         }
 

@@ -16,20 +16,33 @@
 //! The domain layer depends only on `serde`, hashing and `std` — never on
 //! Axum, Redis, cloud SDKs or `reqwest`.
 
+pub mod account;
 pub mod certificate;
+pub mod challenge;
+pub mod deployment;
 pub mod identifiers;
 pub mod ids;
 pub mod intent;
 pub mod operation;
 pub mod policy;
 
+pub use account::{AccountRecord, AccountStatus};
 pub use certificate::{
     CertificateLineage, CertificateVersion, ImportedBundle, KeyRef, VersionState,
 };
+pub use challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
+pub use deployment::{DeploymentRecord, DeploymentState};
 pub use identifiers::{DnsIdentifier, Identifier, IdentifierError, IdentifierKind, IdentifierSet};
-pub use ids::{IntentId, KeyId, LineageId, OperationId, TargetId, TenantId, VersionId};
+pub use ids::{
+    ChallengeLeaseId, DeploymentId, IntentId, KeyId, LineageId, OperationId, TargetId, TenantId,
+    VersionId,
+};
 pub use intent::{CertificateIntent, IntentCreation};
-pub use operation::{OperationKind, OperationRef, OperationSubject};
+pub use operation::{
+    ClassifiedError, CompensationState, ErrorClass, OperationKind, OperationRecord, OperationRef,
+    OperationStatus, OperationSubject, StableErrorCode, StepRecord, StepStatus, WorkflowStepKind,
+    error_codes,
+};
 pub use policy::{
     CaEnvironment, CaPolicy, ChallengeExclusion, ChallengeSet, DeliveryRequirement, DeliveryTarget,
     DeliveryTargetKind, ExclusionReason, KeyAlgorithm, KeyManagementMode, KeyPolicy,

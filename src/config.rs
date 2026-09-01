@@ -21,6 +21,10 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageSettings,
 
+    /// Repository (v0.9 domain persistence) settings.
+    #[serde(default)]
+    pub repository: RepositorySettings,
+
     /// Challenge solving settings.
     #[serde(default)]
     pub challenge: ChallengeSettings,
@@ -139,7 +143,73 @@ pub struct ExternalAccountBinding {
     pub hmac_key: String,
 }
 
-/// Storage backend settings.
+/// Repository settings for the v0.9 domain persistence layer.
+///
+/// The repository stores intents, lineages, versions, operations, leases
+/// and outbox events; it is separate from (and supersedes, for new code)
+/// the legacy `storage` KV settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositorySettings {
+    /// Repository backend: "memory" or "file".
+    #[serde(default = "default_repository_backend")]
+    pub backend: String,
+
+    /// File backend configuration (required when backend = "file").
+    #[serde(default)]
+    pub file: Option<FileRepositoryConfig>,
+
+    /// Optional namespace prefix (reserved for multi-tenant deployments).
+    #[serde(default)]
+    pub namespace: Option<String>,
+
+    /// Legacy-data migration mode applied at startup.
+    #[serde(default)]
+    pub migration: MigrationSettings,
+}
+
+impl Default for RepositorySettings {
+    fn default() -> Self {
+        Self {
+            backend: default_repository_backend(),
+            file: None,
+            namespace: None,
+            migration: MigrationSettings::default(),
+        }
+    }
+}
+
+fn default_repository_backend() -> String {
+    "memory".to_string()
+}
+
+/// File repository configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileRepositoryConfig {
+    /// Root directory for all repository aggregates.
+    pub path: String,
+}
+
+/// Legacy migration settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationSettings {
+    /// "off" (default), "dry-run", "execute" or "verify-only".
+    #[serde(default = "default_migration_mode")]
+    pub mode: String,
+}
+
+impl Default for MigrationSettings {
+    fn default() -> Self {
+        Self {
+            mode: default_migration_mode(),
+        }
+    }
+}
+
+fn default_migration_mode() -> String {
+    "off".to_string()
+}
+
+/// Storage backend settings for certificate and account data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSettings {
     /// Storage backend type: "file", "redis", "encrypted".
