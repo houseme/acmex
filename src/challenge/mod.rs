@@ -8,7 +8,9 @@ use async_trait::async_trait;
 pub mod cleanup;
 pub mod dns01;
 pub mod dns_cache;
+pub mod edge;
 pub mod http01;
+pub mod http01_presenter;
 pub mod presenter;
 pub mod session;
 pub mod steps;
@@ -17,7 +19,12 @@ pub mod tls_alpn01;
 pub use cleanup::{ChallengeCleanupScanner, ScanOutcome};
 pub use dns_cache::{CachingDnsResolver, DnsCache};
 pub use dns01::{Dns01Solver, DnsProvider, MockDnsProvider};
+pub use edge::{
+    FakeHttpEdge, FakeTlsEdge, HttpChallengeEdge, HttpChallengeRoute, HttpRouteLease,
+    HttpRouteState, TlsChallengeEdge, TlsChallengeRoute, TlsRouteLease, TlsRouteState,
+};
 pub use http01::Http01Solver;
+pub use http01_presenter::{Http01Presenter, TokenRegistry, http01_host_header, http01_url};
 pub use presenter::{
     ChallengePresenter, CleanupOutcome, LegacySolverPresenter, MemoryPresenter,
     MemoryPresenterBehavior, Observation, PrepareChallenge, PresenterRegistry,
@@ -28,7 +35,10 @@ pub use steps::{
     EnsureAccountStep, LoadAuthorizationsStep, PrepareChallengesStep, WaitAuthorizationsStep,
     WaitPropagationStep, cleanup_operation_leases,
 };
-pub use tls_alpn01::TlsAlpn01Solver;
+pub use tls_alpn01::{
+    ACME_TLS_ALPN_PROTOCOL, TlsAlpn01Presenter, TlsAlpn01Solver, ValidationCertificate,
+    build_tls_alpn_validation_cert, ip_validation_sni, tls_alpn_validation_sni,
+};
 
 /// Trait for implementing different challenge types
 #[async_trait]

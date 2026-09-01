@@ -57,10 +57,14 @@ pub mod workflow;
 // Re-exports for convenience
 pub use account::{Account, AccountManager, KeyPair, KeyRollover};
 pub use ca::{CAConfig, CertificateAuthority, Environment};
-pub use certificate::CertificateChain;
+pub use certificate::{CertificateChain, CertificateSubjectAltNames};
 pub use challenge::{
-    CachingDnsResolver, ChallengeSolver, ChallengeSolverRegistry, Dns01Solver, DnsCache,
-    DnsProvider, Http01Solver, MockDnsProvider, TlsAlpn01Solver,
+    ACME_TLS_ALPN_PROTOCOL, CachingDnsResolver, ChallengeSolver, ChallengeSolverRegistry,
+    Dns01Solver, DnsCache, DnsProvider, FakeHttpEdge, FakeTlsEdge, Http01Presenter, Http01Solver,
+    HttpChallengeEdge, HttpChallengeRoute, HttpRouteLease, HttpRouteState, MockDnsProvider,
+    TlsAlpn01Presenter, TlsAlpn01Solver, TlsChallengeEdge, TlsChallengeRoute, TlsRouteLease,
+    TlsRouteState, TokenRegistry, ValidationCertificate, build_tls_alpn_validation_cert,
+    http01_host_header, http01_url, ip_validation_sni, tls_alpn_validation_sni,
 };
 pub use client::{AcmeClient, AcmeConfig, CertificateBundle};
 pub use config::{
@@ -101,6 +105,7 @@ pub use orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator};
 pub use order::{
     Authorization, CertificateRevocation, Challenge, CsrGenerator, FinalizationRequest,
     NewOrderRequest, Order, OrderManager, parse_certificate_chain, verify_certificate_domains,
+    verify_certificate_identifiers,
 };
 pub use protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager};
 pub use renewal::{RenewalHook, SimpleRenewalScheduler};
@@ -119,7 +124,7 @@ pub mod prelude {
     pub use crate::{
         AcmeClient, AcmeConfig,
         account::{Account, AccountManager, KeyPair, KeyRollover},
-        certificate::CertificateChain,
+        certificate::{CertificateChain, CertificateSubjectAltNames},
         crypto::{Base64Encoding, Sha256Hash},
         domain::{
             CertificateIntent, CertificateLineage, CertificateVersion, DnsIdentifier, Identifier,
@@ -129,7 +134,7 @@ pub mod prelude {
         orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator},
         order::{
             Authorization, CertificateRevocation, Challenge, FinalizationRequest, NewOrderRequest,
-            Order,
+            Order, verify_certificate_identifiers,
         },
         protocol::{Directory, DirectoryManager, Jwk, JwsSigner, NonceManager},
         scheduler::{AdvancedRenewalScheduler, CleanupScheduler},
