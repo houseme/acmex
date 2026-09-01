@@ -30,6 +30,7 @@
 // Module declarations
 pub mod account;
 pub mod ca;
+pub mod ca_backend;
 pub mod certificate;
 pub mod challenge;
 pub mod cli;
