@@ -34,7 +34,10 @@ fn scenarios_from_env() -> BTreeSet<String> {
 }
 
 fn require_var(missing: &mut Vec<String>, name: &'static str) {
-    if std::env::var(name).map(|v| v.trim().is_empty()).unwrap_or(true) {
+    if std::env::var(name)
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
         missing.push(name.to_string());
     }
 }
@@ -120,9 +123,7 @@ fn live_infra_scope_doc_lists_every_gate() {
 #[ignore = "requires real DNS, Redis, sink, and dual-process validation assets"]
 async fn live_infra_preflight_manifest_gate() {
     if std::env::var("RUN_LIVE_INFRA").as_deref() != Ok("1") {
-        eprintln!(
-            "SKIP: RUN_LIVE_INFRA=1 not set; a skipped live infra run is not a release pass"
-        );
+        eprintln!("SKIP: RUN_LIVE_INFRA=1 not set; a skipped live infra run is not a release pass");
         return;
     }
 

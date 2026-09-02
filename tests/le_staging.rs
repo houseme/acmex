@@ -63,7 +63,11 @@ fn missing_required_env(scenarios: &BTreeSet<String>) -> Vec<&'static str> {
     }
     required
         .into_iter()
-        .filter(|name| std::env::var(name).map(|v| v.trim().is_empty()).unwrap_or(true))
+        .filter(|name| {
+            std::env::var(name)
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(true)
+        })
         .collect()
 }
 
@@ -117,9 +121,7 @@ fn le_staging_all_scenarios_are_named_in_the_roadmap() {
 #[ignore = "talks to Let's Encrypt staging and requires caller-owned validation assets"]
 async fn le_staging_preflight_and_manifest_gate() {
     if std::env::var("RUN_LE_STAGING").as_deref() != Ok("1") {
-        eprintln!(
-            "SKIP: RUN_LE_STAGING=1 not set; a skipped LE staging run is not a release pass"
-        );
+        eprintln!("SKIP: RUN_LE_STAGING=1 not set; a skipped LE staging run is not a release pass");
         return;
     }
 
@@ -148,7 +150,10 @@ async fn le_staging_preflight_and_manifest_gate() {
     let directory: serde_json::Value = response.json().await.expect("directory JSON");
     for key in ["newNonce", "newAccount", "newOrder"] {
         assert!(
-            directory.get(key).and_then(serde_json::Value::as_str).is_some(),
+            directory
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
             "directory must advertise `{key}`"
         );
     }
