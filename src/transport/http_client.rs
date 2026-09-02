@@ -1,6 +1,8 @@
 /// HTTP client implementation for AcmeX.
 /// This module wraps `reqwest` to provide a high-level interface for ACME protocol requests,
 /// including support for custom configurations and structured responses.
+use super::middleware::{Middleware, MiddlewareChain};
+use super::retry::RetryPolicy;
 use crate::error::Result;
 use std::time::Duration;
 
@@ -59,6 +61,8 @@ pub struct HttpClientConfig {
     pub user_agent: String,
     /// Whether to follow HTTP redirects.
     pub follow_redirects: bool,
+    /// Policy for retrying transient request failures.
+    pub retry_policy: RetryPolicy,
 }
 
 impl Default for HttpClientConfig {
@@ -68,8 +72,15 @@ impl Default for HttpClientConfig {
             pool_size: 10,
             user_agent: "AcmeX/0.7.0".to_string(),
             follow_redirects: true,
+            retry_policy: RetryPolicy::default(),
         }
     }
+}
+
+enum RequestBody {
+    Empty,
+    Raw(Vec<u8>),
+    Json(Vec<u8>),
 }
 
 /// A high-level HTTP client for ACME operations.
@@ -78,6 +89,8 @@ pub struct HttpClient {
     client: reqwest::Client,
     /// The client configuration.
     config: HttpClientConfig,
+    /// Request lifecycle middlewares.
+    middlewares: MiddlewareChain,
 }
 
 impl Default for HttpClient {
@@ -106,20 +119,31 @@ impl HttpClient {
                 crate::error::AcmeError::transport(format!("Failed to create client: {}", e))
             })?;
 
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            middlewares: MiddlewareChain::new(),
+        })
+    }
+
+    /// Adds a request lifecycle middleware to this client.
+    pub fn with_middleware<M: Middleware + 'static>(mut self, middleware: M) -> Self {
+        self.middlewares = self.middlewares.push(middleware);
+        self
     }
 
     /// Executes an asynchronous GET request.
     pub async fn get(&self, url: &str) -> Result<HttpResponse> {
         tracing::debug!("HTTP GET: {}", url);
-        self.execute_request(self.client.get(url)).await
+        self.execute_request(reqwest::Method::GET, url, RequestBody::Empty)
+            .await
     }
 
     /// Executes an asynchronous POST request with a raw byte body.
     pub async fn post(&self, url: &str, body: &[u8]) -> Result<HttpResponse> {
         tracing::debug!("HTTP POST: {} ({} bytes)", url, body.len());
-        let request = self.client.post(url).body(body.to_vec());
-        self.execute_request(request).await
+        self.execute_request(reqwest::Method::POST, url, RequestBody::Raw(body.to_vec()))
+            .await
     }
 
     /// Executes an asynchronous POST request with a JSON-serializable body.
@@ -129,18 +153,83 @@ impl HttpClient {
         body: &T,
     ) -> Result<HttpResponse> {
         tracing::debug!("HTTP POST JSON: {}", url);
-        let request = self.client.post(url).json(body);
-        self.execute_request(request).await
+        let body = serde_json::to_vec(body).map_err(|e| {
+            tracing::error!("Failed to serialize HTTP JSON request body: {}", e);
+            crate::error::AcmeError::transport(format!("JSON serialize error: {}", e))
+        })?;
+        self.execute_request(reqwest::Method::POST, url, RequestBody::Json(body))
+            .await
     }
 
     /// Executes an asynchronous HEAD request.
     pub async fn head(&self, url: &str) -> Result<HttpResponse> {
         tracing::debug!("HTTP HEAD: {}", url);
-        self.execute_request(self.client.head(url)).await
+        self.execute_request(reqwest::Method::HEAD, url, RequestBody::Empty)
+            .await
     }
 
     /// Internal helper to execute a request and transform the response.
-    async fn execute_request(&self, request: reqwest::RequestBuilder) -> Result<HttpResponse> {
+    async fn execute_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: RequestBody,
+    ) -> Result<HttpResponse> {
+        let retry_policy = self
+            .middlewares
+            .retry_policy()
+            .unwrap_or_else(|| self.config.retry_policy.clone());
+        let timeout = self.middlewares.timeout().unwrap_or(self.config.timeout);
+        let mut attempt = 0;
+
+        loop {
+            self.middlewares
+                .before_request(url, method.as_str())
+                .await?;
+            let request = self
+                .build_request(method.clone(), url, &body)
+                .timeout(timeout);
+
+            match Self::send_request(request).await {
+                Ok(response) => {
+                    self.middlewares.after_response(url, &response).await?;
+                    if retry_policy.should_retry(response.status, attempt) {
+                        tokio::time::sleep(retry_policy.retry_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    self.middlewares.on_error(url, &error).await?;
+                    if retry_policy.should_retry_transport_error(attempt) {
+                        tokio::time::sleep(retry_policy.retry_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn build_request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: &RequestBody,
+    ) -> reqwest::RequestBuilder {
+        let request = self.client.request(method, url);
+        match body {
+            RequestBody::Empty => request,
+            RequestBody::Raw(bytes) => request.body(bytes.clone()),
+            RequestBody::Json(bytes) => request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(bytes.clone()),
+        }
+    }
+
+    async fn send_request(request: reqwest::RequestBuilder) -> Result<HttpResponse> {
         let response = request.send().await.map_err(|e| {
             tracing::error!("Network request failed: {}", e);
             crate::error::AcmeError::transport(format!("Request failed: {}", e))
@@ -179,6 +268,13 @@ impl HttpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::middleware::RetryMiddleware;
+    use crate::transport::retry::RetryStrategy;
+    use axum::{Router, http::StatusCode, routing::get};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn test_http_response_status() {
@@ -199,5 +295,43 @@ mod tests {
         assert_eq!(client.config().user_agent, "AcmeX/0.7.0");
         assert_eq!(client.config().timeout.as_secs(), 30);
         assert!(client.config().follow_redirects);
+    }
+
+    #[tokio::test]
+    async fn http_client_retries_server_errors_with_middleware_policy() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let route_attempts = attempts.clone();
+        let app = Router::new().route(
+            "/unstable",
+            get(move || {
+                let route_attempts = route_attempts.clone();
+                async move {
+                    match route_attempts.fetch_add(1, Ordering::SeqCst) {
+                        0 => (StatusCode::INTERNAL_SERVER_ERROR, "try again"),
+                        _ => (StatusCode::OK, "ok"),
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = HttpClientConfig::default();
+        config.retry_policy.strategy = RetryStrategy::FixedDelay(Duration::ZERO);
+        let client = HttpClient::new(config)
+            .unwrap()
+            .with_middleware(RetryMiddleware::new(1));
+
+        let response = client
+            .get(&format!("http://{addr}/unstable"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.text().unwrap(), "ok");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

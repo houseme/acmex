@@ -76,6 +76,8 @@ pub struct RetryPolicy {
     pub retry_on_client_error: bool,
     /// Whether to retry requests that failed with a 5xx server error.
     pub retry_on_server_error: bool,
+    /// Whether to retry network/transport failures before a response arrives.
+    pub retry_on_transport_error: bool,
 }
 
 impl Default for RetryPolicy {
@@ -85,6 +87,7 @@ impl Default for RetryPolicy {
             strategy: RetryStrategy::default(),
             retry_on_client_error: false,
             retry_on_server_error: true,
+            retry_on_transport_error: true,
         }
     }
 }
@@ -117,6 +120,22 @@ impl RetryPolicy {
         }
 
         retry
+    }
+
+    /// Determines whether a transport failure should be retried for this attempt.
+    pub fn should_retry_transport_error(&self, attempt: u32) -> bool {
+        if attempt >= self.max_retries {
+            tracing::warn!("Maximum retry attempts ({}) reached", self.max_retries);
+            return false;
+        }
+
+        if self.retry_on_transport_error {
+            tracing::info!(
+                "Transport request failed, scheduling retry attempt {}",
+                attempt + 1
+            );
+        }
+        self.retry_on_transport_error
     }
 
     /// Returns the delay duration for the specified retry attempt.

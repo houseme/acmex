@@ -2,8 +2,10 @@
 /// This module defines the `Middleware` trait and `MiddlewareChain` to allow
 /// custom logic to be injected into the HTTP request lifecycle.
 use super::http_client::HttpResponse;
+use super::retry::{RetryPolicy, RetryStrategy};
 use crate::error::Result;
 use async_trait::async_trait;
+use std::time::Duration;
 
 /// A trait for objects that can intercept and process HTTP requests and responses.
 #[async_trait]
@@ -21,6 +23,16 @@ pub trait Middleware: Send + Sync {
     /// Called when an error occurs during the HTTP request lifecycle.
     async fn on_error(&self, _url: &str, _error: &crate::error::AcmeError) -> Result<()> {
         Ok(())
+    }
+
+    /// Optional per-request timeout override applied by `HttpClient`.
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Optional retry policy override applied by `HttpClient`.
+    fn retry_policy(&self) -> Option<RetryPolicy> {
+        None
     }
 }
 
@@ -68,6 +80,22 @@ impl MiddlewareChain {
         }
         Ok(())
     }
+
+    /// Returns the tightest timeout requested by registered middlewares.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.middlewares
+            .iter()
+            .filter_map(|middleware| middleware.timeout())
+            .min()
+    }
+
+    /// Returns the most recently registered retry policy override.
+    pub fn retry_policy(&self) -> Option<RetryPolicy> {
+        self.middlewares
+            .iter()
+            .rev()
+            .find_map(|middleware| middleware.retry_policy())
+    }
 }
 
 impl Default for MiddlewareChain {
@@ -111,10 +139,9 @@ impl Middleware for LoggingMiddleware {
     }
 }
 
-/// A middleware that enforces request timeouts (placeholder).
+/// A middleware that enforces per-request timeouts.
 pub struct TimeoutMiddleware {
     /// Timeout duration in seconds.
-    #[allow(dead_code)]
     timeout_secs: u64,
 }
 
@@ -123,20 +150,28 @@ impl TimeoutMiddleware {
     pub fn new(timeout_secs: u64) -> Self {
         Self { timeout_secs }
     }
+
+    /// Returns the configured timeout duration.
+    pub fn duration(&self) -> Duration {
+        Duration::from_secs(self.timeout_secs)
+    }
 }
 
 #[async_trait]
 impl Middleware for TimeoutMiddleware {
     async fn before_request(&self, url: &str, _method: &str) -> Result<()> {
-        tracing::debug!("Enforcing timeout for: {}", url);
+        tracing::debug!("Enforcing {:?} timeout for: {}", self.duration(), url);
         Ok(())
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        Some(self.duration())
     }
 }
 
-/// A middleware that handles automatic retries (placeholder).
+/// A middleware that configures automatic retries.
 pub struct RetryMiddleware {
     /// Maximum number of retries.
-    #[allow(dead_code)]
     max_retries: u32,
 }
 
@@ -144,6 +179,17 @@ impl RetryMiddleware {
     /// Creates a new `RetryMiddleware`.
     pub fn new(max_retries: u32) -> Self {
         Self { max_retries }
+    }
+
+    /// Builds the retry policy represented by this middleware.
+    pub fn policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            max_retries: self.max_retries,
+            strategy: RetryStrategy::default(),
+            retry_on_client_error: false,
+            retry_on_server_error: true,
+            retry_on_transport_error: true,
+        }
     }
 }
 
@@ -156,6 +202,10 @@ impl Middleware for RetryMiddleware {
             error
         );
         Ok(())
+    }
+
+    fn retry_policy(&self) -> Option<RetryPolicy> {
+        Some(self.policy())
     }
 }
 
@@ -187,5 +237,16 @@ mod tests {
         chain.before_request("http://example.com", "GET").await.ok();
 
         assert!(called.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn middleware_chain_exposes_transport_policies() {
+        let chain = MiddlewareChain::new()
+            .push(TimeoutMiddleware::new(10))
+            .push(TimeoutMiddleware::new(3))
+            .push(RetryMiddleware::new(5));
+
+        assert_eq!(chain.timeout(), Some(Duration::from_secs(3)));
+        assert_eq!(chain.retry_policy().unwrap().max_retries, 5);
     }
 }
