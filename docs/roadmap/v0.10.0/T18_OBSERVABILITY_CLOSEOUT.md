@@ -9,7 +9,7 @@
 
 ## 1. 背景与当前问题
 
-`SECURITY_OBSERVABILITY_HA.md` 的 "Metrics Exposure (2026-09-01)" 一节明确记录两处未完成，且 v0.9.0 审计"建议后续顺序"第 2 条列为 T11 收尾项：
+任务创建时，`SECURITY_OBSERVABILITY_HA.md` 的 "Metrics Exposure (2026-09-01)" 一节记录了两处未完成项，且 v0.9.0 审计"建议后续顺序"第 2 条将其列为 T11 收尾项。当前实现状态见第 7 节：
 
 1. **`acmex_repository_errors_total` 未打点**：Prometheus 规则示例中已有该指标的告警（`AcmeXRepositoryErrors`），但没有任何代码产出它——告警永远不触发，是"文档先于实现"的假信号。
 2. **Trace span 字段注入未接线**：Trace Convention（tenant_id/intent_id/lineage_id/operation_id/workflow_step/ca_id/challenge_type/provider_id/sink_id/request_id）只停留在文档，span 中没有这些字段；跨异步边界无法用 trace 关联一次签发的全链路。

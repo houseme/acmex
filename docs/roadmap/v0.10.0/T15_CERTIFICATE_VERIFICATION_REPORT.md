@@ -81,10 +81,19 @@ cargo check --all-features && cargo check --no-default-features
 
 ## 7. 验收标准
 
-- [ ] 报告六类检查齐备且持久化；`GET /api/v1/certificate-versions/{id}` 可查（无私钥泄漏）。
-- [ ] 篡改证书场景（错 SAN、断链、公钥不一致、超有效期、违反 profile）全部终态拒绝且报告逐项可解释。
-- [ ] IP intent 对仅 dns CA 在计划期被拒，不产生 ACME Order；有测试。
-- [ ] 私网/保留 IP 默认拒绝、显式豁免生效；豁免记录于报告。
-- [ ] `supports_identifier_type` 至少有一个生产调用点（非仅测试）。
-- [ ] OCSP 模拟实现已删除或决策已记录；文档不再含糊描述该能力。
-- [ ] 报告有序列化兼容测试；v0.9.0 审计第 6 条可标记关闭。
+- [x] 报告六类检查齐备且持久化；`GET /api/v1/certificate-versions/{id}` 可查（无私钥泄漏）。
+- [x] 篡改证书场景（错 SAN、断链、公钥不一致、超有效期、违反 profile）全部终态拒绝且报告逐项可解释。
+- [x] IP intent 对仅 dns CA 在计划期被拒，不产生 ACME Order；有测试。
+- [x] 私网/保留 IP 默认拒绝、显式豁免生效；豁免记录于报告。
+- [x] `supports_identifier_type` 至少有一个生产调用点（非仅测试）。
+- [x] OCSP 模拟实现已删除或决策已记录；文档不再含糊描述该能力。
+- [x] 报告有序列化兼容测试；v0.9.0 审计第 6 条可标记关闭。
+
+## 8. 当前实现记录（2026-09-02 T15 收口）
+
+- `CertificateVerificationReport` 已挂接到 `CertificateVersion`，报告包含 SAN、validity、chain trust、profile compliance、key consistency 与 identifier capability 六类检查。
+- `VerifyCertificateStep` 会在验收失败时以终态 policy error 拒绝，并在成功持久化版本时携带报告；API v1 version view 会返回该报告且不包含私钥。
+- `Plan`/order 前置路径已消费 `CaCapabilities::supports_identifier_type` 与 profile 广告；仅 DNS CA 的 IP intent 在计划期被拒，不创建 ACME order。
+- 私网/保留 IP 策略默认拒绝，显式豁免会进入验证报告；空 trust anchor 不再等价于跳过，只有显式 `skip_certificate_trust_check` 才记录 `not-checked`。
+- OCSP 模拟能力已从生产状态声明中移除；当前仅保留证书链解析上的 URL 提取/说明，不宣称真实 OCSP/CRL 状态检查。
+- 真实 CA 上的报告证据仍由 T19 执行；本任务只关闭代码级验收缺口。

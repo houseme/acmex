@@ -81,9 +81,17 @@ scripts/verify_docs_and_openapi.sh
 
 ## 7. 验收标准
 
-- [ ] PATCH intents 白名单更新生效；不可变字段返回稳定 error code（有测试），无 "not implemented" 残留于 `/api/v1`。
-- [ ] 进行中 Operation 的授权/挑战状态可经 API 与 CLI 查询，含状态、错误摘要、最后轮询时间；OpenAPI 同步。
-- [ ] legacy `/api` 响应带 Deprecation/Sunset header；迁移表文档合入。
-- [ ] revoke spine 有 Fake CA 行为测试（真实 backend 调用 + 拒绝分类）。
-- [ ] OpenAPI 双向校验进入常规测试集，豁免清单显式且非空需说明理由。
-- [ ] v0.9.0 审计第 7 条"仍缺 PATCH stub"与"建议后续顺序"第 1 条对应项可标记关闭。
+- [x] PATCH intents 白名单更新生效；不可变字段返回稳定 error code（有测试），无 "not implemented" 残留于 `/api/v1`。
+- [x] 进行中 Operation 的授权/挑战状态可经 API 与 CLI 查询，含状态、错误摘要、最后轮询时间；OpenAPI 同步。
+- [x] legacy `/api` 响应带 Deprecation/Sunset header；迁移表文档合入。
+- [x] revoke spine 有 Fake CA 行为测试（真实 backend 调用 + 拒绝分类）。
+- [x] OpenAPI 双向校验进入常规测试集，豁免清单显式且非空需说明理由。
+- [x] v0.9.0 审计第 7 条"仍缺 PATCH stub"与"建议后续顺序"第 1 条对应项可标记关闭。
+
+## 8. 当前实现记录（2026-09-02 T17 收口）
+
+- `PATCH /api/v1/certificate-intents/{id}` 已进入 router 与 Application Service，支持 `renewal_policy`、`delivery_targets` 白名单更新、`If-Match` generation guard 与 `Idempotency-Key`；不可变字段和空 patch 返回稳定 RFC 7807 error。
+- `/api/v1/operations/{id}/challenge-sessions` 暴露 token-safe challenge 状态，CLI `status` 通过 management API 展示 operation 与 challenge progress。
+- legacy `/api` 响应统一携带 `Deprecation: true`、`Sunset: Wed, 31 Mar 2027 23:59:59 GMT` 与迁移文档 Link；`docs/MIGRATION_v0.9.0.md`/`docs/MIGRATION_v0.10.0.md` 记录迁移表。
+- revoke spine 已有 Fake CA 成功与 CA 拒绝终态测试；`tests/issuance_spine_test.rs` 覆盖真实 `SubmitRevocationStep` 到 backend 的调用。
+- `tests/release_gate_docs.rs` 持续校验 `/api/v1` router 与 OpenAPI 路径、challenge observation 字段、legacy deprecation 文档契约。
