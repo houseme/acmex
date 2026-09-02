@@ -24,7 +24,7 @@ fn scenarios_from_env() -> BTreeSet<String> {
         .filter(|s| !s.is_empty())
         .flat_map(|s| {
             if s == "all" {
-                ALL_SCENARIOS.iter().copied().collect::<Vec<_>>()
+                ALL_SCENARIOS.to_vec()
             } else {
                 vec![s]
             }
