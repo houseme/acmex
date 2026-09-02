@@ -308,6 +308,210 @@ pub struct Dns01Config {
     /// DNS propagation timeout in seconds.
     #[serde(default = "default_dns_timeout")]
     pub propagation_timeout_secs: u64,
+    /// DNS propagation observation policy (absent = built-in defaults).
+    #[serde(default)]
+    pub propagation: Option<PropagationSettings>,
+}
+
+/// DNS-01 propagation observation settings
+/// (`[challenge.dns01.propagation]`).
+///
+/// Controls how AcmeX observes TXT propagation before acknowledging a
+/// DNS-01 challenge: which recursive resolvers are queried and the quorum
+/// required over authoritative and recursive answers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropagationSettings {
+    /// Quorum over authoritative nameservers: "all" or a positive integer.
+    #[serde(default = "default_authoritative_quorum")]
+    pub authoritative_quorum: QuorumSpec,
+    /// Recursive resolvers queried after the authoritative nameservers,
+    /// as `ip:port` (a bare IP defaults to port 53).
+    #[serde(default = "default_recursive_resolvers")]
+    pub recursive_resolvers: Vec<String>,
+    /// Quorum over recursive resolvers: "all" or a positive integer.
+    #[serde(default = "default_recursive_quorum")]
+    pub recursive_quorum: QuorumSpec,
+    /// First re-check interval while waiting for propagation, in seconds.
+    #[serde(default = "default_initial_interval_secs")]
+    pub initial_interval_secs: u64,
+    /// Upper bound of the exponential back-off between re-checks, in seconds.
+    #[serde(default = "default_max_interval_secs")]
+    pub max_interval_secs: u64,
+}
+
+impl Default for PropagationSettings {
+    fn default() -> Self {
+        Self {
+            authoritative_quorum: default_authoritative_quorum(),
+            recursive_resolvers: default_recursive_resolvers(),
+            recursive_quorum: default_recursive_quorum(),
+            initial_interval_secs: default_initial_interval_secs(),
+            max_interval_secs: default_max_interval_secs(),
+        }
+    }
+}
+
+impl PropagationSettings {
+    /// Maps the settings onto the propagation policy used by the observer.
+    ///
+    /// Bare resolver IPs are normalized to `ip:53` so downstream consumers
+    /// always see a full socket address.
+    pub fn to_policy(&self) -> crate::dns::propagation::PropagationPolicyV2 {
+        crate::dns::propagation::PropagationPolicyV2::from_parts(
+            self.authoritative_quorum.to_quorum(),
+            self.recursive_resolvers
+                .iter()
+                .map(|resolver| normalize_resolver(resolver))
+                .collect(),
+            self.recursive_quorum.to_quorum(),
+        )
+    }
+
+    /// Validates interval bounds and resolver addresses.
+    fn validate(&self) -> Result<()> {
+        if self.initial_interval_secs == 0 {
+            return Err(AcmeError::configuration(
+                "challenge.dns01.propagation.initial_interval_secs must be at least 1 second",
+            ));
+        }
+        if self.max_interval_secs < self.initial_interval_secs {
+            return Err(AcmeError::configuration(
+                "challenge.dns01.propagation.max_interval_secs must be greater than or equal to initial_interval_secs",
+            ));
+        }
+        if self.recursive_resolvers.is_empty() {
+            return Err(AcmeError::configuration(
+                "challenge.dns01.propagation.recursive_resolvers must list at least one resolver",
+            ));
+        }
+        for resolver in &self.recursive_resolvers {
+            let valid = resolver.parse::<std::net::SocketAddr>().is_ok()
+                || resolver.parse::<std::net::IpAddr>().is_ok();
+            if !valid {
+                return Err(AcmeError::configuration(format!(
+                    "challenge.dns01.propagation.recursive_resolvers entry `{resolver}` is not a valid ip[:port] address"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Quorum requirement as written in configuration: `"all"` or a count.
+///
+/// Config-layer mirror of [`crate::domain::Quorum`]; deserialization
+/// accepts the string `"all"` or a positive integer (>= 1) and rejects
+/// anything else with an explicit error message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuorumSpec {
+    /// All observed servers must agree.
+    All,
+    /// At least `n` observed servers must agree (n >= 1).
+    AtLeast(usize),
+}
+
+impl QuorumSpec {
+    /// Converts the spec into the domain quorum type.
+    pub fn to_quorum(&self) -> crate::domain::Quorum {
+        match self {
+            QuorumSpec::All => crate::domain::Quorum::All,
+            QuorumSpec::AtLeast(n) => crate::domain::Quorum::AtLeast(*n),
+        }
+    }
+}
+
+impl Serialize for QuorumSpec {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            QuorumSpec::All => serializer.serialize_str("all"),
+            QuorumSpec::AtLeast(n) => serializer.serialize_u64(*n as u64),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for QuorumSpec {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct QuorumSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for QuorumSpecVisitor {
+            type Value = QuorumSpec;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(r#"quorum "all" or a positive integer (>= 1)"#)
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value == "all" {
+                    Ok(QuorumSpec::All)
+                } else {
+                    Err(E::custom(format!(
+                        "invalid quorum value `{value}`: expected \"all\" or a positive integer (>= 1)"
+                    )))
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 1 {
+                    return Err(E::custom(format!(
+                        "invalid quorum value `{value}`: quorum must be a positive integer (>= 1)"
+                    )));
+                }
+                usize::try_from(value)
+                    .map(QuorumSpec::AtLeast)
+                    .map_err(|_| {
+                        E::custom(format!(
+                            "invalid quorum value `{value}`: quorum is too large"
+                        ))
+                    })
+            }
+
+            fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 1 {
+                    return Err(E::custom(format!(
+                        "invalid quorum value `{value}`: quorum must be a positive integer (>= 1)"
+                    )));
+                }
+                usize::try_from(value)
+                    .map(QuorumSpec::AtLeast)
+                    .map_err(|_| {
+                        E::custom(format!(
+                            "invalid quorum value `{value}`: quorum is too large"
+                        ))
+                    })
+            }
+        }
+
+        deserializer.deserialize_any(QuorumSpecVisitor)
+    }
+}
+
+/// Normalizes a configured resolver to a full socket address.
+///
+/// `ip:port` entries are kept as-is; bare IPs get the DNS default port 53
+/// (IPv6 addresses are bracketed correctly).
+fn normalize_resolver(resolver: &str) -> String {
+    if let Ok(addr) = resolver.parse::<std::net::SocketAddr>() {
+        return addr.to_string();
+    }
+    if let Ok(ip) = resolver.parse::<std::net::IpAddr>() {
+        return std::net::SocketAddr::new(ip, 53).to_string();
+    }
+    resolver.to_string()
 }
 
 /// DNS provider configuration.
@@ -473,6 +677,21 @@ fn default_tls_listen() -> String {
 }
 fn default_dns_timeout() -> u64 {
     300
+}
+fn default_authoritative_quorum() -> QuorumSpec {
+    QuorumSpec::All
+}
+fn default_recursive_resolvers() -> Vec<String> {
+    vec!["1.1.1.1:53".to_string(), "8.8.8.8:53".to_string()]
+}
+fn default_recursive_quorum() -> QuorumSpec {
+    QuorumSpec::AtLeast(1)
+}
+fn default_initial_interval_secs() -> u64 {
+    5
+}
+fn default_max_interval_secs() -> u64 {
+    60
 }
 fn default_check_interval() -> u64 {
     3600
@@ -753,6 +972,12 @@ impl Config {
             _ => {}
         }
 
+        if let Some(dns01) = self.challenge.dns01.as_ref()
+            && let Some(ref propagation) = dns01.propagation
+        {
+            propagation.validate()?;
+        }
+
         Ok(())
     }
 
@@ -855,5 +1080,160 @@ password = "env:SMTP_PASSWORD"
             notifications.email[0].password,
             Some(SecretRef::Env { .. })
         ));
+    }
+
+    #[test]
+    fn dns01_propagation_parses_string_and_int_quorum() {
+        let toml = r#"
+[challenge.dns01]
+propagation_timeout_secs = 120
+
+[challenge.dns01.propagation]
+authoritative_quorum = "all"
+recursive_resolvers = ["9.9.9.9:53", "149.112.112.112:53"]
+recursive_quorum = 2
+initial_interval_secs = 3
+max_interval_secs = 45
+"#;
+        let config = Config::from_str(toml).unwrap();
+        config.validate().unwrap();
+        let propagation = config
+            .challenge
+            .dns01
+            .unwrap()
+            .propagation
+            .expect("propagation section should parse");
+        assert_eq!(propagation.authoritative_quorum, QuorumSpec::All);
+        assert_eq!(
+            propagation.recursive_resolvers,
+            vec!["9.9.9.9:53".to_string(), "149.112.112.112:53".to_string()]
+        );
+        assert_eq!(propagation.recursive_quorum, QuorumSpec::AtLeast(2));
+        assert_eq!(propagation.initial_interval_secs, 3);
+        assert_eq!(propagation.max_interval_secs, 45);
+    }
+
+    #[test]
+    fn dns01_propagation_absent_section_keeps_policy_defaults() {
+        let config =
+            Config::from_str("[challenge.dns01]\npropagation_timeout_secs = 300\n").unwrap();
+        let dns01 = config.challenge.dns01.as_ref().unwrap();
+        assert!(dns01.propagation.is_none());
+        config.validate().unwrap();
+
+        // Default settings must map onto the built-in policy defaults so
+        // "section present with defaults" and "section absent" agree.
+        assert_eq!(
+            PropagationSettings::default().to_policy(),
+            crate::dns::propagation::PropagationPolicyV2::default()
+        );
+    }
+
+    #[test]
+    fn dns01_propagation_rejects_invalid_quorum_values() {
+        for (toml, expected_error) in [
+            (
+                r#"
+[challenge.dns01.propagation]
+authoritative_quorum = "majority"
+"#,
+                "invalid quorum value `majority`",
+            ),
+            (
+                r#"
+[challenge.dns01.propagation]
+recursive_quorum = 0
+"#,
+                "invalid quorum value `0`",
+            ),
+            (
+                r#"
+[challenge.dns01.propagation]
+authoritative_quorum = -1
+"#,
+                "invalid quorum value `-1`",
+            ),
+        ] {
+            let err = Config::from_str(toml).unwrap_err().to_string();
+            assert!(
+                err.contains(expected_error),
+                "unexpected error for {toml}: {err}"
+            );
+            assert!(
+                err.contains("positive integer"),
+                "error must explain the accepted quorum syntax: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dns01_propagation_validation_rejects_bad_intervals_and_resolvers() {
+        let base = |propagation: &str| format!("[challenge.dns01.propagation]\n{propagation}");
+
+        let zero_initial = base("initial_interval_secs = 0\nmax_interval_secs = 60");
+        let err = Config::from_str(&zero_initial).unwrap().validate();
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("initial_interval_secs must be at least 1 second")
+        );
+
+        let inverted = base("initial_interval_secs = 30\nmax_interval_secs = 10");
+        let err = Config::from_str(&inverted).unwrap().validate();
+        assert!(
+            err.unwrap_err().to_string().contains(
+                "max_interval_secs must be greater than or equal to initial_interval_secs"
+            )
+        );
+
+        let bad_resolver = base("recursive_resolvers = [\"not-a-resolver\"]");
+        let err = Config::from_str(&bad_resolver).unwrap().validate();
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("`not-a-resolver` is not a valid ip[:port] address")
+        );
+
+        let empty_resolvers = base("recursive_resolvers = []");
+        let err = Config::from_str(&empty_resolvers).unwrap().validate();
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("recursive_resolvers must list at least one resolver")
+        );
+
+        // Bare IPs (port defaults to 53) and full socket addresses pass.
+        let valid = base("recursive_resolvers = [\"1.1.1.1\", \"8.8.8.8:53\"]");
+        Config::from_str(&valid).unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn dns01_propagation_maps_settings_onto_policy() {
+        let toml = r#"
+[challenge.dns01.propagation]
+authoritative_quorum = 2
+recursive_resolvers = ["1.1.1.1", "8.8.8.8:53"]
+recursive_quorum = "all"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        let policy = config
+            .challenge
+            .dns01
+            .unwrap()
+            .propagation
+            .unwrap()
+            .to_policy();
+
+        assert_eq!(
+            policy,
+            crate::dns::propagation::PropagationPolicyV2::from_parts(
+                crate::domain::Quorum::AtLeast(2),
+                vec![
+                    "1.1.1.1:53".to_string(), // bare IP normalized with :53
+                    "8.8.8.8:53".to_string()
+                ],
+                crate::domain::Quorum::All,
+            )
+        );
     }
 }

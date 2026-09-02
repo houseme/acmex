@@ -36,7 +36,24 @@ listen_addr = "127.0.0.1:5002"
 challenge_path = ".well-known/acme-challenge"
 
 [challenge.dns01]
+# Overall DNS propagation deadline in seconds.
 propagation_timeout_secs = 300
+
+# DNS propagation observation policy: AcmeX waits until the TXT record is
+# visible on the authoritative nameservers and the configured recursive
+# resolvers (per the quorums below) before acknowledging the challenge.
+[challenge.dns01.propagation]
+# Quorum over authoritative nameservers: "all" or a positive integer.
+authoritative_quorum = "all"
+# Recursive resolvers queried after the authoritative nameservers,
+# as "ip:port" (a bare IP defaults to port 53).
+recursive_resolvers = ["1.1.1.1:53", "8.8.8.8:53"]
+# Quorum over recursive resolvers: "all" or a positive integer.
+recursive_quorum = 1
+# First re-check interval while waiting for propagation, in seconds.
+initial_interval_secs = 5
+# Upper bound of the exponential back-off between re-checks, in seconds.
+max_interval_secs = 60
 
 [challenge.tls_alpn]
 listen_addr = "127.0.0.1:5001"

@@ -128,15 +128,30 @@ async fn factory_rejects_unknown_and_unfeatured_types() {
     let unknown = factory.create(&spec("not-a-provider"), &secrets).await;
     assert!(unknown.is_err());
 
-    let unfeatured = factory.create(&spec("route53"), &secrets).await;
-    // Either implemented (feature on) or an explicit feature error — never
-    // a silent fallback to another provider.
-    match unfeatured {
-        Ok(provider) => assert_eq!(provider.provider_id(), "test"),
-        Err(err) => assert!(
-            err.to_string().contains("feature") || err.to_string().contains("unknown"),
-            "explicit error expected, got: {err}"
-        ),
+    // Every known type must either be creatable in this build, or fail with
+    // an explicit feature/inputs error — never a silent fallback to another
+    // provider and never a misleading "enable the feature" for a build that
+    // already has it.
+    for known in DefaultDnsProviderFactory::known_types() {
+        let outcome = factory.create(&spec(known), &secrets).await;
+        let supported = DefaultDnsProviderFactory::supported_types().contains(known);
+        match outcome {
+            Ok(provider) => {
+                assert!(supported, "`{known}` created so it must be supported");
+                assert_eq!(provider.provider_id(), "test");
+            }
+            Err(err) => {
+                let text = err.to_string();
+                let feature_gated = !supported && text.contains("requires its cargo feature");
+                let missing_inputs = text.contains("needs a credential reference")
+                    || text.contains("needs `extra.")
+                    || text.contains("must be a secret reference");
+                assert!(
+                    feature_gated || missing_inputs,
+                    "type `{known}`: explicit error expected, got: {text}"
+                );
+            }
+        }
     }
 }
 

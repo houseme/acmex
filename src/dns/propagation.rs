@@ -185,6 +185,25 @@ impl Default for PropagationPolicyV2 {
     }
 }
 
+impl PropagationPolicyV2 {
+    /// Builds a policy from explicit quorum and resolver values.
+    ///
+    /// The configuration layer maps its `[challenge.dns01.propagation]`
+    /// settings onto these primitives; taking plain policy values (instead
+    /// of a config type) keeps this module config-agnostic.
+    pub fn from_parts(
+        authoritative_quorum: Quorum,
+        recursive_resolvers: Vec<String>,
+        recursive_quorum: Quorum,
+    ) -> Self {
+        Self {
+            authoritative_quorum,
+            recursive_resolvers,
+            recursive_quorum,
+        }
+    }
+}
+
 /// Live observer over a zone resolver + system/recursive resolvers.
 pub struct HickoryPropagationObserver {
     zone_resolver: Arc<dyn ZoneResolver>,
@@ -295,7 +314,7 @@ impl DnsPropagationObserver for HickoryPropagationObserver {
             authoritative.len(),
             self.policy.authoritative_quorum,
         );
-        let rec_ok = quorum_satisfied(rec_matched, recursive.len(), Quorum::AtLeast(1));
+        let rec_ok = quorum_satisfied(rec_matched, recursive.len(), self.policy.recursive_quorum);
 
         Ok(PropagationReport {
             record_name: expected.record_name.clone(),
