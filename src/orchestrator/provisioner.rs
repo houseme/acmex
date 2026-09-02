@@ -6,8 +6,10 @@ use crate::challenge::{ChallengeSolverRegistry, Http01Solver, TlsAlpn01Solver};
 use crate::client::{AcmeClient, AcmeConfig};
 use crate::config::Config;
 use crate::error::{AcmeError, Result};
+use crate::storage::{CertificateStore, FileStorage, MemoryStorage, StorageBackend};
 use crate::types::Contact;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Orchestrator for provisioning certificates with automatic retries.
 pub struct CertificateProvisioner {
@@ -145,14 +147,14 @@ impl CertificateProvisioner {
 
         // 4. Issue certificate
         tracing::info!("Requesting certificate issuance from ACME server");
-        let _bundle = client
+        let bundle = client
             .issue_certificate(self.domains.clone(), &mut registry)
             .await?;
 
         // 5. Save certificate using the configured storage backend
         tracing::info!("Certificate issued successfully. Saving to storage...");
-        // TODO: Integrate with storage backend from config
-        // bundle.save_to_files("cert.pem", "key.pem")?;
+        let store = CertificateStore::new(legacy_storage_backend_from_config(config)?);
+        store.save(&bundle).await?;
 
         tracing::info!(
             "Certificate provisioning completed for domains: {:?}",
@@ -160,5 +162,91 @@ impl CertificateProvisioner {
         );
 
         Ok(())
+    }
+}
+
+fn legacy_storage_backend_from_config(config: &Config) -> Result<Arc<dyn StorageBackend>> {
+    match config.storage.backend.as_str() {
+        "memory" => Ok(Arc::new(MemoryStorage::new())),
+        "file" => {
+            let path = config
+                .storage
+                .file
+                .as_ref()
+                .map(|file| file.path.as_str())
+                .unwrap_or(".acmex");
+            Ok(Arc::new(FileStorage::new(path)))
+        }
+        "redis" => {
+            #[cfg(feature = "redis")]
+            {
+                let redis = config.storage.redis.as_ref().ok_or_else(|| {
+                    AcmeError::configuration("Redis storage selected but [storage.redis] missing")
+                })?;
+                Ok(Arc::new(crate::storage::RedisStorage::new(&redis.url)?))
+            }
+            #[cfg(not(feature = "redis"))]
+            {
+                Err(AcmeError::configuration(
+                    "Redis storage selected but the redis feature is not enabled",
+                ))
+            }
+        }
+        "encrypted" => Err(AcmeError::configuration(
+            "legacy CertificateProvisioner does not support encrypted storage; use the durable v0.9 workflow worker for SecretRef-backed storage",
+        )),
+        other => Err(AcmeError::configuration(format!(
+            "unsupported storage backend `{other}`"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::CertificateBundle;
+
+    #[tokio::test]
+    async fn provisioner_persists_legacy_bundle_to_configured_file_storage() {
+        let root =
+            std::env::temp_dir().join(format!("acmex-provisioner-store-{}", std::process::id()));
+        let mut config = Config::default();
+        config.storage.backend = "file".to_string();
+        config.storage.file = Some(crate::config::FileStorageConfig {
+            path: root.to_string_lossy().into_owned(),
+        });
+        let store = CertificateStore::new(legacy_storage_backend_from_config(&config).unwrap());
+        let bundle = CertificateBundle {
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            private_key_pem: "test-key-material".to_string(),
+            domains: vec!["b.example.com".to_string(), "a.example.com".to_string()],
+        };
+
+        store.save(&bundle).await.unwrap();
+        let loaded = store
+            .load(&["a.example.com".to_string(), "b.example.com".to_string()])
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.domains, bundle.domains);
+        assert_eq!(loaded.certificate_pem, bundle.certificate_pem);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provisioner_rejects_unsupported_storage_without_dropping_bundle() {
+        let mut config = Config::default();
+        config.storage.backend = "encrypted".to_string();
+
+        let err = match legacy_storage_backend_from_config(&config) {
+            Ok(_) => panic!("encrypted legacy storage must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("does not support encrypted storage")
+        );
     }
 }
