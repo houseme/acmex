@@ -107,6 +107,10 @@ pub enum CertCommands {
         /// Account key path
         #[arg(short, long)]
         key: String,
+        /// Existing ACME account URL to use as the revocation JWS kid.
+        /// When omitted, AcmeX queries the CA with onlyReturnExisting using the account key.
+        #[arg(long)]
+        account_url: Option<String>,
     },
 }
 

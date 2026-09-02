@@ -77,9 +77,14 @@ pub async fn run() -> crate::error::Result<()> {
                 tracing::info!("Listing managed certificates");
                 commands::handle_cert_list().await?;
             }
-            args::CertCommands::Revoke { cert, reason, key } => {
+            args::CertCommands::Revoke {
+                cert,
+                reason,
+                key,
+                account_url,
+            } => {
                 tracing::info!("Revoking certificate: {}", cert);
-                commands::handle_cert_revoke(cert, reason, key).await?;
+                commands::handle_cert_revoke(cert, reason, key, account_url).await?;
             }
         },
         Commands::Status(args) => {

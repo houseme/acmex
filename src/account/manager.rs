@@ -172,6 +172,81 @@ impl<'a> AccountManager<'a> {
         Ok(account)
     }
 
+    /// Looks up an existing ACME account for the configured account key without
+    /// creating a new account.
+    pub async fn lookup_existing_account(&self) -> Result<Account> {
+        tracing::info!("Looking up existing ACME account for revocation");
+        let directory = self.directory_manager.get().await?;
+        let nonce = self.nonce_manager.get_nonce().await?;
+
+        let header = json!({
+            "alg": "EdDSA",
+            "jwk": self.jwk.to_value(),
+            "nonce": nonce,
+            "url": directory.new_account,
+        });
+        let payload = json!({
+            "onlyReturnExisting": true,
+        });
+
+        let jws = self.signer.sign(&header, &payload)?;
+        let response = self
+            .http_client
+            .post(&directory.new_account)
+            .header("Content-Type", "application/jose+json")
+            .body(jws)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Network error during account lookup: {}", e);
+                crate::error::AcmeError::transport(format!("Failed to look up account: {}", e))
+            })?;
+
+        if let Some(nonce_header) = response.headers().get("replay-nonce")
+            && let Ok(nonce_str) = nonce_header.to_str()
+        {
+            self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
+        }
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            tracing::error!(
+                "Account lookup failed with status {}: {}",
+                status,
+                error_text
+            );
+            return Err(crate::error::AcmeError::account(format!(
+                "Failed to look up existing account: HTTP {}: {}",
+                status, error_text
+            )));
+        }
+
+        let account_url = response
+            .headers()
+            .get("location")
+            .and_then(|h| h.to_str().ok())
+            .ok_or_else(|| {
+                crate::error::AcmeError::account(
+                    "Missing location header in existing account response".to_string(),
+                )
+            })?
+            .to_string();
+
+        let mut account: Account = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse account lookup response: {}", e);
+            crate::error::AcmeError::account(format!(
+                "Failed to parse account lookup response: {}",
+                e
+            ))
+        })?;
+        account.id = account_url;
+        Ok(account)
+    }
+
     /// Updates the contact information for an existing account.
     pub async fn update_contacts(
         &self,

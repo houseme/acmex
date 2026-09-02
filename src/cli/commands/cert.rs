@@ -62,6 +62,7 @@ pub async fn handle_cert_revoke(
     cert_path: String,
     reason_str: Option<String>,
     key_path: String,
+    account_url: Option<String>,
 ) -> Result<()> {
     info!("Revoking certificate: {}", cert_path);
 
@@ -86,8 +87,13 @@ pub async fn handle_cert_revoke(
     let account_manager =
         AccountManager::new(&key_pair, &nonce_manager, &dir_manager, &http_client)?;
 
+    let account_url = match account_url {
+        Some(account_url) => account_url,
+        None => account_manager.lookup_existing_account().await?.id,
+    };
+
     // 5. Build and execute revocation
-    let mut revocation = CertificateRevocation::new(&account_manager, "dummy_id", cert_der);
+    let mut revocation = CertificateRevocation::new(&account_manager, account_url, cert_der);
 
     if let Some(r) = reason_str {
         let reason = match r.to_lowercase().as_str() {

@@ -63,4 +63,23 @@ impl MockAcmeServer {
             .create_async()
             .await
     }
+
+    #[allow(dead_code)]
+    pub async fn mock_existing_account(&mut self) -> mockito::Mock {
+        self.server
+            .mock("POST", "/new-account")
+            .with_status(200)
+            .with_header("location", &format!("{}/account/1", self.url()))
+            .with_body(
+                json!({
+                    "status": "valid",
+                    "contact": [],
+                    "orders": format!("{}/account/1/orders", self.url())
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await
+    }
 }

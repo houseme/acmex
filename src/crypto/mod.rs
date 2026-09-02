@@ -18,7 +18,8 @@ pub use keypair::{KeyPairGenerator, KeyType};
 pub use signer::{Signature, Signer};
 
 /// Initializes the cryptographic subsystem.
-/// Currently a placeholder for any global crypto initialization (e.g., OpenSSL or ring).
+/// Records crypto subsystem startup; the selected backend is initialized lazily by its key and
+/// signing primitives.
 pub fn init() {
     tracing::info!("Initializing cryptographic subsystem");
 }
