@@ -21,21 +21,33 @@ use acmex::dns::record::{PresentTxt, RecordCleanupOutcome};
 use acmex::dns::spec::{DnsProviderSpec, EnvFileSecretResolver, SecretRef};
 use std::collections::HashMap;
 
-fn config() -> Option<(String, String, String, HashMap<String, String>)> {
+struct LiveDnsConfig {
+    provider_type: String,
+    zone: String,
+    token: Option<String>,
+    extra: HashMap<String, String>,
+}
+
+fn config() -> Option<LiveDnsConfig> {
     let provider_type = std::env::var("ACMEX_LIVE_DNS_TYPE").ok()?;
     let zone = std::env::var("ACMEX_LIVE_DNS_ZONE").ok()?;
-    let token = std::env::var("ACMEX_LIVE_DNS_TOKEN").ok()?;
+    let token = std::env::var("ACMEX_LIVE_DNS_TOKEN").ok();
     let mut extra = HashMap::new();
     for (key, value) in std::env::vars() {
         if let Some(suffix) = key.strip_prefix("ACMEX_LIVE_DNS_EXTRA_") {
             extra.insert(suffix.to_lowercase(), value);
         }
     }
-    Some((provider_type, zone, token, extra))
+    Some(LiveDnsConfig {
+        provider_type,
+        zone,
+        token,
+        extra,
+    })
 }
 
 fn skip_reason() -> String {
-    "SKIP: set ACMEX_LIVE_DNS_TYPE / ACMEX_LIVE_DNS_ZONE / ACMEX_LIVE_DNS_TOKEN \
+    "SKIP: set ACMEX_LIVE_DNS_TYPE / ACMEX_LIVE_DNS_ZONE plus provider credentials \
      (use a TEST zone — this creates and deletes TXT records in it)"
         .to_string()
 }
@@ -45,26 +57,34 @@ fn skip_reason() -> String {
 #[tokio::test]
 #[ignore = "talks to a real DNS provider and mutates a live zone"]
 async fn live_provider_present_and_cleanup_txt() {
-    let Some((provider_type, zone, token, extra)) = config() else {
+    let Some(config) = config() else {
         eprintln!("{}", skip_reason());
         return;
     };
+    if config.provider_type != "route53" && config.token.is_none() {
+        panic!(
+            "provider `{}` requires ACMEX_LIVE_DNS_TOKEN; Route53 uses the AWS SDK default credentials chain",
+            config.provider_type
+        );
+    }
 
     // The token becomes a `file:` SecretRef (a temp file), so nothing
     // secret ever lands in the spec struct itself.
     let token_file = std::env::temp_dir().join(format!("acmex-live-dns-{}", std::process::id()));
-    std::fs::write(&token_file, &token).unwrap();
+    if let Some(token) = &config.token {
+        std::fs::write(&token_file, token).unwrap();
+    }
     let spec = DnsProviderSpec {
         id: "live-contract".to_string(),
-        provider_type,
-        credential: Some(SecretRef::File {
+        provider_type: config.provider_type,
+        credential: config.token.as_ref().map(|_| SecretRef::File {
             path: token_file.clone(),
         }),
-        zones: vec![zone.clone()],
+        zones: vec![config.zone.clone()],
         zone_suffixes: Vec::new(),
         endpoint: None,
         timeout_secs: 30,
-        extra,
+        extra: config.extra,
     };
 
     let provider = match DefaultDnsProviderFactory
@@ -78,10 +98,10 @@ async fn live_provider_present_and_cleanup_txt() {
         ),
     };
 
-    let name = format!("_acme-challenge.acmex-live.{zone}");
+    let name = format!("_acme-challenge.acmex-live.{}", config.zone);
     let one = provider
         .present_txt(PresentTxt {
-            zone: zone.clone(),
+            zone: config.zone.clone(),
             record_name: name.clone(),
             value: "acmex-live-contract-a".to_string(),
             idempotency_key: "live-a".to_string(),
@@ -92,7 +112,7 @@ async fn live_provider_present_and_cleanup_txt() {
 
     let two = provider
         .present_txt(PresentTxt {
-            zone: zone.clone(),
+            zone: config.zone.clone(),
             record_name: name.clone(),
             value: "acmex-live-contract-b".to_string(),
             idempotency_key: "live-b".to_string(),
@@ -114,7 +134,7 @@ async fn live_provider_present_and_cleanup_txt() {
 
     let _ = std::fs::remove_file(&token_file);
     println!(
-        "✅ live contract passed against `{}` zone `{zone}`",
-        spec.provider_type
+        "✅ live contract passed against `{}` zone `{}`",
+        spec.provider_type, config.zone
     );
 }
