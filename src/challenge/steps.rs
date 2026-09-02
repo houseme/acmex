@@ -143,6 +143,29 @@ fn retryable(detail: impl Into<String>) -> StepResult {
     }
 }
 
+fn ca_challenge_error_summary(
+    resource: &crate::ca_backend::AuthorizationResource,
+    session: &ChallengeSession,
+) -> String {
+    resource
+        .authorization
+        .challenges
+        .iter()
+        .find(|challenge| challenge.url == session.challenge_url)
+        .and_then(|challenge| challenge.error.as_ref())
+        .map(|problem| {
+            let problem_type = problem
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("acme_error");
+            match problem.get("status").and_then(serde_json::Value::as_u64) {
+                Some(status) => format!("CA challenge error type={problem_type} status={status}"),
+                None => format!("CA challenge error type={problem_type}"),
+            }
+        })
+        .unwrap_or_else(|| "authorization invalid".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // EnsureAccount
 // ---------------------------------------------------------------------------
@@ -637,6 +660,10 @@ impl StepExecutor for PrepareChallengesStep {
                         jiff::Span::new().seconds(self.deps.propagation_timeout.as_secs() as i64),
                     )
                     .expect("deadline overflow"),
+                last_propagation_check_at: None,
+                last_propagation_status: None,
+                last_ca_poll_at: None,
+                last_ca_status: None,
                 last_error: None,
             };
 
@@ -762,6 +789,7 @@ impl StepExecutor for WaitPropagationStep {
                         .unwrap()
                 {
                     let mut updated = failed;
+                    updated.record_propagation_check(now, "timeout");
                     updated.last_error = Some("propagation deadline exceeded".to_string());
                     let _ = repositories
                         .challenge_sessions
@@ -818,9 +846,10 @@ impl StepExecutor for WaitPropagationStep {
 
             match presenter.observe(&lease).await {
                 Ok(crate::challenge::Observation::Propagated) => {
-                    let propagated = current
+                    let mut propagated = current
                         .transition(ChallengeSessionState::Propagated)
                         .expect("observing -> propagated");
+                    propagated.record_propagation_check(now, "propagated");
                     if let Some(fresh) = repositories
                         .challenge_sessions
                         .get(&session.id)
@@ -834,6 +863,19 @@ impl StepExecutor for WaitPropagationStep {
                     }
                 }
                 Ok(crate::challenge::Observation::NotYet { retry_after }) => {
+                    if let Some(fresh) = repositories
+                        .challenge_sessions
+                        .get(&session.id)
+                        .await
+                        .unwrap()
+                    {
+                        let mut updated = current.clone();
+                        updated.record_propagation_check(now, "not_yet");
+                        let _ = repositories
+                            .challenge_sessions
+                            .update(fresh.revision, updated)
+                            .await;
+                    }
                     let retry_at = now
                         .checked_add(jiff::Span::new().milliseconds(retry_after.as_millis() as i64))
                         .expect("retry overflow");
@@ -841,7 +883,23 @@ impl StepExecutor for WaitPropagationStep {
                         next_check.map_or(retry_at, |earliest: Timestamp| earliest.min(retry_at)),
                     );
                 }
-                Err(err) => return retryable(err.to_string()),
+                Err(err) => {
+                    if let Some(fresh) = repositories
+                        .challenge_sessions
+                        .get(&session.id)
+                        .await
+                        .unwrap()
+                    {
+                        let mut updated = current.clone();
+                        updated.record_propagation_check(now, "error");
+                        updated.last_error = Some(err.to_string());
+                        let _ = repositories
+                            .challenge_sessions
+                            .update(fresh.revision, updated)
+                            .await;
+                    }
+                    return retryable(err.to_string());
+                }
             }
         }
 
@@ -1007,9 +1065,10 @@ impl StepExecutor for WaitAuthorizationsStep {
                         } else {
                             session.clone()
                         };
-                        let valid = processing
+                        let mut valid = processing
                             .transition(ChallengeSessionState::Valid)
                             .expect("processing -> valid");
+                        valid.record_ca_poll(now, "valid");
                         if let Some(fresh) = repositories
                             .challenge_sessions
                             .get(&session.id)
@@ -1023,6 +1082,7 @@ impl StepExecutor for WaitAuthorizationsStep {
                         }
                     }
                     "invalid" => {
+                        let last_error = ca_challenge_error_summary(&resource, &session);
                         let failed = session.transition(ChallengeSessionState::Failed).ok();
                         if let Some(failed) = failed
                             && let Some(fresh) = repositories
@@ -1032,7 +1092,8 @@ impl StepExecutor for WaitAuthorizationsStep {
                                 .unwrap()
                         {
                             let mut updated = failed;
-                            updated.last_error = Some("authorization invalid".to_string());
+                            updated.record_ca_poll(now, "invalid");
+                            updated.last_error = Some(last_error);
                             let _ = repositories
                                 .challenge_sessions
                                 .update(fresh.revision, updated)
@@ -1047,9 +1108,40 @@ impl StepExecutor for WaitAuthorizationsStep {
                             )),
                         });
                     }
-                    _ => pending = true,
+                    status => {
+                        if let Some(fresh) = repositories
+                            .challenge_sessions
+                            .get(&session.id)
+                            .await
+                            .unwrap()
+                        {
+                            let mut updated = session.clone();
+                            updated.record_ca_poll(now, status);
+                            let _ = repositories
+                                .challenge_sessions
+                                .update(fresh.revision, updated)
+                                .await;
+                        }
+                        pending = true;
+                    }
                 },
-                Err(err) => return retryable(err.to_string()),
+                Err(err) => {
+                    if let Some(fresh) = repositories
+                        .challenge_sessions
+                        .get(&session.id)
+                        .await
+                        .unwrap()
+                    {
+                        let mut updated = session.clone();
+                        updated.record_ca_poll(now, "error");
+                        updated.last_error = Some(err.to_string());
+                        let _ = repositories
+                            .challenge_sessions
+                            .update(fresh.revision, updated)
+                            .await;
+                    }
+                    return retryable(err.to_string());
+                }
             }
         }
 

@@ -40,6 +40,9 @@ pub enum Commands {
     /// Certificate management (Revocation, exploration)
     Cert(CertArgs),
 
+    /// Show an API v1 operation and its challenge status
+    Status(StatusArgs),
+
     /// Start API server
     Serve(ServeArgs),
 }
@@ -65,6 +68,20 @@ pub enum OrderCommands {
 pub struct CertArgs {
     #[command(subcommand)]
     pub command: CertCommands,
+}
+
+#[derive(Parser, Debug)]
+pub struct StatusArgs {
+    /// Operation id (`op_...`) to inspect.
+    pub operation_id: String,
+
+    /// API v1 base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8080/api/v1")]
+    pub api_base: String,
+
+    /// Management API key. Defaults to ACMEX_API_KEY.
+    #[arg(long)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

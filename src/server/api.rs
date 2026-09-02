@@ -3,6 +3,10 @@
 /// account management, certificate ordering, and system health monitoring.
 use axum::{
     Router,
+    body::Body,
+    http::{HeaderValue, header::HeaderName},
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -30,6 +34,11 @@ use crate::renewal::{ControllerRenewalScheduler, RenewalController, RenewalContr
 use crate::repository::RepositorySet;
 use crate::scheduler::RenewalScheduler;
 use crate::storage::StorageBackend;
+
+/// Legacy `/api` removal horizon. T21 owns the final release decision and
+/// must update this value if the v0.9/v0.10 release path changes.
+pub const LEGACY_API_SUNSET_HTTP_DATE: &str = "Wed, 31 Mar 2027 23:59:59 GMT";
+const LEGACY_API_MIGRATION_LINK: &str = "</docs/API_V1_MIGRATION.md>; rel=\"deprecation\"";
 
 /// Information about an asynchronous orchestration task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +76,31 @@ pub struct AppState {
     pub application: Option<Arc<dyn CertificateApplication>>,
     /// Query-side lifecycle projections.
     pub query: Option<Arc<dyn CertificateQuery>>,
+}
+
+/// Adds RFC 8594-style deprecation metadata to every legacy `/api`
+/// response. New lifecycle capabilities are mounted under `/api/v1`; this
+/// layer is only applied to the older task/order/certificate/account
+/// compatibility surface.
+pub async fn add_legacy_api_deprecation_headers(
+    request: axum::extract::Request<Body>,
+    next: Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("deprecation"),
+        HeaderValue::from_static("true"),
+    );
+    headers.insert(
+        HeaderName::from_static("sunset"),
+        HeaderValue::from_static(LEGACY_API_SUNSET_HTTP_DATE),
+    );
+    headers.insert(
+        HeaderName::from_static("link"),
+        HeaderValue::from_static(LEGACY_API_MIGRATION_LINK),
+    );
+    response
 }
 
 /// Starts the REST API server on the specified address.
@@ -215,7 +249,8 @@ pub async fn start_server(
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             api_key_auth,
-        ));
+        ))
+        .layer(middleware::from_fn(add_legacy_api_deprecation_headers));
     let api_v1_routes = super::api_v1::routes().layer(axum::middleware::from_fn_with_state(
         state.clone(),
         api_key_auth,

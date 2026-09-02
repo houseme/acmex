@@ -7,6 +7,7 @@ pub mod obtain;
 pub mod order;
 pub mod renew;
 pub mod serve;
+pub mod status;
 
 pub use account::{handle_deactivate, handle_register, handle_rotate_key, handle_update};
 pub use cert::{handle_cert_list, handle_cert_revoke};
@@ -17,3 +18,4 @@ pub use obtain::{ObtainCommand, handle_obtain};
 pub use order::{handle_order_list, handle_order_show};
 pub use renew::handle_renew;
 pub use serve::handle_serve;
+pub use status::handle_status;

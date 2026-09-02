@@ -172,6 +172,55 @@ async fn test_api_list_orders() {
 }
 
 #[tokio::test]
+async fn legacy_api_responses_carry_deprecation_headers() {
+    let state = legacy_state(Arc::new(RwLock::new(HashMap::new())));
+    let app = axum::Router::new()
+        .route(
+            "/api/orders",
+            axum::routing::get(acmex::server::order::list_orders),
+        )
+        .layer(axum::middleware::from_fn(
+            acmex::server::api::add_legacy_api_deprecation_headers,
+        ))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/orders")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("Deprecation")
+            .and_then(|v| v.to_str().ok()),
+        Some("true")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("Sunset")
+            .and_then(|v| v.to_str().ok()),
+        Some(acmex::server::api::LEGACY_API_SUNSET_HTTP_DATE)
+    );
+    assert!(
+        response
+            .headers()
+            .get("Link")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .contains("API_V1_MIGRATION.md")
+    );
+}
+
+#[tokio::test]
 async fn api_v1_issue_returns_operation_with_location() {
     let app = axum::Router::new()
         .nest("/api/v1", acmex::server::api_v1::routes())
@@ -638,6 +687,10 @@ async fn api_v1_challenge_sessions_and_cleanup_retry() {
             deadline: Timestamp::now()
                 .checked_add(jiff::Span::new().minutes(30))
                 .unwrap(),
+            last_propagation_check_at: Some(Timestamp::now()),
+            last_propagation_status: Some("propagated".to_string()),
+            last_ca_poll_at: Some(Timestamp::now()),
+            last_ca_status: Some("pending".to_string()),
             last_error: None,
         })
         .await
@@ -709,6 +762,10 @@ async fn api_v1_challenge_sessions_and_cleanup_retry() {
     assert_eq!(sessions[0]["challenge_type"], "dns-01");
     assert_eq!(sessions[0]["state"], "prepared");
     assert_eq!(sessions[0]["operation_id"], op.id.as_str());
+    assert_eq!(sessions[0]["last_propagation_status"], "propagated");
+    assert_eq!(sessions[0]["last_ca_status"], "pending");
+    assert!(sessions[0]["last_propagation_check_at"].is_string());
+    assert!(sessions[0]["last_ca_poll_at"].is_string());
 
     // Unknown operation → 404, consistent with GET /operations/{id}.
     let missing_op = app
@@ -1042,6 +1099,13 @@ async fn rate_limited_responses_carry_retry_after_header() {
     let err = acmex::error::AcmeError::RateLimited(Some(std::time::Duration::from_secs(37)));
     let response = acmex::server::api_v1::error_response_for_tests(err);
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
     let retry_after = response
         .headers()
         .get("Retry-After")

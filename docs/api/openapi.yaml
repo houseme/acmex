@@ -242,7 +242,9 @@ paths:
       summary: List token-safe challenge sessions for an operation
       description: >
         Challenge session lifecycle state (T05). Views never contain the
-        token, its hash or a key authorization.
+        token, its hash or a key authorization. CA polling and propagation
+        fields are the last persisted observations; reads never query the CA
+        or DNS providers.
       parameters:
         - $ref: '#/components/parameters/OperationId'
       responses:
@@ -614,6 +616,18 @@ components:
         deadline:
           type: string
           format: date-time
+        last_propagation_check_at:
+          type: string
+          format: date-time
+        last_propagation_status:
+          type: string
+          enum: [not_yet, propagated, timeout, error]
+        last_ca_poll_at:
+          type: string
+          format: date-time
+        last_ca_status:
+          type: string
+          enum: [pending, processing, valid, invalid, deactivated, expired, revoked, error]
         last_error:
           type: string
       not:

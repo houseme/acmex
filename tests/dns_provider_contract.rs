@@ -208,6 +208,10 @@ async fn dns01_presenter_end_to_end_with_fakes() {
         deadline: jiff::Timestamp::now()
             .checked_add(jiff::Span::new().minutes(30))
             .unwrap(),
+        last_propagation_check_at: None,
+        last_propagation_status: None,
+        last_ca_poll_at: None,
+        last_ca_status: None,
         last_error: None,
     };
 
@@ -302,6 +306,10 @@ async fn presenter_routes_delegated_zone_to_owner() {
         state: acmex::challenge::ChallengeSessionState::Selected,
         lease_id: None,
         deadline: jiff::Timestamp::now(),
+        last_propagation_check_at: None,
+        last_propagation_status: None,
+        last_ca_poll_at: None,
+        last_ca_status: None,
         last_error: None,
     };
     let lease = presenter
@@ -371,6 +379,10 @@ async fn partial_propagation_fails_quorum_then_succeeds() {
         state: acmex::challenge::ChallengeSessionState::Selected,
         lease_id: None,
         deadline: jiff::Timestamp::now(),
+        last_propagation_check_at: None,
+        last_propagation_status: None,
+        last_ca_poll_at: None,
+        last_ca_status: None,
         last_error: None,
     };
     let lease = presenter

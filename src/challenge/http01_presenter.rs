@@ -401,6 +401,10 @@ mod tests {
             deadline: jiff::Timestamp::now()
                 .checked_add(jiff::Span::new().minutes(30))
                 .unwrap(),
+            last_propagation_check_at: None,
+            last_propagation_status: None,
+            last_ca_poll_at: None,
+            last_ca_status: None,
             last_error: None,
         }
     }

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use acmex::Config;
 
 #[test]
-fn example_config_parses_validates_and_exercises_v09_sections() {
+fn release_gate_example_config_parses_validates_and_exercises_v09_sections() {
     let config: Config = include_str!("../acmex.toml.example").parse().unwrap();
     config.validate().unwrap();
 
@@ -24,38 +24,16 @@ fn example_config_parses_validates_and_exercises_v09_sections() {
 }
 
 #[test]
-fn openapi_paths_match_api_v1_router_surface() {
+fn release_gate_openapi_paths_match_api_v1_router_surface() {
     let openapi = include_str!("../docs/api/openapi.yaml");
     let router = include_str!("../src/server/api_v1.rs");
-    let expected_paths = [
-        "/certificate-intents",
-        "/certificate-intents/{id}",
-        "/certificate-intents/{id}/issue",
-        "/certificate-lineages/{id}",
-        "/certificate-lineages/{id}/renew",
-        "/certificate-lineages/{id}/versions",
-        "/certificate-versions/{id}",
-        "/certificate-versions/{id}/chain",
-        "/certificate-versions/{id}/deploy",
-        "/certificate-versions/{id}/revoke",
-        "/challenge-cleanup",
-        "/challenge-cleanup/{id}/retry",
-        "/operations",
-        "/operations/{id}",
-        "/operations/{id}/cancel",
-        "/operations/{id}/challenges",
-    ];
+    let openapi_paths = openapi_paths(openapi);
+    let router_paths = api_v1_router_paths(router);
 
-    for path in expected_paths {
-        assert!(
-            openapi.contains(&format!("  {path}:")),
-            "OpenAPI is missing path {path}"
-        );
-        assert!(
-            router.contains(&format!("\"{path}\"")),
-            "api_v1 router is missing path {path}"
-        );
-    }
+    assert_eq!(
+        openapi_paths, router_paths,
+        "OpenAPI paths and api_v1 router paths must stay in lock-step"
+    );
 
     assert!(
         openapi.contains("application/problem+json"),
@@ -67,8 +45,75 @@ fn openapi_paths_match_api_v1_router_surface() {
     );
 }
 
+fn openapi_paths(openapi: &str) -> BTreeSet<String> {
+    openapi
+        .lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("  /")?;
+            line.split_once(':').map(|(path, _)| format!("/{path}"))
+        })
+        .collect()
+}
+
+fn api_v1_router_paths(router: &str) -> BTreeSet<String> {
+    router
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix(".route(\"") {
+                return rest.split_once('"').map(|(path, _)| path.to_string());
+            }
+            trimmed
+                .strip_prefix("\"/")
+                .and_then(|rest| rest.split_once('"'))
+                .map(|(path, _)| format!("/{path}"))
+        })
+        .collect()
+}
+
 #[test]
-fn feature_matrix_lists_every_cargo_feature() {
+fn release_gate_openapi_documents_challenge_observation_fields() {
+    let openapi = include_str!("../docs/api/openapi.yaml");
+    for field in [
+        "last_propagation_check_at",
+        "last_propagation_status",
+        "last_ca_poll_at",
+        "last_ca_status",
+    ] {
+        assert!(
+            openapi.contains(field),
+            "ChallengeSessionView schema must document {field}"
+        );
+    }
+    assert!(
+        openapi.contains("reads never query the CA"),
+        "challenge status documentation must state that GET is side-effect free"
+    );
+}
+
+#[test]
+fn release_gate_legacy_api_migration_doc_matches_deprecation_contract() {
+    let doc = include_str!("../docs/API_V1_MIGRATION.md");
+    assert!(
+        doc.contains(acmex::server::api::LEGACY_API_SUNSET_HTTP_DATE),
+        "migration doc must mirror the legacy Sunset header"
+    );
+    for route in [
+        "POST /api/orders",
+        "GET /api/orders",
+        "POST /api/certificates/{id}/revoke",
+        "GET /api/v1/operations/{id}/challenges",
+    ] {
+        assert!(doc.contains(route), "migration doc missing `{route}`");
+    }
+    assert!(
+        doc.contains("only shrinks"),
+        "migration doc must record that legacy /api only shrinks"
+    );
+}
+
+#[test]
+fn release_gate_feature_matrix_lists_every_cargo_feature() {
     let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
     let features = manifest["features"].as_table().unwrap();
     let matrix = include_str!("../docs/roadmap/v0.9.0/FEATURE_MATRIX.md");
@@ -89,7 +134,7 @@ fn feature_matrix_lists_every_cargo_feature() {
 }
 
 #[test]
-fn release_documents_are_explicit_about_unverified_external_gates() {
+fn release_gate_release_documents_are_explicit_about_unverified_external_gates() {
     let checklist = include_str!("../docs/roadmap/v0.9.0/RELEASE_CHECKLIST.md");
     let limitations = include_str!("../docs/roadmap/v0.9.0/KNOWN_LIMITATIONS.md");
     let e2e = include_str!("../docs/roadmap/v0.9.0/E2E_RELEASE_GATES.md");

@@ -414,6 +414,14 @@ async fn propagation_waits_then_propagates() {
             .all(|s| s.value.state == ChallengeSessionState::Cleaned
                 || s.value.state == ChallengeSessionState::Valid)
     );
+    let session = &sessions[0].value;
+    assert_eq!(
+        session.last_propagation_status.as_deref(),
+        Some("propagated")
+    );
+    assert!(session.last_propagation_check_at.is_some());
+    assert_eq!(session.last_ca_status.as_deref(), Some("valid"));
+    assert!(session.last_ca_poll_at.is_some());
 }
 
 /// Slow DNS propagation is retryable, not terminal.
@@ -525,6 +533,10 @@ async fn cleanup_already_absent_is_success() {
         state: ChallengeSessionState::Prepared,
         lease_id: None,
         deadline: now().checked_add(jiff::Span::new().minutes(30)).unwrap(),
+        last_propagation_check_at: None,
+        last_propagation_status: None,
+        last_ca_poll_at: None,
+        last_ca_status: None,
         last_error: None,
     };
     let lease = presenter
@@ -594,6 +606,10 @@ fn session_of(id: &str) -> acmex::challenge::ChallengeSession {
         state: ChallengeSessionState::Prepared,
         lease_id: None,
         deadline: now().checked_add(jiff::Span::new().minutes(30)).unwrap(),
+        last_propagation_check_at: None,
+        last_propagation_status: None,
+        last_ca_poll_at: None,
+        last_ca_status: None,
         last_error: None,
     }
 }

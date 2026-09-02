@@ -302,6 +302,14 @@ pub struct ChallengeSessionView {
     pub state: String,
     pub deadline: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_propagation_check_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_propagation_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ca_poll_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ca_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
 
@@ -316,6 +324,10 @@ impl From<ChallengeSession> for ChallengeSessionView {
             challenge_type: session.challenge_type.as_str().to_string(),
             state: session.state.as_str().to_string(),
             deadline: session.deadline,
+            last_propagation_check_at: session.last_propagation_check_at,
+            last_propagation_status: session.last_propagation_status,
+            last_ca_poll_at: session.last_ca_poll_at,
+            last_ca_status: session.last_ca_status,
             last_error: session.last_error,
         }
     }

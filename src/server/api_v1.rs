@@ -188,6 +188,10 @@ fn error_response(err: AcmeError) -> Response {
     let body = ApiProblem::from_error(&err);
     let status = StatusCode::from_u16(body.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/problem+json"),
+    );
     // A rate-limited response carries the server-provided hint as an HTTP
     // header, not only inside the problem body.
     if let AcmeError::RateLimited(Some(retry_after)) = &err {

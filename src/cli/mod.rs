@@ -82,6 +82,10 @@ pub async fn run() -> crate::error::Result<()> {
                 commands::handle_cert_revoke(cert, reason, key).await?;
             }
         },
+        Commands::Status(args) => {
+            tracing::info!("Displaying status for operation: {}", args.operation_id);
+            commands::handle_status(args.operation_id, args.api_base, args.api_key).await?;
+        }
         Commands::Daemon(args) => {
             if let Some(config_path) = args.config.as_ref() {
                 tracing::info!("Loading daemon configuration from: {}", config_path);

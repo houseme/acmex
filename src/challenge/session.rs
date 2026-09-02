@@ -114,6 +114,19 @@ pub struct ChallengeSession {
     pub lease_id: Option<ChallengeLeaseId>,
     /// Absolute deadline for reaching `Propagated`.
     pub deadline: Timestamp,
+    /// Last time AcmeX observed the external challenge resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_propagation_check_at: Option<Timestamp>,
+    /// Last propagation observation outcome, using stable API words
+    /// (`not_yet`, `propagated`, `timeout`, `error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_propagation_status: Option<String>,
+    /// Last time AcmeX polled the CA authorization resource.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ca_poll_at: Option<Timestamp>,
+    /// Last CA authorization status observed from the resource body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ca_status: Option<String>,
     /// Classified last error, if any (no token or key authorization).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
@@ -131,6 +144,18 @@ impl ChallengeSession {
     /// Whether the propagation deadline has passed.
     pub fn is_past_deadline(&self, now: Timestamp) -> bool {
         now >= self.deadline
+    }
+
+    /// Records a propagation observation without changing lifecycle state.
+    pub fn record_propagation_check(&mut self, checked_at: Timestamp, status: impl Into<String>) {
+        self.last_propagation_check_at = Some(checked_at);
+        self.last_propagation_status = Some(status.into());
+    }
+
+    /// Records a CA authorization poll without changing lifecycle state.
+    pub fn record_ca_poll(&mut self, polled_at: Timestamp, status: impl Into<String>) {
+        self.last_ca_poll_at = Some(polled_at);
+        self.last_ca_status = Some(status.into());
     }
 
     /// Validates and applies a state transition.
@@ -191,6 +216,10 @@ mod tests {
             deadline: Timestamp::now()
                 .checked_add(jiff::Span::new().minutes(30))
                 .unwrap(),
+            last_propagation_check_at: None,
+            last_propagation_status: None,
+            last_ca_poll_at: None,
+            last_ca_status: None,
             last_error: None,
         }
     }

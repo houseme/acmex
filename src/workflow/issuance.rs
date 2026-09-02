@@ -97,25 +97,49 @@ fn retryable_error(detail: impl Into<String>) -> StepResult {
     }
 }
 
-fn acme_backend_error(detail: impl Into<String>) -> StepResult {
-    let detail = detail.into();
-    let code = detail
-        .find('[')
-        .and_then(|start| detail[start + 1..].split_once(']'))
-        .map(|(code, _)| StableErrorCode::from_owned(code.to_string()))
-        .unwrap_or(error_codes::ACME_SERVER_ERROR);
-
-    if detail.contains("] terminal:") {
-        return terminal(code, detail);
-    }
-    if detail.contains("] operator-action-required:") {
-        return StepResult::Fail(ClassifiedError {
+fn acme_backend_error(err: AcmeError) -> StepResult {
+    let detail = err.to_string();
+    let Some((code, class)) = classified_acme_protocol_error(&detail) else {
+        return retryable_error(detail);
+    };
+    match class {
+        "retryable" => retryable_error(detail),
+        "rate-limited" => StepResult::RetryAt {
+            after: std::time::Duration::from_secs(1),
+            error: ClassifiedError {
+                code,
+                class: ErrorClass::Retryable,
+                detail: Some(detail),
+            },
+        },
+        "operator-action-required" => StepResult::Fail(ClassifiedError {
             code,
             class: ErrorClass::OperatorActionRequired,
             detail: Some(detail),
-        });
+        }),
+        _ => StepResult::Fail(ClassifiedError {
+            code,
+            class: ErrorClass::Terminal,
+            detail: Some(detail),
+        }),
     }
-    retryable_error(detail)
+}
+
+fn classified_acme_protocol_error(detail: &str) -> Option<(StableErrorCode, &'static str)> {
+    let (code, rest) = detail
+        .strip_prefix("Protocol error: [")
+        .and_then(|rest| rest.split_once(']'))
+        .map(|(code, rest)| (StableErrorCode::from_owned(code.to_string()), rest))?;
+    let class = rest.trim_start().split_once(':')?.0;
+    let class = match class {
+        "rate-limited" => "rate-limited",
+        "operator-action-required" => "operator-action-required",
+        "policy-violation" => "policy-violation",
+        "terminal" => "terminal",
+        "retryable" => "retryable",
+        _ => return None,
+    };
+    Some((code, class))
 }
 
 fn read_payload<T: serde::de::DeserializeOwned>(
@@ -1263,6 +1287,9 @@ impl StepExecutor for SubmitRevocationStep {
             }
             Err(err) => return retryable_error(err.to_string()),
         };
+        if version.state == VersionState::Revoked {
+            return StepResult::done();
+        }
         let chain = match crate::certificate::CertificateChain::from_pem(
             version.certificate_chain_pem.as_bytes(),
         ) {
@@ -1274,8 +1301,36 @@ impl StepExecutor for SubmitRevocationStep {
             reason: RevocationReason::Unspecified,
         };
         match self.deps.backend.revoke(&account, &request).await {
-            Ok(()) => StepResult::done(),
-            Err(err) => acme_backend_error(err.to_string()),
+            Ok(()) => loop {
+                let stored = match ctx.repositories.versions.get(version_id).await {
+                    Ok(Some(stored)) => stored,
+                    Ok(None) => {
+                        return terminal(
+                            error_codes::INTERNAL,
+                            format!("version `{version_id}` not found after revocation"),
+                        );
+                    }
+                    Err(err) => return retryable_error(err.to_string()),
+                };
+                if stored.value.state == VersionState::Revoked {
+                    return StepResult::done();
+                }
+                let revoked = match stored.value.transition(VersionState::Revoked) {
+                    Ok(revoked) => revoked,
+                    Err(err) => return terminal(error_codes::INTERNAL, err.to_string()),
+                };
+                match ctx
+                    .repositories
+                    .versions
+                    .update(stored.revision, revoked)
+                    .await
+                {
+                    Ok(crate::repository::CasOutcome::Updated(_)) => return StepResult::done(),
+                    Ok(crate::repository::CasOutcome::Conflict { .. }) => continue,
+                    Err(err) => return retryable_error(err.to_string()),
+                }
+            },
+            Err(err) => acme_backend_error(err),
         }
     }
 }

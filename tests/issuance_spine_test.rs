@@ -272,6 +272,25 @@ fn soft_key_ref() -> KeyRef {
     KeyRef::software(KeyId::new("key_seed").unwrap(), KeyAlgorithm::EcP256)
 }
 
+fn active_version(id: &str, identifiers: IdentifierSet) -> CertificateVersion {
+    let (_leaf, _ca, chain_pem) = issued_chain("example.com");
+    CertificateVersion {
+        id: VersionId::new(id).unwrap(),
+        lineage_id: LineageId::new("lin_spine").unwrap(),
+        identifiers,
+        certificate_chain_pem: chain_pem,
+        serial: "01".to_string(),
+        not_before: "2025-01-01T00:00:00Z".to_string(),
+        not_after: "2027-01-01T00:00:00Z".to_string(),
+        issued_by: "test-ca".to_string(),
+        profile: None,
+        key_ref: soft_key_ref(),
+        replaces: None,
+        superseded_by: None,
+        state: VersionState::Active,
+    }
+}
+
 struct SpineFixture {
     clock: Arc<FakeClock>,
     repositories: RepositorySet,
@@ -445,6 +464,25 @@ impl SpineFixture {
     fn serve_certificate(&self, chain_pem: &str) {
         self.transport
             .push(raw_response("cert/1", 200, chain_pem.to_string()));
+    }
+
+    fn allow_revocation(&self) {
+        self.transport.push(ScriptedResponse::json(
+            "revoke-cert",
+            200,
+            serde_json::json!({}),
+        ));
+    }
+
+    fn reject_revocation(&self) {
+        self.transport.push(ScriptedResponse::json(
+            "revoke-cert",
+            400,
+            serde_json::json!({
+                "type": "urn:ietf:params:acme:error:badRevocationReason",
+                "detail": "revocation reason not allowed for this certificate",
+            }),
+        ));
     }
 
     /// Advances the operation until the CSR step has produced output, then
@@ -1159,6 +1197,109 @@ fn issue_record(op: &str, idempotency_key: &str, now: Timestamp) -> OperationRec
         None,
         now,
     )
+}
+
+fn revoke_record(op: &str, version_id: VersionId, now: Timestamp) -> OperationRecord {
+    OperationRecord::new(
+        OperationId::new(op).unwrap(),
+        OperationKind::Revoke,
+        OperationSubject {
+            intent_id: None,
+            lineage_id: Some(LineageId::new("lin_spine").unwrap()),
+            version_id: Some(version_id),
+        },
+        Some(format!("{op}-key")),
+        None,
+        now,
+    )
+}
+
+#[tokio::test]
+async fn revoke_spine_calls_ca_and_marks_version_revoked() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let version = active_version("ver_revoke_ok", identifiers.clone());
+    let version_id = version.id.clone();
+    let fixture = build_fixture(&identifiers, Vec::new(), Some(version), None, directory()).await;
+    fixture.allow_revocation();
+
+    let op_id = OperationId::new("op_spine_revoke_ok").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(revoke_record(
+            "op_spine_revoke_ok",
+            version_id.clone(),
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}",
+        final_record.error
+    );
+    assert_eq!(
+        fixture.transport.post_count("revoke-cert"),
+        1,
+        "revocation must reach the CA backend exactly once"
+    );
+    let stored = fixture
+        .repositories
+        .versions
+        .get(&version_id)
+        .await
+        .unwrap()
+        .expect("version remains persisted");
+    assert_eq!(stored.value.state, VersionState::Revoked);
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+#[tokio::test]
+async fn revoke_spine_ca_rejection_is_terminal() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let version = active_version("ver_revoke_rejected", identifiers.clone());
+    let version_id = version.id.clone();
+    let fixture = build_fixture(&identifiers, Vec::new(), Some(version), None, directory()).await;
+    fixture.reject_revocation();
+
+    let op_id = OperationId::new("op_spine_revoke_rejected").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(revoke_record(
+            "op_spine_revoke_rejected",
+            version_id.clone(),
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(final_record.status, acmex::domain::OperationStatus::Failed);
+    let error = final_record
+        .error
+        .expect("rejection carries classified error");
+    assert_eq!(error.class, acmex::domain::ErrorClass::Terminal);
+    assert_eq!(error.code.as_str(), "ACME_HTTP_400_BADREVOCATIONREASON");
+    assert_eq!(
+        fixture.transport.post_count("revoke-cert"),
+        1,
+        "terminal revocation rejections must not be retried"
+    );
+    let stored = fixture
+        .repositories
+        .versions
+        .get(&version_id)
+        .await
+        .unwrap()
+        .expect("version remains persisted");
+    assert_eq!(stored.value.state, VersionState::Active);
+
+    cleanup_dir(&fixture.key_store_dir);
 }
 
 /// A CA that issues a leaf whose public key differs from the CSR's fails
