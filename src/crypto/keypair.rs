@@ -3,6 +3,10 @@
 /// used for ACME account identification and certificate signing requests.
 use crate::error::AcmeError;
 use crate::error::Result;
+use rcgen::{
+    PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ECDSA_P521_SHA512, PKCS_ED25519,
+    PKCS_RSA_SHA256, RsaKeySize,
+};
 
 /// Enumeration of supported key types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,22 +118,22 @@ impl KeyPairGenerator {
     /// Generates a new key pair based on the configured key type.
     pub fn generate(&self) -> Result<rcgen::KeyPair> {
         tracing::info!("Generating new {} key pair", self.key_type);
-        match self.key_type {
-            KeyType::Ed25519 => rcgen::KeyPair::generate().map_err(|e| {
-                tracing::error!("Failed to generate Ed25519 key: {}", e);
-                AcmeError::crypto(format!("Failed to generate Ed25519 key: {}", e))
-            }),
-            _ => {
-                tracing::error!(
-                    "Key generation for {} is not yet implemented",
-                    self.key_type
-                );
-                Err(AcmeError::crypto(format!(
-                    "Key type {} generation not yet implemented",
-                    self.key_type
-                )))
+        let generated = match self.key_type {
+            KeyType::Ed25519 => rcgen::KeyPair::generate_for(&PKCS_ED25519),
+            KeyType::EcdsaP256 => rcgen::KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256),
+            KeyType::EcdsaP384 => rcgen::KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384),
+            KeyType::EcdsaP521 => rcgen::KeyPair::generate_for(&PKCS_ECDSA_P521_SHA512),
+            KeyType::Rsa2048 => {
+                rcgen::KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_2048)
             }
-        }
+            KeyType::Rsa4096 => {
+                rcgen::KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_4096)
+            }
+        };
+        generated.map_err(|e| {
+            tracing::error!("Failed to generate {} key: {}", self.key_type, e);
+            AcmeError::crypto(format!("Failed to generate {} key: {}", self.key_type, e))
+        })
     }
 }
 
@@ -149,5 +153,24 @@ mod tests {
         let generator = KeyPairGenerator::ed25519();
         let result = generator.generate();
         assert!(result.is_ok(), "Ed25519 generation should work");
+    }
+
+    #[test]
+    fn generate_all_declared_key_types() {
+        let cases = [
+            (KeyType::Ed25519, &PKCS_ED25519),
+            (KeyType::EcdsaP256, &PKCS_ECDSA_P256_SHA256),
+            (KeyType::EcdsaP384, &PKCS_ECDSA_P384_SHA384),
+            (KeyType::EcdsaP521, &PKCS_ECDSA_P521_SHA512),
+            (KeyType::Rsa2048, &PKCS_RSA_SHA256),
+            (KeyType::Rsa4096, &PKCS_RSA_SHA256),
+        ];
+
+        for (key_type, algorithm) in cases {
+            let key = KeyPairGenerator::new(key_type)
+                .generate()
+                .unwrap_or_else(|err| panic!("{key_type} generation failed: {err}"));
+            assert_eq!(key.algorithm(), algorithm);
+        }
     }
 }
