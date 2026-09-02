@@ -25,7 +25,10 @@ use serde::{Deserialize, Serialize};
 use jiff::Timestamp;
 
 use crate::ca_backend::CaBackend;
-use crate::ca_backend::{AccountHandle, AuthorizationRef, ChallengeRef, OrderHandle, OrderRequest};
+use crate::ca_backend::{
+    AccountHandle, AuthorizationRef, ChallengeRef, ExternalAccountBindingRef, OrderHandle,
+    OrderRequest,
+};
 use crate::domain::challenge::ChallengeLeaseState;
 use crate::domain::{
     ClassifiedError, ErrorClass, OperationRecord, WorkflowStepKind, error_codes,
@@ -149,6 +152,7 @@ pub struct EnsureAccountStep {
     deps: Arc<ChallengeStepDeps>,
     contacts: Vec<String>,
     terms_agreed: bool,
+    external_account_binding: Option<ExternalAccountBindingRef>,
 }
 
 impl EnsureAccountStep {
@@ -158,6 +162,37 @@ impl EnsureAccountStep {
             deps,
             contacts,
             terms_agreed,
+            external_account_binding: None,
+        }
+    }
+
+    /// Attaches the configured EAB reference used for account registration.
+    pub fn with_external_account_binding(
+        mut self,
+        external_account_binding: Option<ExternalAccountBindingRef>,
+    ) -> Self {
+        self.external_account_binding = external_account_binding;
+        self
+    }
+
+    fn account_ref(&self) -> crate::ca_backend::AccountRef {
+        Self::account_ref_from_parts(
+            &self.contacts,
+            self.terms_agreed,
+            self.external_account_binding.clone(),
+        )
+    }
+
+    fn account_ref_from_parts(
+        contacts: &[String],
+        terms_agreed: bool,
+        external_account_binding: Option<ExternalAccountBindingRef>,
+    ) -> crate::ca_backend::AccountRef {
+        crate::ca_backend::AccountRef {
+            tenant_id: "ten_default".to_string(),
+            contacts: contacts.to_vec(),
+            terms_of_service_agreed: terms_agreed,
+            external_account_binding,
         }
     }
 }
@@ -169,12 +204,7 @@ impl StepExecutor for EnsureAccountStep {
     }
 
     async fn execute(&self, _ctx: StepContext<'_>) -> StepResult {
-        let account_ref = crate::ca_backend::AccountRef {
-            tenant_id: "ten_default".to_string(),
-            contacts: self.contacts.clone(),
-            terms_of_service_agreed: self.terms_agreed,
-            external_account_binding: None,
-        };
+        let account_ref = self.account_ref();
         match self.deps.backend.ensure_account(&account_ref).await {
             Ok(handle) => {
                 let payload =
@@ -1139,5 +1169,26 @@ impl StepExecutor for CleanupChallengesStep {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dns::spec::SecretRef;
+
+    #[test]
+    fn ensure_account_ref_carries_configured_eab() {
+        let eab = ExternalAccountBindingRef {
+            key_id: "kid-42".to_string(),
+            hmac_key: SecretRef::parse("env:ACMEX_EAB_HMAC").unwrap(),
+        };
+        let account = EnsureAccountStep::account_ref_from_parts(
+            &["mailto:ops@example.com".to_string()],
+            true,
+            Some(eab.clone()),
+        );
+        assert_eq!(account.contacts, vec!["mailto:ops@example.com"]);
+        assert_eq!(account.external_account_binding, Some(eab));
     }
 }

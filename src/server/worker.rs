@@ -89,6 +89,8 @@ pub struct WorkflowWorkerSettings {
     pub account_contacts: Vec<String>,
     /// Whether the terms of service are agreed for registration.
     pub terms_agreed: bool,
+    /// External Account Binding used when the CA requires EAB.
+    pub external_account_binding: Option<crate::ca_backend::ExternalAccountBindingRef>,
     /// Directory holding the account key and managed certificate keys.
     pub secret_store_dir: std::path::PathBuf,
     /// HTTP-01 listen address (None disables the local HTTP-01 presenter).
@@ -103,6 +105,7 @@ impl Default for WorkflowWorkerSettings {
             challenge_poll_interval: Duration::from_secs(15),
             account_contacts: vec![],
             terms_agreed: true,
+            external_account_binding: None,
             secret_store_dir: std::path::PathBuf::from(".acmex/secrets"),
             http01_listen: None,
         }
@@ -169,11 +172,14 @@ pub fn register_executors(
     });
 
     // Challenge lifecycle (T05).
-    engine.register(Arc::new(EnsureAccountStep::new(
-        challenge_deps.clone(),
-        settings.account_contacts.clone(),
-        settings.terms_agreed,
-    )));
+    engine.register(Arc::new(
+        EnsureAccountStep::new(
+            challenge_deps.clone(),
+            settings.account_contacts.clone(),
+            settings.terms_agreed,
+        )
+        .with_external_account_binding(settings.external_account_binding.clone()),
+    ));
     engine.register(Arc::new(CreateOrderStep::resolving(challenge_deps.clone())));
     engine.register(Arc::new(LoadAuthorizationsStep::new(
         challenge_deps.clone(),
@@ -370,6 +376,7 @@ pub async fn build_engine_from_config(
     if let Some(dns01) = config.challenge.dns01.as_ref() {
         settings.propagation_timeout = Duration::from_secs(dns01.propagation_timeout_secs);
     }
+    settings.external_account_binding = config.external_account_binding_ref()?;
 
     let ca_label = super::api::sanitize_ca_label(&config.acme.ca);
     let secret_store = FileSecretStore::new(settings.secret_store_dir.clone());

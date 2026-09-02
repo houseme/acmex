@@ -3,9 +3,6 @@
 /// associated with an ACME account (RFC 8555 Section 7.3.5).
 use crate::account::{Account, AccountManager, KeyPair};
 use crate::error::Result;
-use crate::protocol::{Jwk, JwsSigner};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
 /// Manages the process of rotating an ACME account's key pair.
@@ -45,27 +42,18 @@ impl<'a> KeyRollover<'a> {
         let directory = self.account_manager.directory_manager.get().await?;
         let key_change_url = directory.key_change;
 
-        // 2. Prepare new key information
-        let new_jwk =
-            Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.new_key_pair.public_key_bytes()));
-
-        // 3. Create inner JWS (signed by NEW key)
+        // 2. Create inner JWS (signed by NEW key). The construction is
+        // shared with the production ca_backend path to avoid protocol drift
+        // while this legacy CLI facade remains available.
         tracing::debug!("Creating inner JWS signed by the new key");
-        let inner_payload = json!({
-            "account": account_url,
-            "oldKey": self.account_manager.get_jwk()
-        });
+        let inner_jws_obj = crate::ca_backend::backend::key_change_inner_jws(
+            account_url,
+            &key_change_url,
+            self.account_manager.get_jwk(),
+            &self.new_key_pair,
+        )?;
 
-        let new_signer = JwsSigner::new(&self.new_key_pair.0);
-        let inner_header = json!({
-            "alg": "EdDSA",
-            "jwk": new_jwk.to_value(),
-            "url": key_change_url
-        });
-
-        let inner_jws = new_signer.sign(&inner_header, &inner_payload)?;
-
-        // 4. Create outer JWS (signed by OLD key)
+        // 3. Create outer JWS (signed by OLD key)
         tracing::debug!("Creating outer JWS signed by the old key");
         let nonce = self.account_manager.nonce_manager.get_nonce().await?;
 
@@ -76,20 +64,12 @@ impl<'a> KeyRollover<'a> {
             "url": key_change_url
         });
 
-        // The payload for the outer JWS is the inner JWS object
-        let inner_jws_parts: Vec<&str> = inner_jws.split('.').collect();
-        let inner_jws_obj = json!({
-            "protected": inner_jws_parts[0],
-            "payload": inner_jws_parts[1],
-            "signature": inner_jws_parts[2]
-        });
-
         let outer_jws = self
             .account_manager
             .get_signer()
             .sign(&outer_header, &inner_jws_obj)?;
 
-        // 5. Send request to the keyChange endpoint
+        // 4. Send request to the keyChange endpoint
         tracing::info!("Sending keyChange request to: {}", key_change_url);
         let response = self
             .account_manager

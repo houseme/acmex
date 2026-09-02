@@ -131,6 +131,7 @@ pub struct AcmeCaBackend {
     key_pair: tokio::sync::RwLock<Arc<KeyPair>>,
     repositories: RepositorySet,
     tenant: TenantId,
+    secrets: Arc<dyn SecretResolver>,
     nonce_pool: Arc<super::session::SharedNoncePool>,
     sessions: tokio::sync::RwLock<Vec<(String, Arc<AcmeSession>)>>,
 }
@@ -152,6 +153,7 @@ impl AcmeCaBackend {
             key_pair: tokio::sync::RwLock::new(key_pair),
             repositories,
             tenant: TenantId::default_tenant(),
+            secrets: Arc::new(EnvFileSecretResolver),
             nonce_pool: Arc::new(super::session::SharedNoncePool::new()),
             sessions: tokio::sync::RwLock::new(Vec::new()),
         }
@@ -166,6 +168,12 @@ impl AcmeCaBackend {
         repositories: RepositorySet,
     ) -> Self {
         Self::new(ca_id, directory_url, fake, key_pair, repositories)
+    }
+
+    /// Uses a deployment-provided secret resolver for EAB credentials.
+    pub fn with_secret_resolver(mut self, secrets: Arc<dyn SecretResolver>) -> Self {
+        self.secrets = secrets;
+        self
     }
 
     fn account_repo_id(&self) -> String {
@@ -233,15 +241,12 @@ impl AcmeCaBackend {
             eab = eab.redacted(),
             "binding external account"
         );
-        let secret = EnvFileSecretResolver
-            .resolve(&eab.hmac_key)
-            .await
-            .map_err(|err| {
-                AcmeError::configuration(format!(
-                    "cannot resolve EAB MAC key for CA {}: {err}",
-                    self.ca_id
-                ))
-            })?;
+        let secret = self.secrets.resolve(&eab.hmac_key).await.map_err(|err| {
+            AcmeError::configuration(format!(
+                "cannot resolve EAB MAC key for CA {}: {err}",
+                self.ca_id
+            ))
+        })?;
         let mac_key = URL_SAFE_NO_PAD.decode(secret.expose()).map_err(|_| {
             AcmeError::configuration(format!(
                 "EAB MAC key {} is not valid base64url; CAs issue base64url-encoded MAC keys",
@@ -403,29 +408,12 @@ impl CaBackend for AcmeCaBackend {
         let directory = session.directory().await?;
         let key_change_url = directory.key_change.clone();
 
-        // Inner JWS (RFC 8555 §7.3.5): signed by the NEW key, authenticated
-        // by its JWK (no nonce, no kid), binding the account URL to the OLD
-        // key's JWK. `JwsSigner` is used directly because this nested JWS is
-        // unique to keyChange; every other request goes through
-        // `execute_jws`.
-        let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
+        // Inner JWS (RFC 8555 §7.3.5): shared with the legacy facade so the
+        // nested signature semantics have one implementation while the outer
+        // request still goes through the session for nonce/error handling.
         let old_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes()));
-        let inner_header = json!({
-            "alg": "EdDSA",
-            "jwk": new_jwk.to_value(),
-            "url": key_change_url,
-        });
-        let inner_payload = json!({
-            "account": account.account_url,
-            "oldKey": old_jwk.to_value(),
-        });
-        let inner_jws = JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)?;
-        let inner_parts: Vec<&str> = inner_jws.split('.').collect();
-        let inner_object = json!({
-            "protected": inner_parts[0],
-            "payload": inner_parts[1],
-            "signature": inner_parts[2],
-        });
+        let inner_object =
+            key_change_inner_jws(&account.account_url, &key_change_url, &old_jwk, &new_key)?;
 
         // Outer JWS: the ordinary account-authenticated request path signs
         // it with the OLD key (kid = account URL, url = keyChange) — nonce
@@ -665,6 +653,55 @@ fn eab_binding_jws(
         "protected": protected_b64,
         "payload": payload_b64,
         "signature": URL_SAFE_NO_PAD.encode(signature),
+    }))
+}
+
+/// Builds the inner RFC 8555 §7.3.5 keyChange JWS object.
+///
+/// This is shared by the production `ca_backend` path and the legacy
+/// `AccountManager` facade, so the double-JWS core cannot drift between
+/// stacks while the old public API remains available.
+pub(crate) fn key_change_inner_jws(
+    account_url: &str,
+    key_change_url: &str,
+    old_jwk: &Jwk,
+    new_key: &KeyPair,
+) -> Result<serde_json::Value> {
+    let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
+    let inner_header = json!({
+        "alg": "EdDSA",
+        "jwk": new_jwk.to_value(),
+        "url": key_change_url,
+    });
+    let inner_payload = json!({
+        "account": account_url,
+        "oldKey": old_jwk.to_value(),
+    });
+    let inner_jws = JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)?;
+    compact_jws_to_object(&inner_jws)
+}
+
+/// Converts compact JWS serialization into the JSON object used by ACME.
+pub(crate) fn compact_jws_to_object(jws: &str) -> Result<serde_json::Value> {
+    let mut parts = jws.split('.');
+    let protected = parts
+        .next()
+        .ok_or_else(|| AcmeError::protocol("compact JWS missing protected header"))?;
+    let payload = parts
+        .next()
+        .ok_or_else(|| AcmeError::protocol("compact JWS missing payload"))?;
+    let signature = parts
+        .next()
+        .ok_or_else(|| AcmeError::protocol("compact JWS missing signature"))?;
+    if parts.next().is_some() {
+        return Err(AcmeError::protocol(
+            "compact JWS has more than three segments".to_string(),
+        ));
+    }
+    Ok(json!({
+        "protected": protected,
+        "payload": payload,
+        "signature": signature,
     }))
 }
 

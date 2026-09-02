@@ -66,6 +66,7 @@ fn render_config(options: &InitOptions) -> String {
 #
 # Secrets never live in this file:
 #   * Management API keys:    export ACMEX_API_KEYS="key1,key2"
+#   * CA EAB MAC keys:        [ca.eab] hmac_key = "env:ACMEX_EAB_HMAC"
 #   * DNS provider tokens:    [[challenge.dns01.providers]] api_token = "env:CF_DNS_TOKEN"
 #   * Webhook signing:        [notifications.webhook] signing_secret = "file:/run/secrets/wh"
 #
@@ -76,6 +77,13 @@ ca = "{ca}"
 ca_environment = "{env}"
 contact = ["{contact}"]
 tos_agreed = true
+
+# External Account Binding for CAs that require it (Google Trust Services,
+# ZeroSSL or CA-specific EAB accounts). The HMAC key must be a SecretRef; do
+# not paste the MAC key value into this file.
+# [ca.eab]
+# key_id = "ca-issued-key-id"
+# hmac_key = "env:ACMEX_EAB_HMAC"
 
 # File storage for legacy bundles and the durable repository (intents,
 # lineages, versions, operations, outbox). All state survives restarts.
@@ -294,6 +302,16 @@ mod tests {
             assert!(
                 line.contains("env:"),
                 "secret example must be a SecretRef: {line}"
+            );
+        }
+        for line in raw.lines().filter(|l| l.contains("hmac_key =")) {
+            assert!(
+                line.trim_start().starts_with('#'),
+                "uncommented EAB secret: {line}"
+            );
+            assert!(
+                line.contains("env:"),
+                "EAB secret example must be a SecretRef: {line}"
             );
         }
 

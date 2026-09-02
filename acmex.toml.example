@@ -12,6 +12,12 @@ ca_environment = "staging"
 contact = ["mailto:admin@example.com"]
 tos_agreed = true
 
+# External Account Binding for CAs that require it. The HMAC key is always a
+# SecretRef (env:/file:/vault:/provider:), never a literal secret value.
+# [ca.eab]
+# key_id = "ca-issued-key-id"
+# hmac_key = "env:ACMEX_EAB_HMAC"
+
 [storage]
 backend = "file"
 

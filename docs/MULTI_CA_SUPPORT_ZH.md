@@ -41,9 +41,9 @@ contact = ["mailto:admin@example.com"]
 [acme]
 ca = "google"
 # Google 通常需要 EAB
-[acme.external_account_binding]
+[ca.eab]
 key_id = "your-key-id"
-hmac_key = "your-hmac-key"
+hmac_key = "env:ACMEX_EAB_HMAC"
 ```
 
 ### 示例：使用自定义 CA

@@ -82,3 +82,13 @@ RUN_PEBBLE_E2E=1 scripts/run_pebble_e2e.sh   # EAB/rollover 场景（依赖 T13 
 - [ ] 配置、模板、文档中的 EAB 凭据均为 SecretRef 形式，明文 secret 被拒绝（有测试）。
 - [ ] 双 JWS 栈的行为分歧清单归档，nonce/JWS/错误分类单源化。
 - [ ] v0.9.0 审计第 4 条（EAB stub / rollover / facade）可标记关闭。
+
+---
+
+## 8. 当前实现记录（2026-09-02 T14 收口）
+
+- 稳定配置面使用 `[ca.eab]`，`hmac_key` 必须是 SecretRef；旧 `[acme.external_account_binding]` 仅作为兼容别名读取，双写会被配置验证拒绝。
+- 生产 `server::worker::build_engine_from_config` 将 EAB 配置传入 `EnsureAccountStep`，再进入 `ca_backend::ensure_account`；`acmex init` 与 `acmex.toml.example` 已给出 SecretRef 示例且不包含明文 HMAC。
+- `AcmeCaBackend` 的 EAB resolver 已可注入；默认 resolver 支持 `env:`/`file:`，`vault:`/`provider:` 由部署提供自定义 resolver。
+- keyChange 内层 JWS 构造已抽为 `ca_backend::key_change_inner_jws`，新 `ca_backend` rollover 与 legacy `account::KeyRollover` 共享该实现，减少双栈漂移。
+- 未宣称完成项：旧 `AcmeClient`/`AccountManager` 仍保留独立 HTTP、nonce 与错误分类路径，等待后续 facade 迁移；Pebble EAB/rollover 需要 T13 harness 环境执行后才能勾选。

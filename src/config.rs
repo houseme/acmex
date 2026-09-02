@@ -18,6 +18,10 @@ pub struct Config {
     #[serde(default)]
     pub acme: AcmeSettings,
 
+    /// CA-specific runtime settings for new v0.10 surfaces.
+    #[serde(default)]
+    pub ca: CaSettings,
+
     /// Storage backend settings.
     #[serde(default)]
     pub storage: StorageSettings,
@@ -83,6 +87,17 @@ pub struct AcmeSettings {
     pub directory: String,
 }
 
+/// CA-specific runtime configuration.
+///
+/// New v0.10 settings live under `[ca]` so they are not confused with the
+/// legacy ACME endpoint selector in `[acme]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CaSettings {
+    /// Optional External Account Binding configuration (`[ca.eab]`).
+    #[serde(default)]
+    pub eab: Option<ExternalAccountBinding>,
+}
+
 impl AcmeSettings {
     /// Converts the settings into a `CAConfig` for endpoint resolution.
     pub fn to_ca_config(&self) -> Result<CAConfig> {
@@ -142,6 +157,16 @@ impl AcmeSettings {
 pub struct ExternalAccountBinding {
     pub key_id: String,
     pub hmac_key: SecretRef,
+}
+
+impl ExternalAccountBinding {
+    /// Converts config into the CA backend reference type.
+    pub fn to_backend_ref(&self) -> crate::ca_backend::ExternalAccountBindingRef {
+        crate::ca_backend::ExternalAccountBindingRef {
+            key_id: self.key_id.clone(),
+            hmac_key: self.hmac_key.clone(),
+        }
+    }
 }
 
 /// Repository settings for the v0.9 domain persistence layer.
@@ -978,7 +1003,38 @@ impl Config {
             propagation.validate()?;
         }
 
+        self.external_account_binding_ref()?;
+
         Ok(())
+    }
+
+    /// Returns the configured EAB reference for account registration.
+    ///
+    /// `[ca.eab]` is the stable v0.10 location. `[acme.external_account_binding]`
+    /// remains accepted as a deprecated compatibility alias, but setting both
+    /// locations is rejected so one deployment cannot silently bind different
+    /// account credentials in different code paths.
+    pub fn external_account_binding_ref(
+        &self,
+    ) -> Result<Option<crate::ca_backend::ExternalAccountBindingRef>> {
+        let stable = self.ca.eab.as_ref();
+        let legacy = self.acme.external_account_binding.as_ref();
+        let selected = match (stable, legacy) {
+            (Some(_), Some(_)) => {
+                return Err(AcmeError::configuration(
+                    "configure EAB in either [ca.eab] or deprecated [acme.external_account_binding], not both",
+                ));
+            }
+            (Some(eab), None) | (None, Some(eab)) => Some(eab),
+            (None, None) => None,
+        };
+        if let Some(eab) = selected {
+            if eab.key_id.trim().is_empty() {
+                return Err(AcmeError::configuration("EAB key_id cannot be empty"));
+            }
+            return Ok(Some(eab.to_backend_ref()));
+        }
+        Ok(None)
     }
 
     /// Returns the resolved ACME directory URL.
@@ -1039,7 +1095,7 @@ ca_environment = "staging"
 ca = "letsencrypt"
 ca_environment = "staging"
 
-[acme.external_account_binding]
+[ca.eab]
 key_id = "kid-1"
 hmac_key = "env:EAB_HMAC"
 
@@ -1060,7 +1116,7 @@ password = "env:SMTP_PASSWORD"
 "#;
         let config = Config::from_str(toml).unwrap();
         assert!(matches!(
-            config.acme.external_account_binding.unwrap().hmac_key,
+            config.ca.eab.unwrap().hmac_key,
             SecretRef::Env { .. }
         ));
         assert!(matches!(
@@ -1080,6 +1136,57 @@ password = "env:SMTP_PASSWORD"
             notifications.email[0].password,
             Some(SecretRef::Env { .. })
         ));
+    }
+
+    #[test]
+    fn deprecated_acme_eab_alias_still_parses() {
+        let toml = r#"
+[acme.external_account_binding]
+key_id = "kid-legacy"
+hmac_key = "file:/run/secrets/eab"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        let eab = config.external_account_binding_ref().unwrap().unwrap();
+        assert_eq!(eab.key_id, "kid-legacy");
+        assert!(matches!(eab.hmac_key, SecretRef::File { .. }));
+    }
+
+    #[test]
+    fn eab_rejects_ambiguous_double_configuration() {
+        let toml = r#"
+[ca.eab]
+key_id = "kid-stable"
+hmac_key = "env:EAB_HMAC"
+
+[acme.external_account_binding]
+key_id = "kid-legacy"
+hmac_key = "file:/run/secrets/eab"
+"#;
+        let err = Config::from_str(toml)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[ca.eab]"), "got: {err}");
+        assert!(
+            err.contains("[acme.external_account_binding]"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn eab_rejects_empty_key_id() {
+        let toml = r#"
+[ca.eab]
+key_id = " "
+hmac_key = "env:EAB_HMAC"
+"#;
+        let err = Config::from_str(toml)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("EAB key_id cannot be empty"), "got: {err}");
     }
 
     #[test]
