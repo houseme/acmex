@@ -28,8 +28,9 @@ pub mod policy;
 
 pub use account::{AccountRecord, AccountStatus};
 pub use certificate::{
-    CertificateLineage, CertificateVerificationCheck, CertificateVerificationReport,
-    CertificateVersion, ImportedBundle, KeyRef, VersionState,
+    CertificateLineage, CertificateVerificationCheck, CertificateVerificationConclusion,
+    CertificateVerificationReport, CertificateVerificationStatus, CertificateVersion,
+    ImportedBundle, KeyRef, VersionState,
 };
 pub use challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
 pub use deployment::{DeploymentRecord, DeploymentState};

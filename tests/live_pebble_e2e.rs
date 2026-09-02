@@ -56,6 +56,7 @@ struct PebbleEnv {
     challtestsrv_admin: String,
     challtestsrv_dns: String,
     domain: String,
+    trust_anchor_pem_file: Option<String>,
 }
 
 impl PebbleEnv {
@@ -65,6 +66,20 @@ impl PebbleEnv {
             challtestsrv_admin: env_or("PEBBLE_CHALLTESTSRV_ADMIN", "http://127.0.0.1:8055"),
             challtestsrv_dns: env_or("PEBBLE_CHALLTESTSRV_DNS", "127.0.0.1:8053"),
             domain: env_or("PEBBLE_E2E_DOMAIN", "acmex-test.example.com"),
+            trust_anchor_pem_file: std::env::var("PEBBLE_TRUST_ANCHOR_PEM_FILE").ok(),
+        }
+    }
+}
+
+fn read_trust_anchor_pem(path: &str) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(pem) => Some(pem),
+        Err(err) => {
+            eprintln!(
+                "SKIP: PEBBLE_TRUST_ANCHOR_PEM_FILE `{path}` could not be read ({err}). \
+                 A skipped Pebble run is not a release pass."
+            );
+            None
         }
     }
 }
@@ -322,6 +337,19 @@ async fn pebble_full_issuance_dns01() {
         return;
     }
     let env = PebbleEnv::load();
+    let trust_anchor_pem = match env.trust_anchor_pem_file.as_deref() {
+        Some(path) => match read_trust_anchor_pem(path) {
+            Some(pem) => pem,
+            None => return,
+        },
+        None => {
+            eprintln!(
+                "SKIP: PEBBLE_TRUST_ANCHOR_PEM_FILE is required for strict certificate \
+                 trust verification. A skipped Pebble run is not a release pass."
+            );
+            return;
+        }
+    };
     println!(
         "🎯 Pebble E2E against {} ({})",
         env.directory_url, env.domain
@@ -415,6 +443,7 @@ async fn pebble_full_issuance_dns01() {
         &WorkflowWorkerSettings {
             propagation_timeout: Duration::from_secs(120),
             challenge_poll_interval: Duration::from_secs(2),
+            trust_anchor_pems: vec![trust_anchor_pem],
             terms_agreed: true,
             ..Default::default()
         },

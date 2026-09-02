@@ -26,10 +26,15 @@ export PEBBLE_CHALLTESTSRV_ADMIN="${PEBBLE_CHALLTESTSRV_ADMIN:-http://127.0.0.1:
 export PEBBLE_E2E_DOMAIN="${PEBBLE_E2E_DOMAIN:-acmex-test.example.com}"
 export PEBBLE_E2E_ARTIFACT_DIR="${PEBBLE_E2E_ARTIFACT_DIR:-$REPO_DIR/target/pebble-e2e/$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$PEBBLE_E2E_ARTIFACT_DIR"
+PEBBLE_TRUST_ANCHOR_TEMP="${PEBBLE_TRUST_ANCHOR_PEM_FILE:-$(mktemp "${TMPDIR:-/tmp}/acmex-pebble-root.XXXXXX.pem")}"
+export PEBBLE_TRUST_ANCHOR_PEM_FILE="$PEBBLE_TRUST_ANCHOR_TEMP"
 
 cleanup() {
   docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" logs --no-color >"$PEBBLE_E2E_ARTIFACT_DIR/compose.log" 2>&1 || true
   docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" down -v >/dev/null 2>&1 || true
+  if [[ "$PEBBLE_TRUST_ANCHOR_TEMP" == "${TMPDIR:-/tmp}"/acmex-pebble-root.*.pem ]]; then
+    rm -f "$PEBBLE_TRUST_ANCHOR_TEMP"
+  fi
 }
 trap cleanup EXIT
 
@@ -43,6 +48,12 @@ EOF
 
 echo "== starting pebble + challtestsrv"
 docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" up -d --wait
+
+if [[ ! -s "$PEBBLE_TRUST_ANCHOR_PEM_FILE" ]]; then
+  echo "== extracting Pebble trust anchor to $PEBBLE_TRUST_ANCHOR_PEM_FILE"
+  docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" cp \
+    pebble:/test/certs/pebble.minica.pem "$PEBBLE_TRUST_ANCHOR_PEM_FILE"
+fi
 
 echo "== waiting for the pebble directory at $PEBBLE_DIRECTORY_URL"
 ready=0

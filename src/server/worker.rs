@@ -87,6 +87,10 @@ pub struct WorkflowWorkerSettings {
     pub challenge_poll_interval: Duration,
     /// Account contacts used for ACME registration.
     pub account_contacts: Vec<String>,
+    /// PEM trust anchors used by certificate verification.
+    pub trust_anchor_pems: Vec<String>,
+    /// Explicitly skip certificate trust-anchor verification.
+    pub skip_certificate_trust_check: bool,
     /// Whether the terms of service are agreed for registration.
     pub terms_agreed: bool,
     /// External Account Binding used when the CA requires EAB.
@@ -104,6 +108,8 @@ impl Default for WorkflowWorkerSettings {
             propagation_timeout: Duration::from_secs(600),
             challenge_poll_interval: Duration::from_secs(15),
             account_contacts: vec![],
+            trust_anchor_pems: vec![],
+            skip_certificate_trust_check: false,
             terms_agreed: true,
             external_account_binding: None,
             secret_store_dir: std::path::PathBuf::from(".acmex/secrets"),
@@ -169,6 +175,8 @@ pub fn register_executors(
         key_provider,
         orchestrator,
         poll_interval: settings.challenge_poll_interval,
+        trust_anchor_pems: settings.trust_anchor_pems.clone(),
+        skip_certificate_trust_check: settings.skip_certificate_trust_check,
     });
 
     // Challenge lifecycle (T05).
@@ -202,7 +210,7 @@ pub fn register_executors(
     engine.register(Arc::new(DownloadCertificateStep::new(
         issuance_deps.clone(),
     )));
-    engine.register(Arc::new(VerifyCertificateStep::new()));
+    engine.register(Arc::new(VerifyCertificateStep::new(issuance_deps.clone())));
     engine.register(Arc::new(PersistVersionStep::new(issuance_deps.clone())));
     engine.register(Arc::new(ScheduleDeploymentsStep::new(
         issuance_deps.clone(),
@@ -377,6 +385,8 @@ pub async fn build_engine_from_config(
         settings.propagation_timeout = Duration::from_secs(dns01.propagation_timeout_secs);
     }
     settings.external_account_binding = config.external_account_binding_ref()?;
+    settings.trust_anchor_pems = load_trust_anchor_pems(config)?;
+    settings.skip_certificate_trust_check = config.acme.skip_certificate_trust_check;
 
     let ca_label = super::api::sanitize_ca_label(&config.acme.ca);
     let secret_store = FileSecretStore::new(settings.secret_store_dir.clone());
@@ -443,6 +453,21 @@ pub async fn build_engine_from_config(
     );
 
     Ok(engine)
+}
+
+fn load_trust_anchor_pems(config: &Config) -> crate::error::Result<Vec<String>> {
+    config
+        .acme
+        .trust_anchor_pem_files
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path).map_err(|err| {
+                crate::error::AcmeError::configuration(format!(
+                    "failed to read ACME trust anchor PEM file `{path}`: {err}"
+                ))
+            })
+        })
+        .collect()
 }
 
 /// Builds the engine (see [`build_engine_from_config`]) and spawns its

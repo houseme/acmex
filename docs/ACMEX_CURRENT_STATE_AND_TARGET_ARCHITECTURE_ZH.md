@@ -180,13 +180,15 @@ AcmeX 当前已经具备较丰富的 ACME v2 基础模块：Directory、Nonce、
 
 ### 4.7 证书验证和状态检查
 
-当前已实现证书 PEM 解析、SAN 读取、基础有效期判断和 OCSP URL 提取。
+当前已实现证书 PEM 解析、SAN 读取、基础有效期判断、签名链一致性、可配置信任锚校验和 OCSP URL 提取。
 
 当前主要不足：
 
-- `CertificateChain::verify()` 没有完成真正的签名链和系统信任根验证。
-- 叶子证书的有效期、Identifier 精确匹配、Key Usage 和 Extended Key Usage 没有形成统一验收。
-- `OcspVerifier` 当前通过 URL 形式模拟 `Good`，并没有构造、发送和验证 OCSP 请求。
+- 系统信任根自动发现尚未接入；当前信任锚需经 ACME 配置显式提供。默认配置下缺少
+  `trust_anchor_pem_files` 会使 `chain_trusted` 失败；只有显式设置
+  `skip_certificate_trust_check = true` 时报告才允许记录为 `not-checked`。
+- Key Usage 和 Extended Key Usage 尚未形成统一验收。
+- 原 `OcspVerifier` 模拟 `Good` 的公共能力已移除；真实 OCSP/CRL 请求、响应验证仍未实现。
 - 不应把 OCSP 作为所有 CA 的通用假设；目标架构应按 CA capability 支持 OCSP、CRL 或短周期证书策略。
 
 ---
@@ -748,4 +750,3 @@ RFC 8738 定义了 `ip` Identifier，并规定：
 - [ACME Profiles Internet-Draft](https://datatracker.ietf.org/doc/html/draft-ietf-acme-profiles)
 - [Let's Encrypt Challenge Types](https://letsencrypt.org/docs/challenge-types/)
 - [Let's Encrypt 6-day and IP Address Certificates](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability.html)
-

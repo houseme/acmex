@@ -327,6 +327,8 @@ pub mod error_codes {
     pub const CHALLENGE_PROPAGATION_TIMEOUT: Code = Code::new("CHALLENGE_PROPAGATION_TIMEOUT");
     /// Cleaning up challenge resources failed.
     pub const CHALLENGE_CLEANUP_FAILED: Code = Code::new("CHALLENGE_CLEANUP_FAILED");
+    /// An issued certificate failed the strict acceptance checks.
+    pub const CERTIFICATE_VERIFICATION_FAILED: Code = Code::new("CERTIFICATE_VERIFICATION_FAILED");
     /// Provider rejected the credentials.
     pub const PROVIDER_AUTH_FAILED: Code = Code::new("PROVIDER_AUTH_FAILED");
     /// Optimistic-concurrency conflict (should re-read and retry).

@@ -281,12 +281,37 @@ struct SpineFixture {
     transport: Arc<FakeAcmeTransport>,
 }
 
+#[derive(Default)]
+struct FixtureVerification {
+    trust_anchor_pems: Vec<String>,
+    skip_certificate_trust_check: bool,
+}
+
 async fn build_fixture(
     identifiers: &IdentifierSet,
     delivery_targets: Vec<DeliveryTarget>,
     active_version: Option<CertificateVersion>,
     profile: Option<&str>,
     directory: serde_json::Value,
+) -> SpineFixture {
+    build_fixture_with_verification(
+        identifiers,
+        delivery_targets,
+        active_version,
+        profile,
+        directory,
+        FixtureVerification::default(),
+    )
+    .await
+}
+
+async fn build_fixture_with_verification(
+    identifiers: &IdentifierSet,
+    delivery_targets: Vec<DeliveryTarget>,
+    active_version: Option<CertificateVersion>,
+    profile: Option<&str>,
+    directory: serde_json::Value,
+    verification: FixtureVerification,
 ) -> SpineFixture {
     let clock = Arc::new(FakeClock::at(now()));
     let repositories = MemoryRepository::with_clock(clock.clone()).into_set();
@@ -373,6 +398,8 @@ async fn build_fixture(
         &mut engine,
         &WorkflowWorkerSettings {
             challenge_poll_interval: Duration::from_millis(50),
+            trust_anchor_pems: verification.trust_anchor_pems,
+            skip_certificate_trust_check: verification.skip_certificate_trust_check,
             ..Default::default()
         },
         acmex::server::worker::WorkflowWorkerComponents {
@@ -474,7 +501,19 @@ fn cleanup_dir(path: &std::path::Path) {
 #[tokio::test]
 async fn full_issuance_spine_activates_persisted_version() {
     let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
-    let fixture = build_fixture(&identifiers, Vec::new(), None, None, directory()).await;
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
 
     let op_id = OperationId::new("op_spine_issue").unwrap();
     let record = OperationRecord::new(
@@ -498,7 +537,6 @@ async fn full_issuance_spine_activates_persisted_version() {
 
     // The fake CA issues a leaf whose subject public key IS the CSR's key.
     let csr_key = fixture.drive_until_csr(&op_id).await;
-    let ca = test_ca("acmex test ca");
     fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
 
     let final_record = fixture.drive_to_terminal(&op_id).await;
@@ -537,22 +575,44 @@ async fn full_issuance_spine_activates_persisted_version() {
         .unwrap();
     let report: acmex::domain::CertificateVerificationReport =
         serde_json::from_str(verify.output_ref.as_deref().unwrap()).unwrap();
-    assert!(report.all_passed(), "failed: {:?}", report.failed_checks());
+    assert!(report.accepted(), "failed: {:?}", report.failed_checks());
     assert!(report.identifiers_exact_match);
     assert!(!report.serial.is_empty());
     assert_eq!(
         report
             .checks
             .iter()
-            .map(|c| c.name.as_str())
+            .map(|c| (c.check.as_str(), c.status))
             .collect::<Vec<_>>(),
         vec![
-            "chain_parsed",
-            "san_exact",
-            "validity_window",
-            "serial_present",
-            "csr_public_key_matches",
-            "chain_internally_consistent"
+            (
+                "chain_parsed",
+                acmex::domain::CertificateVerificationStatus::Pass
+            ),
+            (
+                "san_exact",
+                acmex::domain::CertificateVerificationStatus::Pass
+            ),
+            (
+                "validity_window",
+                acmex::domain::CertificateVerificationStatus::Pass
+            ),
+            (
+                "serial_present",
+                acmex::domain::CertificateVerificationStatus::Pass
+            ),
+            (
+                "csr_public_key_matches",
+                acmex::domain::CertificateVerificationStatus::Pass
+            ),
+            (
+                "chain_internally_consistent",
+                acmex::domain::CertificateVerificationStatus::Pass
+            ),
+            (
+                "chain_trusted",
+                acmex::domain::CertificateVerificationStatus::Pass
+            )
         ]
     );
 
@@ -566,6 +626,14 @@ async fn full_issuance_spine_activates_persisted_version() {
         .unwrap()
         .expect("version persisted");
     assert_eq!(version.value.state, VersionState::Active);
+    assert_eq!(
+        version
+            .value
+            .verification_report
+            .as_ref()
+            .map(|report| report.conclusion),
+        Some(acmex::domain::CertificateVerificationConclusion::Accepted)
+    );
     // Serial persisted from the leaf; no private key material anywhere.
     assert!(!version.value.serial.is_empty());
     assert!(
@@ -587,6 +655,130 @@ async fn full_issuance_spine_activates_persisted_version() {
     assert_eq!(fixture.presenter.resource_count().await, 0);
     // The managed key exists in the secret store.
     assert!(fixture.key_store_dir.join("keys").exists() || fixture.key_store_dir.exists());
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// Trust-anchor verification is strict by default: a syntactically valid,
+/// internally consistent chain is still rejected when no trust anchor is
+/// configured.
+#[tokio::test]
+async fn verification_fails_without_trust_anchor_by_default() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let fixture = build_fixture(&identifiers, Vec::new(), None, None, directory()).await;
+
+    let op_id = OperationId::new("op_spine_missing_anchor").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_missing_anchor",
+            "spine-missing-anchor",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let csr_key = fixture.drive_until_csr(&op_id).await;
+    let ca = test_ca("acmex test ca");
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Failed,
+        "expected missing trust anchor to fail, got: {:?}",
+        final_record.error
+    );
+    let detail = final_record
+        .error
+        .expect("failure carries an error")
+        .detail
+        .expect("failure detail");
+    assert!(
+        detail.contains("chain_trusted"),
+        "error should name the trust check: {detail}"
+    );
+    assert!(
+        fixture
+            .repositories
+            .versions
+            .get(&VersionId::new("ver_op_spine_missing_anchor").unwrap())
+            .await
+            .unwrap()
+            .is_none(),
+        "untrusted certificate must not be persisted"
+    );
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// `not-checked` is reserved for an explicit configuration skip. This keeps
+/// the public report from treating missing trust roots as a quiet success.
+#[tokio::test]
+async fn verification_not_checked_requires_explicit_trust_skip() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: Vec::new(),
+            skip_certificate_trust_check: true,
+        },
+    )
+    .await;
+
+    let op_id = OperationId::new("op_spine_explicit_trust_skip").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_explicit_trust_skip",
+            "spine-explicit-trust-skip",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let csr_key = fixture.drive_until_csr(&op_id).await;
+    let ca = test_ca("acmex test ca");
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}",
+        final_record.error
+    );
+    let verify = final_record
+        .steps
+        .iter()
+        .find(|s| s.kind == acmex::domain::WorkflowStepKind::VerifyCertificate)
+        .unwrap();
+    let report: acmex::domain::CertificateVerificationReport =
+        serde_json::from_str(verify.output_ref.as_deref().unwrap()).unwrap();
+    let trust_check = report
+        .checks
+        .iter()
+        .find(|check| check.check == "chain_trusted")
+        .expect("chain_trusted check recorded");
+    assert_eq!(
+        trust_check.status,
+        acmex::domain::CertificateVerificationStatus::NotChecked
+    );
+    assert!(
+        trust_check
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("explicitly disabled by configuration"),
+        "detail must identify the explicit skip source: {:?}",
+        trust_check.detail
+    );
 
     cleanup_dir(&fixture.key_store_dir);
 }
@@ -621,6 +813,7 @@ async fn renewal_spine_supersedes_old_version_after_file_deployment() {
         key_ref: soft_key_ref(),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state: VersionState::Active,
     };
     let target = DeliveryTarget::new(
@@ -629,12 +822,17 @@ async fn renewal_spine_supersedes_old_version_after_file_deployment() {
         deploy_root.to_string_lossy().as_ref(),
     )
     .unwrap();
-    let fixture = build_fixture(
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
         &identifiers,
         vec![target],
         Some(old_version),
         None,
         directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
     )
     .await;
 
@@ -661,7 +859,6 @@ async fn renewal_spine_supersedes_old_version_after_file_deployment() {
     // The fake CA issues with the reused key (rotation = Reuse), like the
     // first issuance.
     let csr_key = fixture.drive_until_csr(&op_id).await;
-    let ca = test_ca("acmex test ca");
     fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
 
     let final_record = fixture.drive_to_terminal(&op_id).await;
@@ -971,7 +1168,19 @@ fn issue_record(op: &str, idempotency_key: &str, now: Timestamp) -> OperationRec
 #[tokio::test]
 async fn verification_fails_when_leaf_key_differs_from_csr() {
     let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
-    let fixture = build_fixture(&identifiers, Vec::new(), None, None, directory()).await;
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
 
     let op_id = OperationId::new("op_spine_csr_mismatch").unwrap();
     fixture
@@ -987,8 +1196,8 @@ async fn verification_fails_when_leaf_key_differs_from_csr() {
 
     // The CA misbehaves: it issues with a fresh key instead of the CSR's.
     let _csr_key = fixture.drive_until_csr(&op_id).await;
-    let (_leaf, _ca, chain) = issued_chain("example.com");
-    fixture.serve_certificate(&chain);
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    fixture.serve_certificate(&chain_for_key("example.com", &leaf_key, &ca));
 
     let final_record = fixture.drive_to_terminal(&op_id).await;
     assert_eq!(
@@ -1030,7 +1239,19 @@ async fn verification_fails_when_leaf_key_differs_from_csr() {
 #[tokio::test]
 async fn verification_fails_when_leaf_not_signed_by_included_intermediate() {
     let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
-    let fixture = build_fixture(&identifiers, Vec::new(), None, None, directory()).await;
+    let included_ca = test_ca("acmex included ca");
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![included_ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
 
     let op_id = OperationId::new("op_spine_wrong_issuer").unwrap();
     fixture
@@ -1048,7 +1269,6 @@ async fn verification_fails_when_leaf_not_signed_by_included_intermediate() {
     // includes a different intermediate.
     let csr_key = fixture.drive_until_csr(&op_id).await;
     let signing_ca = test_ca("acmex signing ca");
-    let included_ca = test_ca("acmex included ca");
     let leaf_pem = ca_signed_leaf_pem("example.com", &csr_key, &signing_ca);
     fixture.serve_certificate(&format!("{leaf_pem}{}", included_ca.pem()));
 
@@ -1147,12 +1367,17 @@ async fn unadvertised_profile_rejected_before_order_creation() {
 #[tokio::test]
 async fn advertised_profile_flows_through_issuance() {
     let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
-    let fixture = build_fixture(
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
         &identifiers,
         Vec::new(),
         None,
         Some("shortlived"),
         directory_with_profile("shortlived"),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
     )
     .await;
 
@@ -1169,7 +1394,6 @@ async fn advertised_profile_flows_through_issuance() {
         .unwrap();
 
     let csr_key = fixture.drive_until_csr(&op_id).await;
-    let ca = test_ca("acmex test ca");
     fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
 
     let final_record = fixture.drive_to_terminal(&op_id).await;
@@ -1188,7 +1412,7 @@ async fn advertised_profile_flows_through_issuance() {
         .unwrap();
     let report: acmex::domain::CertificateVerificationReport =
         serde_json::from_str(verify.output_ref.as_deref().unwrap()).unwrap();
-    assert!(report.all_passed(), "failed: {:?}", report.failed_checks());
+    assert!(report.accepted(), "failed: {:?}", report.failed_checks());
     assert_eq!(report.profile.as_deref(), Some("shortlived"));
 
     cleanup_dir(&fixture.key_store_dir);

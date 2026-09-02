@@ -102,6 +102,11 @@ pub struct CertificateVersion {
     /// Which version superseded this one, if any.
     #[serde(default)]
     pub superseded_by: Option<VersionId>,
+    /// Verification evidence captured before this immutable version was
+    /// persisted. This report contains only public certificate metadata and
+    /// sanitized diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_report: Option<CertificateVerificationReport>,
     /// Lifecycle state.
     pub state: VersionState,
 }
@@ -221,28 +226,140 @@ pub struct ImportedBundle {
     pub key_mode: KeyManagementMode,
 }
 
+/// Stable status for one verification check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CertificateVerificationStatus {
+    /// The check ran and passed.
+    #[default]
+    Pass,
+    /// The check ran and failed.
+    Fail,
+    /// The check was intentionally skipped by a documented policy.
+    NotChecked,
+}
+
+impl CertificateVerificationStatus {
+    /// Whether this status blocks certificate acceptance.
+    pub fn is_failure(self) -> bool {
+        matches!(self, Self::Fail)
+    }
+}
+
+/// Overall verification decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CertificateVerificationConclusion {
+    /// The certificate may be persisted and activated by later gates.
+    #[default]
+    Accepted,
+    /// The certificate is terminally rejected.
+    Rejected,
+}
+
 /// One named check inside a [`CertificateVerificationReport`].
 ///
-/// `name` is a stable, machine-readable identifier (e.g. `san_exact`);
+/// `check` is a stable, machine-readable identifier (e.g. `san_exact`);
 /// `detail` carries human context and must never contain key material.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CertificateVerificationCheck {
     /// Stable check name (`chain_parsed`, `san_exact`, `validity_window`, ...).
-    pub name: String,
-    /// Whether the check passed.
-    pub passed: bool,
+    pub check: String,
+    /// Whether the check passed, failed, or was explicitly skipped.
+    pub status: CertificateVerificationStatus,
     /// Optional human-readable context (no secrets).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Stable error code for a failed check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+impl CertificateVerificationCheck {
+    /// Creates a passing check.
+    pub fn pass(check: impl Into<String>) -> Self {
+        Self {
+            check: check.into(),
+            status: CertificateVerificationStatus::Pass,
+            detail: None,
+            error_code: None,
+        }
+    }
+
+    /// Creates a failed check.
+    pub fn fail(
+        check: impl Into<String>,
+        error_code: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            check: check.into(),
+            status: CertificateVerificationStatus::Fail,
+            detail: Some(detail.into()),
+            error_code: Some(error_code.into()),
+        }
+    }
+
+    /// Creates an explicitly skipped check.
+    pub fn not_checked(check: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            check: check.into(),
+            status: CertificateVerificationStatus::NotChecked,
+            detail: Some(detail.into()),
+            error_code: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CertificateVerificationCheck {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            #[serde(alias = "name")]
+            check: String,
+            #[serde(default)]
+            status: Option<CertificateVerificationStatus>,
+            #[serde(default)]
+            passed: Option<bool>,
+            #[serde(default)]
+            detail: Option<String>,
+            #[serde(default)]
+            error_code: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let status = wire.status.unwrap_or(match wire.passed {
+            Some(false) => CertificateVerificationStatus::Fail,
+            _ => CertificateVerificationStatus::Pass,
+        });
+        Ok(Self {
+            check: wire.check,
+            status,
+            detail: wire.detail,
+            error_code: wire.error_code,
+        })
+    }
 }
 
 /// The strict acceptance report produced when an issued chain is verified
 /// against its intent (roadmap T07): which checks ran, the observed
 /// validity window, serial and issuer. Persisted as the
 /// `VerifyCertificate` step output so the evidence survives restarts and
-/// audits — a certificate is only persisted when every check passed.
+/// audits — a certificate is only persisted when the report is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CertificateVerificationReport {
+    /// Wire schema version. Starts at 1 for the v0.10.0 public surface.
+    #[serde(default = "default_verification_report_schema_version")]
+    pub schema_version: u32,
+    /// Overall verifier decision.
+    #[serde(default)]
+    pub conclusion: CertificateVerificationConclusion,
+    /// Stable terminal error code when `conclusion = rejected`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     /// Whether the SAN set exactly matches the intent identifiers.
     pub identifiers_exact_match: bool,
     /// Observed validity start (RFC 3339).
@@ -262,19 +379,63 @@ pub struct CertificateVerificationReport {
 }
 
 impl CertificateVerificationReport {
-    /// Whether every recorded check passed.
+    /// Builds the public report from observed certificate metadata and checks.
+    pub fn new(
+        identifiers_exact_match: bool,
+        not_before: String,
+        not_after: String,
+        serial: String,
+        ca: Option<String>,
+        profile: Option<String>,
+        checks: Vec<CertificateVerificationCheck>,
+    ) -> Self {
+        let rejected = checks.iter().any(|check| check.status.is_failure());
+        Self {
+            schema_version: default_verification_report_schema_version(),
+            conclusion: if rejected {
+                CertificateVerificationConclusion::Rejected
+            } else {
+                CertificateVerificationConclusion::Accepted
+            },
+            error_code: rejected.then(|| {
+                crate::domain::error_codes::CERTIFICATE_VERIFICATION_FAILED
+                    .as_str()
+                    .to_string()
+            }),
+            identifiers_exact_match,
+            not_before,
+            not_after,
+            serial,
+            ca,
+            profile,
+            checks,
+        }
+    }
+
+    /// Whether every recorded check ran and passed.
     pub fn all_passed(&self) -> bool {
-        self.checks.iter().all(|check| check.passed)
+        self.checks
+            .iter()
+            .all(|check| check.status == CertificateVerificationStatus::Pass)
+    }
+
+    /// Whether this report accepted the certificate.
+    pub fn accepted(&self) -> bool {
+        self.conclusion == CertificateVerificationConclusion::Accepted
     }
 
     /// The names of the failed checks (diagnostics).
     pub fn failed_checks(&self) -> Vec<&str> {
         self.checks
             .iter()
-            .filter(|check| !check.passed)
-            .map(|check| check.name.as_str())
+            .filter(|check| check.status.is_failure())
+            .map(|check| check.check.as_str())
             .collect()
     }
+}
+
+fn default_verification_report_schema_version() -> u32 {
+    1
 }
 
 #[cfg(test)]
@@ -297,6 +458,7 @@ mod tests {
             key_ref: KeyRef::software(super::super::KeyId::generate(), KeyAlgorithm::EcP256),
             replaces: None,
             superseded_by: None,
+            verification_report: None,
             state,
         }
     }
@@ -325,6 +487,47 @@ mod tests {
         let superseded = active.transition(VersionState::Superseded).unwrap();
         assert!(superseded.transition(VersionState::Active).is_err());
         assert!(superseded.transition(VersionState::Issued).is_err());
+    }
+
+    #[test]
+    fn verification_check_reads_legacy_name_passed_shape() {
+        let check: CertificateVerificationCheck = serde_json::from_value(serde_json::json!({
+            "name": "san_exact",
+            "passed": false,
+            "detail": "mismatch"
+        }))
+        .unwrap();
+        assert_eq!(check.check, "san_exact");
+        assert_eq!(check.status, CertificateVerificationStatus::Fail);
+        assert_eq!(check.detail.as_deref(), Some("mismatch"));
+    }
+
+    #[test]
+    fn verification_report_serializes_versioned_public_shape() {
+        let report = CertificateVerificationReport::new(
+            true,
+            "2026-01-01T00:00:00Z".to_string(),
+            "2026-02-01T00:00:00Z".to_string(),
+            "01".to_string(),
+            Some("test-ca".to_string()),
+            Some("shortlived".to_string()),
+            vec![
+                CertificateVerificationCheck::pass("san_exact"),
+                CertificateVerificationCheck::not_checked(
+                    "profile_compliance",
+                    "CA did not advertise profiles",
+                ),
+            ],
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["conclusion"], "accepted");
+        assert_eq!(json["checks"][0]["check"], "san_exact");
+        assert_eq!(json["checks"][0]["status"], "pass");
+        assert_eq!(json["checks"][1]["status"], "not-checked");
+        assert!(json["checks"][0].get("passed").is_none());
+        assert!(report.accepted());
+        assert!(!report.all_passed());
     }
 
     #[test]

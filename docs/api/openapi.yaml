@@ -430,9 +430,68 @@ components:
           type: string
         key_id:
           type: string
+        verification_report:
+          $ref: '#/components/schemas/CertificateVerificationReport'
       not:
         required:
           - private_key
+    CertificateVerificationReport:
+      type: object
+      required:
+        - schema_version
+        - conclusion
+        - identifiers_exact_match
+        - not_before
+        - not_after
+        - serial
+        - checks
+      properties:
+        schema_version:
+          type: integer
+          minimum: 1
+        conclusion:
+          type: string
+          enum:
+            - accepted
+            - rejected
+        error_code:
+          type: string
+        identifiers_exact_match:
+          type: boolean
+        not_before:
+          type: string
+          format: date-time
+        not_after:
+          type: string
+          format: date-time
+        serial:
+          type: string
+        ca:
+          type: string
+        profile:
+          type: string
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/CertificateVerificationCheck'
+    CertificateVerificationCheck:
+      type: object
+      required:
+        - check
+        - status
+      properties:
+        check:
+          type: string
+        status:
+          type: string
+          enum:
+            - pass
+            - fail
+            - not-checked
+        detail:
+          type: string
+        error_code:
+          type: string
     OperationView:
       type: object
       required:

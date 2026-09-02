@@ -1,4 +1,3 @@
-use crate::certificate::OcspVerifier;
 /// Certificate chain verification and management
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -104,25 +103,14 @@ impl CertificateChain {
         Ok(())
     }
 
-    /// Perform deep verification including OCSP real-time status check
+    /// Performs local chain checks only.
+    ///
+    /// AcmeX intentionally does not expose a production OCSP/CRL status
+    /// capability yet: the previous OCSP verifier only simulated `Good`
+    /// responses from a URL shape check. Callers that need revocation-state
+    /// monitoring must wire a real status checker outside this method.
     pub async fn verify_deep(&self) -> Result<()> {
-        self.verify()?;
-
-        // Perform OCSP check for the end-entity certificate (index 0)
-        let end_entity = &self.leaf;
-        match OcspVerifier::verify_status(end_entity).await? {
-            crate::certificate::OcspStatus::Good => {
-                tracing::info!("OCSP status check: Good");
-                Ok(())
-            }
-            crate::certificate::OcspStatus::Revoked => Err(AcmeError::certificate(
-                "Certificate is revoked according to OCSP".to_string(),
-            )),
-            crate::certificate::OcspStatus::Unknown => {
-                tracing::warn!("OCSP status check: Unknown");
-                Ok(()) // Treat as pass but log warning
-            }
-        }
+        self.verify()
     }
 
     /// Get the leaf certificate common name
@@ -250,6 +238,54 @@ impl CertificateChain {
     /// subject public key).
     pub fn verify_leaf_self_signed(&self) -> Result<bool> {
         verify_cert_signature(&self.leaf, None)
+    }
+
+    /// Verifies that the presented chain terminates at one of the configured
+    /// trust anchors. Anchors are PEM encoded CA certificates supplied by
+    /// configuration; an empty anchor set is a caller policy decision and is
+    /// not treated as trusted here.
+    pub fn verify_trusted_by_pem(&self, trust_anchor_pems: &[String]) -> Result<bool> {
+        let mut anchors = Vec::new();
+        for pem in trust_anchor_pems {
+            for block in parse_many(pem.as_bytes())
+                .map_err(|e| AcmeError::crypto(format!("Failed to parse trust anchor PEM: {e}")))?
+            {
+                if block.tag() == "CERTIFICATE" {
+                    anchors.push(block.contents().to_vec());
+                }
+            }
+        }
+        self.verify_trusted_by_der(&anchors)
+    }
+
+    /// Verifies trust against DER-encoded anchor certificates.
+    pub fn verify_trusted_by_der(&self, trust_anchors: &[Vec<u8>]) -> Result<bool> {
+        if trust_anchors.is_empty() {
+            return Ok(false);
+        }
+
+        let mut chain = Vec::with_capacity(self.intermediates.len() + 1);
+        chain.push(self.leaf.clone());
+        chain.extend(self.intermediates.iter().cloned());
+
+        for pair in chain.windows(2) {
+            if !verify_cert_signature(&pair[0], Some(&pair[1]))? {
+                return Ok(false);
+            }
+        }
+
+        let Some(last) = chain.last() else {
+            return Ok(false);
+        };
+        for anchor in trust_anchors {
+            if last == anchor {
+                return verify_cert_signature(anchor, None);
+            }
+            if verify_cert_signature(last, Some(anchor))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -409,6 +445,31 @@ mod tests {
         );
         // A CA-signed leaf is not self-signed.
         assert!(!chain.verify_leaf_self_signed().unwrap());
+    }
+
+    #[test]
+    fn trust_anchor_verification_requires_configured_root() {
+        let ca = test_ca("acmex test ca");
+        let other_ca = test_ca("acmex other ca");
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_pem = ca_signed_leaf_pem("example.com", &leaf_key, &ca);
+        let chain = CertificateChain {
+            leaf: der_of(&leaf_pem),
+            intermediates: Vec::new(),
+            root: None,
+        };
+
+        assert!(
+            chain
+                .verify_trusted_by_der(&[ca.der().as_ref().to_vec()])
+                .unwrap()
+        );
+        assert!(
+            !chain
+                .verify_trusted_by_der(&[other_ca.der().as_ref().to_vec()])
+                .unwrap()
+        );
+        assert!(!chain.verify_trusted_by_der(&[]).unwrap());
     }
 
     #[test]

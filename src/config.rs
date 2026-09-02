@@ -82,6 +82,18 @@ pub struct AcmeSettings {
     #[serde(default)]
     pub external_account_binding: Option<ExternalAccountBinding>,
 
+    /// PEM files containing trusted roots for issued-certificate acceptance.
+    #[serde(default)]
+    pub trust_anchor_pem_files: Vec<String>,
+
+    /// Explicitly skip issued-certificate trust-anchor verification.
+    ///
+    /// This is intended only for controlled test or private-CA bootstrap
+    /// environments. When false, an empty `trust_anchor_pem_files` list fails
+    /// certificate verification instead of silently accepting the chain.
+    #[serde(default)]
+    pub skip_certificate_trust_check: bool,
+
     /// Internal cache for the resolved directory URL.
     #[serde(skip)]
     pub directory: String,
@@ -773,6 +785,8 @@ impl Default for AcmeSettings {
             contact: Vec::new(),
             tos_agreed: true,
             external_account_binding: None,
+            trust_anchor_pem_files: Vec::new(),
+            skip_certificate_trust_check: false,
             directory: String::new(),
         }
     }

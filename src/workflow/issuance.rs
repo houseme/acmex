@@ -145,6 +145,10 @@ pub struct IssuanceStepDeps {
     pub orchestrator: DeploymentOrchestrator,
     /// Poll interval for wait-style steps.
     pub poll_interval: std::time::Duration,
+    /// PEM trust anchors used by strict certificate verification.
+    pub trust_anchor_pems: Vec<String>,
+    /// Explicitly skip certificate trust-anchor verification.
+    pub skip_certificate_trust_check: bool,
 }
 
 impl IssuanceStepDeps {
@@ -544,8 +548,8 @@ fn verification_failed(
 ) -> StepResult {
     let failed: Vec<&str> = checks
         .iter()
-        .filter(|check| !check.passed)
-        .map(|check| check.name.as_str())
+        .filter(|check| check.status.is_failure())
+        .map(|check| check.check.as_str())
         .collect();
     policy_reject(format!(
         "certificate verification failed for intent {}: {}",
@@ -561,18 +565,14 @@ fn verification_failed(
 /// failed check is a terminal policy failure — an
 /// unverifiable certificate is never persisted, and the report with the
 /// failing checks is attached to the operation for auditing.
-pub struct VerifyCertificateStep;
-
-impl Default for VerifyCertificateStep {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct VerifyCertificateStep {
+    deps: Arc<IssuanceStepDeps>,
 }
 
 impl VerifyCertificateStep {
     /// Creates the verification step.
-    pub fn new() -> Self {
-        Self
+    pub fn new(deps: Arc<IssuanceStepDeps>) -> Self {
+        Self { deps }
     }
 }
 
@@ -601,19 +601,15 @@ impl StepExecutor for VerifyCertificateStep {
         let parsed = match crate::certificate::CertificateChain::from_pem(chain.pem.as_bytes()) {
             Ok(parsed) => parsed,
             Err(err) => {
-                checks.push(domain::CertificateVerificationCheck {
-                    name: "chain_parsed".to_string(),
-                    passed: false,
-                    detail: Some(err.to_string()),
-                });
+                checks.push(domain::CertificateVerificationCheck::fail(
+                    "chain_parsed",
+                    error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                    err.to_string(),
+                ));
                 return verification_failed(checks, &intent);
             }
         };
-        checks.push(domain::CertificateVerificationCheck {
-            name: "chain_parsed".to_string(),
-            passed: true,
-            detail: None,
-        });
+        checks.push(domain::CertificateVerificationCheck::pass("chain_parsed"));
 
         // Exact, typed SAN match (IP SANs never pass as DNS names).
         let san_match = match crate::order::csr::verify_certificate_identifiers(
@@ -623,13 +619,14 @@ impl StepExecutor for VerifyCertificateStep {
             Ok(matched) => matched,
             Err(err) => return terminal(error_codes::INTERNAL, err.to_string()),
         };
-        checks.push(domain::CertificateVerificationCheck {
-            name: "san_exact".to_string(),
-            passed: san_match,
-            detail: (!san_match).then(|| {
-                "issued certificate SAN set does not exactly match the intent identifiers"
-                    .to_string()
-            }),
+        checks.push(if san_match {
+            domain::CertificateVerificationCheck::pass("san_exact")
+        } else {
+            domain::CertificateVerificationCheck::fail(
+                "san_exact",
+                error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                "issued certificate SAN set does not exactly match the intent identifiers",
+            )
         });
 
         // Validity window: the certificate must be valid at the current
@@ -649,22 +646,28 @@ impl StepExecutor for VerifyCertificateStep {
         let Some((not_before, not_after, in_window)) = validity else {
             unreachable!("validity is Some or the match returned early");
         };
-        checks.push(domain::CertificateVerificationCheck {
-            name: "validity_window".to_string(),
-            passed: in_window,
-            detail: (!in_window).then(|| {
-                format!("not within validity window ({not_before} .. {not_after}; now {now})")
-            }),
+        checks.push(if in_window {
+            domain::CertificateVerificationCheck::pass("validity_window")
+        } else {
+            domain::CertificateVerificationCheck::fail(
+                "validity_window",
+                error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                format!("not within validity window ({not_before} .. {not_after}; now {now})"),
+            )
         });
 
         let serial = match leaf_serial_hex(&parsed.leaf) {
             Ok(serial) => serial,
             Err(err) => return terminal(error_codes::INTERNAL, err.to_string()),
         };
-        checks.push(domain::CertificateVerificationCheck {
-            name: "serial_present".to_string(),
-            passed: !serial.is_empty(),
-            detail: None,
+        checks.push(if serial.is_empty() {
+            domain::CertificateVerificationCheck::fail(
+                "serial_present",
+                error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                "leaf certificate has no serial number",
+            )
+        } else {
+            domain::CertificateVerificationCheck::pass("serial_present")
         });
 
         // CSR public-key continuity: the issued leaf must carry exactly the
@@ -686,12 +689,14 @@ impl StepExecutor for VerifyCertificateStep {
                 return terminal(error_codes::INTERNAL, err.to_string());
             }
         };
-        checks.push(domain::CertificateVerificationCheck {
-            name: "csr_public_key_matches".to_string(),
-            passed: csr_key_matches,
-            detail: (!csr_key_matches).then(|| {
-                "issued leaf public key differs from the CSR subject public key".to_string()
-            }),
+        checks.push(if csr_key_matches {
+            domain::CertificateVerificationCheck::pass("csr_public_key_matches")
+        } else {
+            domain::CertificateVerificationCheck::fail(
+                "csr_public_key_matches",
+                error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                "issued leaf public key differs from the CSR subject public key",
+            )
         });
 
         // Internal chain consistency: the leaf must be signed by the chain's
@@ -719,22 +724,53 @@ impl StepExecutor for VerifyCertificateStep {
                 Err(err) => return terminal(error_codes::INTERNAL, err.to_string()),
             }
         };
-        checks.push(domain::CertificateVerificationCheck {
-            name: "chain_internally_consistent".to_string(),
-            passed: chain_consistent,
-            detail: inconsistency,
+        checks.push(if chain_consistent {
+            domain::CertificateVerificationCheck::pass("chain_internally_consistent")
+        } else {
+            domain::CertificateVerificationCheck::fail(
+                "chain_internally_consistent",
+                error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                inconsistency.unwrap_or_else(|| "certificate chain is inconsistent".to_string()),
+            )
         });
 
-        let report = domain::CertificateVerificationReport {
-            identifiers_exact_match: san_match,
-            not_before: not_before.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            not_after: not_after.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        if self.deps.skip_certificate_trust_check {
+            checks.push(domain::CertificateVerificationCheck::not_checked(
+                "chain_trusted",
+                "certificate trust-anchor verification explicitly disabled by configuration",
+            ));
+        } else if self.deps.trust_anchor_pems.is_empty() {
+            checks.push(domain::CertificateVerificationCheck::fail(
+                "chain_trusted",
+                error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                "no ACME trust anchor PEM files configured",
+            ));
+        } else {
+            let trusted = match parsed.verify_trusted_by_pem(&self.deps.trust_anchor_pems) {
+                Ok(trusted) => trusted,
+                Err(err) => return terminal(error_codes::INTERNAL, err.to_string()),
+            };
+            checks.push(if trusted {
+                domain::CertificateVerificationCheck::pass("chain_trusted")
+            } else {
+                domain::CertificateVerificationCheck::fail(
+                    "chain_trusted",
+                    error_codes::CERTIFICATE_VERIFICATION_FAILED.as_str(),
+                    "issued certificate chain does not terminate at a configured trust anchor",
+                )
+            });
+        }
+
+        let report = domain::CertificateVerificationReport::new(
+            san_match,
+            not_before.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            not_after.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
             serial,
-            ca: intent.ca_policy.ca_id.clone(),
-            profile: intent.ca_policy.profile.clone(),
+            intent.ca_policy.ca_id.clone(),
+            intent.ca_policy.profile.clone(),
             checks,
-        };
-        if !report.all_passed() {
+        );
+        if !report.accepted() {
             return verification_failed(report.checks, &intent);
         }
         let output = match serde_json::to_string(&report) {
@@ -821,6 +857,11 @@ impl StepExecutor for PersistVersionStep {
             Ok(serial) => serial,
             Err(err) => return terminal(error_codes::INTERNAL, err.to_string()),
         };
+        let verification_report = read_payload::<domain::CertificateVerificationReport>(
+            ctx.operation,
+            WorkflowStepKind::VerifyCertificate,
+        )
+        .ok();
 
         // Deterministic id: a retried step re-creates the same version.
         let version_id = match VersionId::new(format!("ver_{}", ctx.operation.id.as_str())) {
@@ -840,6 +881,7 @@ impl StepExecutor for PersistVersionStep {
             key_ref: csr.key_ref.clone(),
             replaces: None,
             superseded_by: None,
+            verification_report,
             state: VersionState::Issued,
         };
         // Renewals record which version they replace.

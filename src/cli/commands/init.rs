@@ -77,6 +77,12 @@ ca = "{ca}"
 ca_environment = "{env}"
 contact = ["{contact}"]
 tos_agreed = true
+# Certificate trust-anchor verification is strict by default. Add Pebble,
+# private-CA, or staging roots here before driving issuance against those CAs.
+trust_anchor_pem_files = []
+# Controlled test/bootstrap escape hatch only; when false, empty anchors fail
+# `chain_trusted` instead of accepting an unverifiable chain.
+skip_certificate_trust_check = false
 
 # External Account Binding for CAs that require it (Google Trust Services,
 # ZeroSSL or CA-specific EAB accounts). The HMAC key must be a SecretRef; do
@@ -289,6 +295,8 @@ mod tests {
         let raw = std::fs::read_to_string(dir.join("acmex.toml")).unwrap();
         let config = Config::from_str(&raw).unwrap();
         assert_eq!(config.acme.ca, "letsencrypt");
+        assert!(config.acme.trust_anchor_pem_files.is_empty());
+        assert!(!config.acme.skip_certificate_trust_check);
         assert_eq!(config.challenge.challenge_type, "dns-01");
         assert!(raw.contains("mailto:ops@example.com"));
         assert!(!raw.contains("PRIVATE KEY"));

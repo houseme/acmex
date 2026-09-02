@@ -1043,6 +1043,7 @@ mod tests {
             state: "active".to_string(),
             key_provider: "software".to_string(),
             key_id: "key_public".to_string(),
+            verification_report: None,
         })
         .unwrap();
         assert!(!json.to_lowercase().contains("private"));

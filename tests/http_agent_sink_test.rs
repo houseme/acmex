@@ -164,6 +164,7 @@ fn sample_version(domain: &str) -> (CertificateVersion, String) {
         key_ref: KeyRef::software(KeyId::generate(), KeyAlgorithm::EcP256),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state: VersionState::Issued,
     };
     (version, certified.signing_key.serialize_pem())

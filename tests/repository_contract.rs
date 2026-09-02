@@ -63,6 +63,7 @@ fn sample_version(lineage: &LineageId, state: VersionState) -> CertificateVersio
         key_ref: KeyRef::software(KeyId::generate(), KeyAlgorithm::EcP256),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state,
     }
 }

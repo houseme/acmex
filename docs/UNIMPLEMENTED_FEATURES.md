@@ -127,13 +127,16 @@
 
 ## 📋 系统优化计划 (v0.7.0+)
 
-### 1. **OCSP 实时状态检查**
+### 1. **OCSP/CRL 实时吊销状态检查**
 
-- **规划位置**: `src/certificate/ocsp.rs`
+- **规划位置**: 后续任务重新设计真实 OCSP/CRL verifier；当前仅保留证书 AIA 中 OCSP URL 的解析辅助。
 - **优先级**: 中
-- **2026-09-01 备注**: 该文件已存在，但实现是**模拟的**（仅校验 URL 形状即返回 `Good`，见
-  `ocsp.rs` 内注释）。按 v0.9.0 路线图非目标条款，"不将 OCSP 模拟结果包装成生产状态"——
-  在真实 OCSP 请求/响应处理实现之前，不得将其描述为可用能力。
+- **2026-09-02 备注**: T15 已移除原 `src/certificate/ocsp.rs` 模拟实现和公共导出。旧实现只校验
+  OCSP URL 形状即返回 `Good`，会把未验证的吊销状态包装成生产能力；在真实 OCSP 请求/响应
+  或 CRL 处理实现之前，AcmeX 不宣称提供证书吊销状态检查。
+- **信任锚边界**: 证书链信任验收默认要求 `[acme].trust_anchor_pem_files` 提供根 PEM；缺省
+  anchors 是失败，不是 `not-checked`。`skip_certificate_trust_check = true` 仅作为显式
+  测试/私有 CA bootstrap 逃生口。
 
 ### 2. **REST API 业务逻辑完整化**
 

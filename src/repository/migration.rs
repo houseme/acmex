@@ -271,6 +271,7 @@ impl LegacyBundleMigrator {
             key_ref,
             replaces: None,
             superseded_by: None,
+            verification_report: None,
             state: VersionState::Active,
         };
         match self.destination.versions.create(version.clone()).await {

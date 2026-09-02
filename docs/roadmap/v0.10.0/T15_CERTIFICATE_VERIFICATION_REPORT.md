@@ -52,6 +52,7 @@ v0.9.0 审计（第 6 条，"部分修复"）确认：
 - 报告属于新公共面：进入 v0.10.0 冻结清单（README 第 8 节），首日即带序列化兼容测试；新增字段必须可被旧读者忽略。
 - 链验证依赖 `aws-lc-rs`/`ring` 双 feature 下可用（遵循现有 crypto feature 约定）；信任锚配置引用 PEM 文件路径（SecretRef 不适用——证书非机密，但路径需存在性校验）。
 - `not-checked` 语义必须窄：仅"配置显式跳过"与"该 CA 无 profile 声明"两种来源，其余一律 pass/fail，防止报告退化为装饰。
+- 空 `trust_anchor_pem_files` 不代表跳过链信任；默认缺锚必须导致 `chain_trusted` fail，只有显式 `skip_certificate_trust_check = true` 才允许记录 `not-checked`。
 - 能力预检失败发生在 Plan 阶段（不产生 CA Order），这是与"CA 拒绝后再失败"的关键行为差异，测试需覆盖两者。
 
 ---

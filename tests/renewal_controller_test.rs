@@ -80,6 +80,7 @@ fn sample_version(
         key_ref: KeyRef::software(KeyId::generate(), KeyAlgorithm::EcP256),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state: VersionState::Active,
     }
 }

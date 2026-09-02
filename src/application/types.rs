@@ -417,6 +417,8 @@ pub struct VersionView {
     pub state: String,
     pub key_provider: String,
     pub key_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_report: Option<crate::domain::CertificateVerificationReport>,
 }
 
 impl From<CertificateVersion> for VersionView {
@@ -436,6 +438,7 @@ impl From<CertificateVersion> for VersionView {
             state: version.state.as_str().to_string(),
             key_provider: version.key_ref.provider,
             key_id: version.key_ref.key_id.to_string(),
+            verification_report: version.verification_report,
         }
     }
 }

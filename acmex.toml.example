@@ -11,6 +11,12 @@ ca = "letsencrypt"
 ca_environment = "staging"
 contact = ["mailto:admin@example.com"]
 tos_agreed = true
+# Certificate trust-anchor verification is strict by default. Add Pebble,
+# private-CA, or staging roots here before driving issuance against those CAs.
+trust_anchor_pem_files = []
+# Controlled test/bootstrap escape hatch only; when false, empty anchors fail
+# `chain_trusted` instead of accepting an unverifiable chain.
+skip_certificate_trust_check = false
 
 # External Account Binding for CAs that require it. The HMAC key is always a
 # SecretRef (env:/file:/vault:/provider:), never a literal secret value.
