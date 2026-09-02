@@ -40,6 +40,16 @@ jobs:
       - name: High-confidence secret scan
         run: scripts/secret_scan.sh
 
+  semver-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Public API semver check
+        run: scripts/run_semver_check.sh
+
   pebble-e2e:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'

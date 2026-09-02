@@ -138,15 +138,37 @@ fn release_gate_release_documents_are_explicit_about_unverified_external_gates()
     let checklist = include_str!("../docs/roadmap/v0.9.0/RELEASE_CHECKLIST.md");
     let limitations = include_str!("../docs/roadmap/v0.9.0/KNOWN_LIMITATIONS.md");
     let e2e = include_str!("../docs/roadmap/v0.9.0/E2E_RELEASE_GATES.md");
+    let changelog = include_str!("../CHANGELOG.md");
+    let release_09 = include_str!("../docs/RELEASE_NOTES_v0.9.0.md");
+    let release_10 = include_str!("../docs/RELEASE_NOTES_v0.10.0.md");
+    let migration_09 = include_str!("../docs/MIGRATION_v0.9.0.md");
+    let migration_10 = include_str!("../docs/MIGRATION_v0.10.0.md");
+    let decision = include_str!("../docs/roadmap/v0.10.0/RELEASE_DECISION.md");
 
     for (name, doc) in [
         ("RELEASE_CHECKLIST.md", checklist),
         ("KNOWN_LIMITATIONS.md", limitations),
         ("E2E_RELEASE_GATES.md", e2e),
+        ("CHANGELOG.md", changelog),
+        ("RELEASE_NOTES_v0.9.0.md", release_09),
+        ("RELEASE_NOTES_v0.10.0.md", release_10),
+        ("MIGRATION_v0.9.0.md", migration_09),
+        ("MIGRATION_v0.10.0.md", migration_10),
+        ("RELEASE_DECISION.md", decision),
     ] {
         assert!(
-            doc.contains("not a release pass") || doc.contains("not yet validated"),
+            doc.contains("not a release pass")
+                || doc.contains("not yet validated")
+                || doc.contains("Not Yet Release-Validated")
+                || doc.contains("pending external evidence"),
             "{name} must not imply unrun L4/L5 gates have passed"
+        );
+    }
+
+    for doc in [migration_09, migration_10, decision] {
+        assert!(
+            doc.contains(acmex::server::api::LEGACY_API_SUNSET_HTTP_DATE),
+            "release migration and decision docs must mirror the legacy Sunset header"
         );
     }
 }
