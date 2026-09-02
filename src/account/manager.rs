@@ -6,6 +6,7 @@ use crate::protocol::{DirectoryManager, Jwk, JwsSigner, NonceManager};
 use crate::types::Contact;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -125,49 +126,9 @@ impl<'a> AccountManager<'a> {
                 crate::error::AcmeError::transport(format!("Failed to register account: {}", e))
             })?;
 
-        // Cache the nonce from response
-        if let Some(nonce_header) = response.headers().get("replay-nonce")
-            && let Ok(nonce_str) = nonce_header.to_str()
-        {
-            self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
-        }
-
-        // Extract account URL before consuming response
-        let account_url = response
-            .headers()
-            .get("location")
-            .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| {
-                tracing::error!("ACME server did not return a Location header for the new account");
-                crate::error::AcmeError::account(
-                    "Missing location header in account response".to_string(),
-                )
-            })?
-            .to_string();
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            tracing::error!(
-                "Account registration failed with status {}: {}",
-                status,
-                error_text
-            );
-            return Err(crate::error::AcmeError::account(format!(
-                "Failed to register account: HTTP {}: {}",
-                status, error_text
-            )));
-        }
-
-        let mut account: Account = response.json().await.map_err(|e| {
-            tracing::error!("Failed to parse account JSON response: {}", e);
-            crate::error::AcmeError::account(format!("Failed to parse account response: {}", e))
-        })?;
-
-        account.id = account_url;
+        let account = self
+            .parse_account_response(response, "register account", "account response")
+            .await?;
         tracing::info!("Account registered successfully with ID: {}", account.id);
         Ok(account)
     }
@@ -202,11 +163,29 @@ impl<'a> AccountManager<'a> {
                 crate::error::AcmeError::transport(format!("Failed to look up account: {}", e))
             })?;
 
-        if let Some(nonce_header) = response.headers().get("replay-nonce")
+        self.parse_account_response(
+            response,
+            "look up existing account",
+            "existing account response",
+        )
+        .await
+    }
+
+    async fn cache_replay_nonce(&self, headers: &HeaderMap) {
+        if let Some(nonce_header) = headers.get("replay-nonce")
             && let Ok(nonce_str) = nonce_header.to_str()
         {
             self.nonce_manager.cache_nonce(nonce_str.to_string()).await;
         }
+    }
+
+    async fn parse_account_response(
+        &self,
+        response: reqwest::Response,
+        action: &str,
+        response_context: &str,
+    ) -> Result<Account> {
+        self.cache_replay_nonce(response.headers()).await;
 
         let status = response.status();
         if !status.is_success() {
@@ -214,14 +193,9 @@ impl<'a> AccountManager<'a> {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            tracing::error!(
-                "Account lookup failed with status {}: {}",
-                status,
-                error_text
-            );
+            tracing::error!("Account {action} failed with status {status}: {error_text}");
             return Err(crate::error::AcmeError::account(format!(
-                "Failed to look up existing account: HTTP {}: {}",
-                status, error_text
+                "Failed to {action}: HTTP {status}: {error_text}"
             )));
         }
 
@@ -230,18 +204,18 @@ impl<'a> AccountManager<'a> {
             .get("location")
             .and_then(|h| h.to_str().ok())
             .ok_or_else(|| {
-                crate::error::AcmeError::account(
-                    "Missing location header in existing account response".to_string(),
-                )
+                tracing::error!(
+                    "ACME server did not return a Location header for {response_context}"
+                );
+                crate::error::AcmeError::account(format!(
+                    "Missing location header in {response_context}"
+                ))
             })?
             .to_string();
 
         let mut account: Account = response.json().await.map_err(|e| {
-            tracing::error!("Failed to parse account lookup response: {}", e);
-            crate::error::AcmeError::account(format!(
-                "Failed to parse account lookup response: {}",
-                e
-            ))
+            tracing::error!("Failed to parse {response_context} JSON: {e}");
+            crate::error::AcmeError::account(format!("Failed to parse {response_context}: {e}"))
         })?;
         account.id = account_url;
         Ok(account)
