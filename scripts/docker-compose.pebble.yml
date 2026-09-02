@@ -1,0 +1,46 @@
+# Pebble E2E environment (roadmap T12) — used by scripts/run_pebble_e2e.sh
+#
+#   docker compose -f scripts/docker-compose.pebble.yml up -d
+#   cargo test --test live_pebble_e2e -- --ignored --nocapture
+#
+# pebble:     ACME test CA  — https://localhost:14000/dir (invalid TLS by design)
+# challtestsrv: DNS/HTTP/TLS challenge test server — TXT records are
+#             programmed over the admin API on :8055 (set-txt / clear-txt /
+#             dump-dns) and served on the DNS port :8053, which pebble uses
+#             as its resolver so DNS-01 validation actually resolves.
+services:
+  pebble:
+    image: letsencrypt/pebble:latest
+    command: ["pebble", "-config", "/etc/pebble/pebble.json", "-strict", "false"]
+    environment:
+      # Deterministic, fast validation (no random sleeps/rejections).
+      - PEBBLE_VA_NOSLEEP=1
+      - PEBBLE_VA_ALWAYS_VALID=0
+      - PEBBLE_WFE_NONCEREJECT=0
+    volumes:
+      - ./pebble/pebble.json:/etc/pebble/pebble.json:ro
+    ports:
+      - "14000:14000" # ACME directory (HTTPS)
+      - "15000:15000" # admin API
+
+  challtestsrv:
+    image: letsencrypt/pebble-challtestsrv:latest
+    command:
+      [
+        "-admin",
+        ":8055",
+        "-dns01",
+        ":8053",
+        "-http01",
+        ":8052",
+        "-tlsalpn01",
+        ":8051",
+        "-defaultIPv4",
+        "127.0.0.1",
+      ]
+    ports:
+      - "8055:8055" # admin HTTP API (set-txt / clear-txt / dump-dns)
+      - "8053:8053/udp" # DNS for pebble's resolver
+      - "8053:8053/tcp"
+      - "8052:8052" # HTTP-01 (unused by the DNS-01 flow, exposed for T07)
+      - "8051:8051" # TLS-ALPN-01 (unused by the DNS-01 flow, exposed for T07)
