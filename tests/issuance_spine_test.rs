@@ -287,6 +287,7 @@ fn active_version(id: &str, identifiers: IdentifierSet) -> CertificateVersion {
         key_ref: soft_key_ref(),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state: VersionState::Active,
     }
 }
@@ -985,6 +986,7 @@ async fn revoke_spine_calls_backend_and_succeeds() {
         key_ref: soft_key_ref(),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state: VersionState::Active,
     };
     let fixture = build_fixture(
@@ -1051,6 +1053,7 @@ async fn revoke_spine_treats_ca_rejection_as_terminal() {
         key_ref: soft_key_ref(),
         replaces: None,
         superseded_by: None,
+        verification_report: None,
         state: VersionState::Active,
     };
     let fixture = build_fixture(
