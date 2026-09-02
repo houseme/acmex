@@ -17,7 +17,7 @@ use acmex::challenge::{ChallengeSession, ChallengeSessionState};
 use acmex::config::Config;
 use acmex::domain::{
     ChallengeLease, ChallengeLeaseId, ChallengeLeaseLocator, ChallengeLeaseState, Identifier,
-    TenantId,
+    OperationKind, TenantId,
 };
 use acmex::notifications::WebhookManager;
 use acmex::orchestrator::OrchestrationStatus;
@@ -279,6 +279,85 @@ async fn api_v1_issue_returns_operation_with_location() {
     let operation: serde_json::Value = serde_json::from_slice(&issue_body).unwrap();
     assert_eq!(operation["kind"], "issue");
     assert_eq!(operation["status"], "queued");
+}
+
+#[tokio::test]
+async fn webhook_renew_certificate_creates_durable_operation() {
+    let state = application_state();
+    let application = state.application.as_ref().unwrap().clone();
+    let repositories = state.repositories.as_ref().unwrap().clone();
+    let intent = application
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: vec!["webhook.example.com".to_string()],
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: Default::default(),
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            idempotency_key: "webhook-create-intent".to_string(),
+        })
+        .await
+        .unwrap();
+    application
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id,
+            idempotency_key: "webhook-create-lineage".to_string(),
+        })
+        .await
+        .unwrap();
+    let lineage = repositories
+        .lineages
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("lineage created by issue")
+        .value;
+
+    let app = axum::Router::new()
+        .route(
+            "/webhook",
+            axum::routing::post(acmex::server::webhook::webhook_handler),
+        )
+        .with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "event": "renew_certificate",
+                        "data": {
+                            "lineage_id": lineage.id,
+                            "force": true,
+                            "idempotency_key": "webhook-renew-key"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = json_body(response).await;
+    assert_eq!(body["status"], "accepted");
+    let operation_id = body["operation_id"].as_str().unwrap();
+    let stored = repositories
+        .operations
+        .get(&acmex::domain::OperationId::new(operation_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .value;
+    assert_eq!(stored.kind, OperationKind::Renew);
+    assert_eq!(stored.subject.lineage_id.as_ref(), Some(&lineage.id));
 }
 
 #[tokio::test]
