@@ -361,6 +361,49 @@ async fn webhook_renew_certificate_creates_durable_operation() {
 }
 
 #[tokio::test]
+async fn webhook_renew_certificate_errors_use_problem_details() {
+    let app = axum::Router::new()
+        .route(
+            "/webhook",
+            axum::routing::post(acmex::server::webhook::webhook_handler),
+        )
+        .with_state(application_state());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhook")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "event": "renew_certificate",
+                        "data": {}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/problem+json")
+    );
+    let problem = json_body(response).await;
+    assert_eq!(problem["type"], "https://acmex.sh/errors/invalid-input");
+    assert_eq!(problem["status"], 400);
+    assert_eq!(
+        problem["detail"],
+        "lineage_id is required for renew_certificate"
+    );
+}
+
+#[tokio::test]
 async fn api_v1_mutations_require_idempotency_key() {
     let app = axum::Router::new()
         .nest("/api/v1", acmex::server::api_v1::routes())

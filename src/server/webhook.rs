@@ -1,11 +1,17 @@
 /// Webhook handler implementation
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
 use super::api::AppState;
 use crate::application::{ActorContext, RenewCertificate};
 use crate::domain::LineageId;
+use crate::error::AcmeError;
 use crate::notifications::WebhookManager;
 
 /// Webhook payload
@@ -37,36 +43,25 @@ impl WebhookHandler {
 pub async fn webhook_handler(
     State(state): State<AppState>,
     Json(payload): Json<WebhookPayload>,
-) -> impl IntoResponse {
+) -> Response {
     tracing::info!("Received webhook event: {}", payload.event);
 
     match payload.event.as_str() {
-        "ping" => (StatusCode::OK, Json(serde_json::json!({"status": "pong"}))),
+        "ping" => (StatusCode::OK, Json(serde_json::json!({"status": "pong"}))).into_response(),
         "renew_certificate" | "certificate.renew_requested" => {
             let Some(application) = state.application.as_ref() else {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({
-                        "error": "certificate lifecycle service is not available"
-                    })),
-                );
+                return problem_response(AcmeError::configuration(
+                    "certificate lifecycle service is not available",
+                ));
             };
             let Some(lineage) = payload.data.get("lineage_id").and_then(|v| v.as_str()) else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "lineage_id is required for renew_certificate"
-                    })),
-                );
+                return problem_response(AcmeError::invalid_input(
+                    "lineage_id is required for renew_certificate",
+                ));
             };
             let lineage_id = match LineageId::new(lineage) {
                 Ok(id) => id,
-                Err(err) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": err.to_string()})),
-                    );
-                }
+                Err(err) => return problem_response(err),
             };
             let idempotency_key = payload
                 .data
@@ -97,30 +92,27 @@ pub async fn webhook_handler(
                         "operation_id": operation.id,
                         "operation_kind": operation.kind,
                     })),
-                ),
-                Err(err) => {
-                    let problem = err.to_problem_details();
-                    (
-                        StatusCode::from_u16(problem.status)
-                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                        Json(serde_json::json!({"error": problem.detail})),
-                    )
-                }
+                )
+                    .into_response(),
+                Err(err) => problem_response(err),
             }
         }
         _ => {
             tracing::warn!("Unknown webhook event: {}", payload.event);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Unknown event type",
-                    "supported_events": [
-                        "ping",
-                        "renew_certificate",
-                        "certificate.renew_requested"
-                    ]
-                })),
-            )
+            problem_response(AcmeError::invalid_input(
+                "Unknown event type. Supported events: ping, renew_certificate, certificate.renew_requested",
+            ))
         }
     }
+}
+
+fn problem_response(err: AcmeError) -> Response {
+    let problem = err.to_problem_details();
+    let status = StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = (status, Json(problem)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/problem+json"),
+    );
+    response
 }
