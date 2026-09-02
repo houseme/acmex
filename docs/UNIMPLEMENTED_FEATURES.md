@@ -1,8 +1,15 @@
 # AcmeX 架构规划 vs 现有实现 - 功能对比与待实现清单
 
+> **⚠️ 过时文档（2026-09-01 标注）**：本文是 v0.6.0 时期的架构快照，模块地图不包含 v0.9.0 的新架构
+> （`src/domain/`、`src/repository/`、`src/workflow/`、`src/application/`、`src/ca_backend/`、`src/key/`、
+> `src/delivery/` 等）。当前真实的功能与验收状态以下列文档为准，本文仅作历史参考：
+> - `docs/roadmap/v0.9.0/IMPLEMENTATION_STATUS_AUDIT.md`（实现状态核查）
+> - `docs/roadmap/v0.9.0/KNOWN_LIMITATIONS.md`（显式未验证项）
+> - `docs/roadmap/v0.9.0/FEATURE_MATRIX.md`（feature 与外部验证矩阵）
+
 **生成日期**: 2026-02-07  
 **版本**: v0.6.0  
-**状态**: 功能分析报告
+**状态**: 功能分析报告（已过时，见上方标注）
 
 ---
 
@@ -124,6 +131,9 @@
 
 - **规划位置**: `src/certificate/ocsp.rs`
 - **优先级**: 中
+- **2026-09-01 备注**: 该文件已存在，但实现是**模拟的**（仅校验 URL 形状即返回 `Good`，见
+  `ocsp.rs` 内注释）。按 v0.9.0 路线图非目标条款，"不将 OCSP 模拟结果包装成生产状态"——
+  在真实 OCSP 请求/响应处理实现之前，不得将其描述为可用能力。
 
 ### 2. **REST API 业务逻辑完整化**
 

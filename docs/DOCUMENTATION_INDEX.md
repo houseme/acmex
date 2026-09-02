@@ -1,6 +1,6 @@
 # 📑 AcmeX 项目文档索引
 
-> 当前架构和下一阶段实施请优先阅读 [当前功能、架构评估与目标架构设计](ACMEX_CURRENT_STATE_AND_TARGET_ARCHITECTURE_ZH.md) 与 [v0.9.0 实施路线图](roadmap/v0.9.0/README.md)。下方 v0.4.0 内容作为历史索引保留。
+> 当前架构请优先阅读 [当前功能、架构评估与目标架构设计](ACMEX_CURRENT_STATE_AND_TARGET_ARCHITECTURE_ZH.md)。v0.9.0 路线图（T01-T12）见 [v0.9.0 实施路线图](roadmap/v0.9.0/README.md)，其遗留缺口与外部门槛由 [v0.10.0 验证与收口路线图](roadmap/v0.10.0/README.md) 承接。下方 v0.4.0 内容作为历史索引保留。
 
 **更新时间**: 2026-02-07  
 **项目状态**: ✅ 架构设计和补充功能完成  

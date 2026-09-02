@@ -38,9 +38,12 @@ fn openapi_paths_match_api_v1_router_surface() {
         "/certificate-versions/{id}/chain",
         "/certificate-versions/{id}/deploy",
         "/certificate-versions/{id}/revoke",
+        "/challenge-cleanup",
+        "/challenge-cleanup/{id}/retry",
         "/operations",
         "/operations/{id}",
         "/operations/{id}/cancel",
+        "/operations/{id}/challenges",
     ];
 
     for path in expected_paths {

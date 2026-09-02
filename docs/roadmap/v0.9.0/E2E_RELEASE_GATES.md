@@ -46,3 +46,15 @@ evidence.
 `scripts/run_pebble_e2e.sh` is intentionally environment-gated. Without
 `RUN_PEBBLE_E2E=1` and a prepared Pebble/challenge-test-server environment it
 exits with code 77 and prints a skip reason. A skipped run is not a release pass.
+
+**Update (2026-09-02)**: the Pebble gate is now a real harness. The script
+brings up pebble + challtestsrv via `scripts/docker-compose.pebble.yml` (pebble
+resolves through challtestsrv's DNS) and runs
+`tests/live_pebble_e2e.rs` — the full production executor set
+(`server::worker::register_executors`) over real HTTPS (TLS verification
+disabled; Pebble's certificate is invalid by design), with DNS-01 programmed
+through the challtestsrv admin API, driving intent → order → challenge → CSR →
+finalize → download → strict verification → persisted active version. It has
+not yet been *executed* in a prepared environment (no docker in the dev
+sandbox) — an executed run is still required before L4 counts as passed.
+HTTP-01/TLS-ALPN-01 variants against Pebble remain to be added.

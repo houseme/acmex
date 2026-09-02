@@ -3,7 +3,11 @@
 These limitations are intentionally explicit so T12 cannot turn unrun external
 tests into implied success.
 
-- Pebble HTTP-01, DNS-01, and TLS-ALPN-01 are not yet validated on this branch.
+- Pebble: a real DNS-01 harness now exists (`tests/live_pebble_e2e.rs` +
+  `scripts/docker-compose.pebble.yml`, driven by `scripts/run_pebble_e2e.sh`)
+  but has NOT been executed in a prepared environment yet; HTTP-01 and
+  TLS-ALPN-01 Pebble variants are not implemented. Pebble validation remains
+  not-yet-passed until a run is executed and green.
 - Let's Encrypt staging is not yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.

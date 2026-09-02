@@ -7,6 +7,54 @@ servers:
   - url: http://localhost:8080/api/v1
     description: Certificate lifecycle API v1
 paths:
+  /challenge-cleanup:
+    get:
+      summary: List challenge leases awaiting cleanup (including cleanup_failed)
+      description: >
+        Operator cleanup queue (T05): active, cleanup_pending and
+        cleanup_failed leases as redacted views. cleanup_failed leases are
+        the target of the manual retry entry.
+      parameters:
+        - name: pending
+          in: query
+          description: >
+            Only the pending cleanup queue is exposed in v1; false is
+            rejected with a problem response.
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Cleanup-pending lease list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChallengeLeaseView'
+        '400':
+          $ref: '#/components/responses/Problem'
+  /challenge-cleanup/{id}/retry:
+    post:
+      summary: Manually requeue a cleanup_failed lease
+      description: >
+        Transitions a cleanup_failed lease back to cleanup_pending without
+        resetting cleanup_attempts (the failed-attempt audit trail is
+        preserved). The background cleanup scanner retries the lease on its
+        next pass.
+      parameters:
+        - $ref: '#/components/parameters/ChallengeLeaseId'
+      responses:
+        '200':
+          description: Updated lease view in cleanup_pending state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChallengeLeaseView'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
   /certificate-intents:
     get:
       summary: List certificate intents
@@ -38,12 +86,48 @@ paths:
       responses:
         '200':
           description: Intent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntentView'
     patch:
-      summary: Patch a certificate intent
+      summary: Patch the mutable policy fields of a certificate intent
+      description: >
+        Synchronous partial update (T08): only renewal_policy and
+        delivery_targets are mutable, and each provided field fully
+        replaces the stored value; omitted fields keep their current
+        values. identifiers, ca_policy, validation_policy, key_policy and
+        idempotency_key are immutable for v1 — a certificate's SAN set
+        cannot change in place (create a new intent instead) and patches
+        naming them are rejected with 400. Optimistic concurrency: send
+        If-Match with the previously observed generation; a stale
+        generation is a 409. Without If-Match the patch applies
+        last-write-wins. Every effective patch bumps the intent generation
+        by one; a patch that changes no stored value is an idempotent
+        no-op that returns the current view without bumping the
+        generation.
       parameters:
         - $ref: '#/components/parameters/IntentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/IfMatchGeneration'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchIntentRequest'
       responses:
+        '200':
+          description: Updated intent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntentView'
         '400':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
           $ref: '#/components/responses/Problem'
   /certificate-intents/{id}/issue:
     post:
@@ -153,6 +237,25 @@ paths:
       responses:
         '200':
           description: Updated operation
+  /operations/{id}/challenges:
+    get:
+      summary: List token-safe challenge sessions for an operation
+      description: >
+        Challenge session lifecycle state (T05). Views never contain the
+        token, its hash or a key authorization.
+      parameters:
+        - $ref: '#/components/parameters/OperationId'
+      responses:
+        '200':
+          description: Challenge session list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ChallengeSessionView'
+        '404':
+          $ref: '#/components/responses/Problem'
 components:
   parameters:
     IdempotencyKey:
@@ -161,6 +264,19 @@ components:
       required: true
       schema:
         type: string
+    IfMatchGeneration:
+      name: If-Match
+      in: header
+      required: false
+      description: >
+        Expected intent generation for optimistic concurrency; a stale
+        generation is rejected with 409. Accepts the bare generation (2)
+        or the quoted ETag form ("2"). Omit for an unconditional
+        last-write-wins patch.
+      schema:
+        type: integer
+        format: uint64
+        minimum: 1
     IntentId:
       name: id
       in: path
@@ -189,6 +305,13 @@ components:
       schema:
         type: string
         pattern: '^op_'
+    ChallengeLeaseId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^chl_'
   responses:
     OperationAccepted:
       description: Durable operation accepted
@@ -230,6 +353,23 @@ components:
           type: array
           items:
             type: object
+    PatchIntentRequest:
+      type: object
+      description: >
+        Mutable intent fields only (T08). At least one property is
+        required. identifiers, ca_policy, validation_policy, key_policy
+        and idempotency_key are immutable and rejected with a 400 naming
+        them.
+      minProperties: 1
+      properties:
+        renewal_policy:
+          type: object
+          description: Full replacement of the renewal policy.
+        delivery_targets:
+          type: array
+          items:
+            type: object
+          description: Full replacement of the delivery target list.
     IntentView:
       type: object
       required:
@@ -369,6 +509,94 @@ components:
           type: boolean
         operation_id:
           type: string
+    ChallengeSessionView:
+      type: object
+      description: >
+        Token-safe challenge session projection (T05): no token, token hash
+        or key authorization is ever serialized.
+      required:
+        - id
+        - operation_id
+        - authorization_url
+        - identifier
+        - challenge_type
+        - state
+        - deadline
+      properties:
+        id:
+          type: string
+        operation_id:
+          type: string
+        authorization_url:
+          type: string
+          format: uri
+        identifier:
+          type: string
+          description: Canonical ACME wire value of the validated identifier.
+        challenge_type:
+          type: string
+          enum: [dns-01, http-01, tls-alpn-01]
+        state:
+          type: string
+          enum:
+            - selected
+            - preparing
+            - prepared
+            - observing
+            - propagated
+            - acknowledged
+            - processing
+            - valid
+            - failed
+            - cancelled
+            - cleanup_pending
+            - cleaned
+            - cleanup_failed
+        deadline:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+      not:
+        required:
+          - token
+          - token_hash
+    ChallengeLeaseView:
+      type: object
+      description: >
+        Redacted challenge lease projection for the cleanup queue (T05):
+        the locator is collapsed to a credential-free summary (DNS zone +
+        record name, HTTP/TLS agent + route ids).
+      required:
+        - id
+        - operation_id
+        - challenge_type
+        - locator_summary
+        - cleanup_attempts
+        - state
+      properties:
+        id:
+          type: string
+        operation_id:
+          type: string
+        challenge_type:
+          type: string
+          enum: [dns-01, http-01, tls-alpn-01]
+        locator_summary:
+          type: string
+        cleanup_attempts:
+          type: integer
+          format: uint32
+          minimum: 0
+        last_cleanup_error:
+          type: string
+        state:
+          type: string
+          enum: [active, cleanup_pending, cleaned, cleanup_failed]
+      not:
+        required:
+          - token
+          - key_authorization
   securitySchemes:
     ApiKeyAuth:
       type: apiKey

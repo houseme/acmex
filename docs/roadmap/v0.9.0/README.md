@@ -1,7 +1,7 @@
 # AcmeX v0.9.0 架构演进实施路线图
 
-**状态**：T01-T12 代码与本地门槛已全部合并；L4/L5 外部环境证据(Pebble/真实 CA/云 Sink)按 KNOWN_LIMITATIONS 显式未执行
-**基线**：`main@3ead534`
+**状态**：T01-T12 代码与本地门槛已全部合并；L4/L5 外部环境证据(Pebble/真实 CA/云 Sink)按 KNOWN_LIMITATIONS 显式未执行。生产运行时装配（workflow worker、ARI 接线、指标打点）仍有缺口，见 IMPLEMENTATION_STATUS_AUDIT.md 二次复核
+**基线**：`main@f38a460`
 **目标**：建立可恢复、可扩展、可安全接入上下游的证书生命周期控制平面
 **最后更新**：2026-09-01
 

@@ -71,6 +71,34 @@ instance from service.
 - Cleanup: pending challenge cleanup older than the lease TTL is a page.
 - Compensation or rollback failure is a page.
 
+## Metrics Exposure (2026-09-01)
+
+`GET /metrics` is served by a dedicated listener configured via
+`[metrics].listen_addr` (default `127.0.0.1:9090`, disable with
+`enabled = false`). It exposes the Prometheus text format from the shared
+registry and is intentionally separate from the authenticated management API.
+
+Instrumented sources (all labels low-cardinality, enforced by convention):
+
+- `acmex_operations_total{kind,result,error_class}` and
+  `acmex_operation_step_duration_seconds{workflow_step,result,error_class}` —
+  recorded by the workflow engine on terminal outcomes and per step execution.
+- `acmex_renewal_due{ca,priority}`, `acmex_renewal_failures_total{ca,error_class}`
+  and `acmex_certificate_seconds_to_expiry{ca,state}` — recorded by the renewal
+  controller during scans.
+- `acmex_outbox_pending{event_type}` — recorded by the outbox consumer. The
+  gauge reflects the fetched batch backlog (a lower bound of the true backlog).
+- `acmex_challenge_cleanup_pending{challenge_type,provider_type}` — recorded by
+  the challenge cleanup scanner per pass.
+- `acmex_deployment_total{sink_type,result,error_class}` — recorded by the
+  deployment orchestrator per durable transition.
+- `acmex_acme_requests_total{ca,result,error_class}`,
+  `acmex_acme_request_duration_seconds{ca,result,error_class}` and
+  `acmex_bad_nonce_total{ca}` — recorded by the instrumented ACME transport.
+
+Not yet instrumented: `acmex_repository_errors_total`. The trace convention
+below is documented but span-field injection is not yet wired into the code.
+
 ## Prometheus Rule Example
 
 ```yaml

@@ -105,11 +105,37 @@ async fn main() -> Result<()> {
 > `client.issue_identifiers(...)` / `NewOrderRequest::from_identifiers(...)`. See
 > `docs/roadmap/v0.9.0/T01_MIGRATION_NOTES.md` for the full migration record.
 
+### The `acmex` CLI
+
+The binary wraps the same durable pipeline as the library (no duplicated
+logic — every command goes through the Application Service and the
+workflow engine):
+
+```bash
+# Scaffold a project: validated acmex.toml + storage directories.
+# Refuses to overwrite an existing configuration.
+acmex init --dir . --ca letsencrypt --env staging --challenge dns-01 --email ops@example.com
+
+# Request a certificate. Default mode submits the operation and exits
+# (a worker executes it); --wait drives the engine in-process.
+acmex obtain --domains example.com --email ops@example.com --challenge dns-01 --wait
+
+# Renewal daemon: workflow worker + ARI-first renewal scanning, no HTTP API.
+# Ctrl+C / SIGTERM stops both loops.
+acmex daemon --config acmex.toml --check-interval 3600
+
+# REST API + embedded workflow worker + metrics endpoint.
+acmex serve --config acmex.toml --addr 127.0.0.1:8080
+```
+
+Optional OpenTelemetry tracing: set `OTEL_EXPORTER_OTLP_ENDPOINT` before
+starting any command; exporter failures degrade to plain logs.
+
 ### Running the API Server
 
 ```bash
 # Build and run the server
-cargo run --features cli -- --config acmex.toml
+cargo run -- --config acmex.toml
 ```
 
 Example `acmex.toml`:
