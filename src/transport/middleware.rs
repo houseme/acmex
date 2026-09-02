@@ -189,6 +189,7 @@ impl RetryMiddleware {
             retry_on_client_error: false,
             retry_on_server_error: true,
             retry_on_transport_error: true,
+            retry_on_non_idempotent_methods: false,
         }
     }
 }

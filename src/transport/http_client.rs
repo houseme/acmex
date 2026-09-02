@@ -193,7 +193,7 @@ impl HttpClient {
             match Self::send_request(request).await {
                 Ok(response) => {
                     self.middlewares.after_response(url, &response).await?;
-                    if retry_policy.should_retry(response.status, attempt) {
+                    if retry_policy.should_retry_method(method.as_str(), response.status, attempt) {
                         tokio::time::sleep(retry_policy.retry_delay(attempt)).await;
                         attempt += 1;
                         continue;
@@ -202,7 +202,9 @@ impl HttpClient {
                 }
                 Err(error) => {
                     self.middlewares.on_error(url, &error).await?;
-                    if retry_policy.should_retry_transport_error(attempt) {
+                    if retry_policy
+                        .should_retry_transport_error_for_method(method.as_str(), attempt)
+                    {
                         tokio::time::sleep(retry_policy.retry_delay(attempt)).await;
                         attempt += 1;
                         continue;
@@ -270,7 +272,11 @@ mod tests {
     use super::*;
     use crate::transport::middleware::RetryMiddleware;
     use crate::transport::retry::RetryStrategy;
-    use axum::{Router, http::StatusCode, routing::get};
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -333,5 +339,41 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.text().unwrap(), "ok");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn http_client_does_not_blindly_retry_post_server_errors() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let route_attempts = attempts.clone();
+        let app = Router::new().route(
+            "/create",
+            post(move || {
+                let route_attempts = route_attempts.clone();
+                async move {
+                    route_attempts.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "not replayed")
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut config = HttpClientConfig::default();
+        config.retry_policy.strategy = RetryStrategy::FixedDelay(Duration::ZERO);
+        let client = HttpClient::new(config)
+            .unwrap()
+            .with_middleware(RetryMiddleware::new(3));
+
+        let response = client
+            .post(&format!("http://{addr}/create"), b"{}")
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 500);
+        assert_eq!(response.text().unwrap(), "not replayed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

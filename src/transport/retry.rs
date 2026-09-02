@@ -78,6 +78,8 @@ pub struct RetryPolicy {
     pub retry_on_server_error: bool,
     /// Whether to retry network/transport failures before a response arrives.
     pub retry_on_transport_error: bool,
+    /// Whether to retry methods that are not safe to blindly replay.
+    pub retry_on_non_idempotent_methods: bool,
 }
 
 impl Default for RetryPolicy {
@@ -88,6 +90,7 @@ impl Default for RetryPolicy {
             retry_on_client_error: false,
             retry_on_server_error: true,
             retry_on_transport_error: true,
+            retry_on_non_idempotent_methods: false,
         }
     }
 }
@@ -122,6 +125,19 @@ impl RetryPolicy {
         retry
     }
 
+    /// Determines whether the request method and status code are safe to retry.
+    pub fn should_retry_method(&self, method: &str, status_code: u16, attempt: u32) -> bool {
+        if !self.can_retry_method(method) {
+            tracing::debug!(
+                "Request failed with status {}, but {} is not retryable by transport policy",
+                status_code,
+                method
+            );
+            return false;
+        }
+        self.should_retry(status_code, attempt)
+    }
+
     /// Determines whether a transport failure should be retried for this attempt.
     pub fn should_retry_transport_error(&self, attempt: u32) -> bool {
         if attempt >= self.max_retries {
@@ -138,10 +154,33 @@ impl RetryPolicy {
         self.retry_on_transport_error
     }
 
+    /// Determines whether a transport failure is safe to retry for this request method.
+    pub fn should_retry_transport_error_for_method(&self, method: &str, attempt: u32) -> bool {
+        if !self.can_retry_method(method) {
+            tracing::debug!(
+                "Transport request failed, but {} is not retryable by transport policy",
+                method
+            );
+            return false;
+        }
+        self.should_retry_transport_error(attempt)
+    }
+
     /// Returns the delay duration for the specified retry attempt.
     pub fn retry_delay(&self, attempt: u32) -> Duration {
         self.strategy.delay(attempt)
     }
+
+    fn can_retry_method(&self, method: &str) -> bool {
+        self.retry_on_non_idempotent_methods || is_idempotent_method(method)
+    }
+}
+
+fn is_idempotent_method(method: &str) -> bool {
+    matches!(
+        method,
+        "GET" | "HEAD" | "OPTIONS" | "PUT" | "DELETE" | "TRACE"
+    )
 }
 
 #[cfg(test)]
@@ -171,5 +210,14 @@ mod tests {
         assert!(!policy.should_retry(200, 0)); // Success, don't retry
         assert!(policy.should_retry(500, 0)); // Server error, retry
         assert!(!policy.should_retry(500, 3)); // Max retries exceeded
+    }
+
+    #[test]
+    fn test_retry_policy_respects_method_idempotency() {
+        let policy = RetryPolicy::default();
+
+        assert!(policy.should_retry_method("GET", 500, 0));
+        assert!(!policy.should_retry_method("POST", 500, 0));
+        assert!(!policy.should_retry_transport_error_for_method("POST", 0));
     }
 }
