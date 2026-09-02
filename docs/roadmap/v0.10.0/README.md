@@ -87,7 +87,7 @@ v0.9.0 的主题是架构：可恢复、可扩展、可安全接入上下游的�
 
 | ID | 任务 | 主要产出 | 前置依赖 | 建议里程碑 | 当前状态 |
 |---|---|---|---|---|---|
-| T13 | [Pebble E2E Harness 与真实进程验证](./T13_PEBBLE_E2E_HARNESS.md) | compose 环境、三类 Challenge 真实签发/续签/吊销、真实 executor 重启演练、CI pebble/secret-scan job | 无（复用 `server::worker` 装配） | M1 | 部分实现；三类 Challenge、File sink deploy、续签与吊销 harness 已就绪，未执行 Docker L4，重启矩阵/失败回滚仍需真实证据 |
+| T13 | [Pebble E2E Harness 与真实进程验证](./T13_PEBBLE_E2E_HARNESS.md) | compose 环境、三类 Challenge 真实签发/续签/吊销、真实 executor 重启演练、CI pebble/secret-scan job | 无（复用 `server::worker` 装配） | M1 | Harness 已覆盖三类 Challenge、File sink deploy、续签、吊销、三窗口重启与失败回滚；未执行 Docker L4，release checklist 仍需真实证据 |
 | T14 | [EAB 与账户生命周期收口](./T14_EAB_AND_ACCOUNT_LIFECYCLE.md) | EAB SecretResolver 接线、Account Key Rollover、JWS 栈收敛 | 无 | M2 | 代码已落地，待 focused/full gate 与 Pebble 覆盖 |
 | T15 | [证书验收报告与 CA 能力消费](./T15_CERTIFICATE_VERIFICATION_REPORT.md) | 完整 VerificationReport、`supports_identifier_type` 预检、OCSP 处置 | 无 | M2 | 代码已落地，待验收复核 |
 | T16 | [DNS 传播策略配置化](./T16_DNS_PROPAGATION_POLICY_CONFIG.md) | quorum/递归 resolver 配置 schema 与运行时接线 | 无 | M2 | 代码已落地，待验收复核 |

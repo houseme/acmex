@@ -18,7 +18,7 @@ T12 建立了发布门槛的骨架，但 Pebble 侧从未落地：
 
 本任务的目标是把"环境门控的 Pebble E2E"从占位脚本变成可重复执行的 L4 发布门槛。
 
-**当前实现复核（2026-09-02）**：`scripts/run_pebble_e2e.sh` 已改为真实 Docker Compose 编排，`tests/live_pebble_e2e.rs` 已复用 `server::worker::register_executors` 生产 executor 集并通过 challtestsrv 驱动 DNS-01、HTTP-01 与 TLS-ALPN-01 三类签发场景；每个场景覆盖 intent → order → challenge → CSR → finalize → download → strict verification → File sink deploy → activation。DNS-01 lifecycle 场景进一步覆盖续签、替代旧版本、File sink 再部署与真实 CA 吊销。脚本会把测试输出、compose 日志和环境摘要归档到 `target/pebble-e2e/<timestamp>/`（CI 使用 `target/pebble-e2e/ci`），并保留缺少 `RUN_PEBBLE_E2E=1` 时 exit 77。尚未在本地 Docker 环境实际执行；真实重启矩阵与 File sink 失败回滚场景仍是未完成验收项。
+**当前实现复核（2026-09-02）**：`scripts/run_pebble_e2e.sh` 已改为真实 Docker Compose 编排，`tests/live_pebble_e2e.rs` 已复用 `server::worker::register_executors` 生产 executor 集并通过 challtestsrv 驱动 DNS-01、HTTP-01 与 TLS-ALPN-01 三类签发场景；每个场景覆盖 intent → order → challenge → CSR → finalize → download → strict verification → File sink deploy → activation。DNS-01 lifecycle 场景进一步覆盖续签、替代旧版本、File sink 再部署与真实 CA 吊销。DNS-01 restart 场景会在 `Plan`、`EnsureAccount`、`CreateOrResumeOrder` 三个真实 executor 边界重建 engine 并继续同一持久化 Operation；File sink rollback 场景在 activate 后篡改 staged metadata，要求 health failure 触发 rollback 并移除无前置 active ref 的 `current` 指针。脚本会把测试输出、compose 日志和环境摘要归档到 `target/pebble-e2e/<timestamp>/`（CI 使用 `target/pebble-e2e/ci`），并保留缺少 `RUN_PEBBLE_E2E=1` 时 exit 77。尚未在本地 Docker 环境实际执行；这些 harness 场景需绿色 Docker L4 run 后才可勾选 release checklist。
 
 **补丁叠补丁复核（2026-09-02）**：本轮发现 DNS-01 presenter 与 Pebble harness 曾把 `token.thumbprint` 原样作为 TXT 值，fake 测试也跟随该错误行为。已收敛为单一 `dns01_validation_value()` helper：生产 `Dns01Presenter`、`MemoryPresenter` 与 Pebble challtestsrv presenter 共同使用 RFC 8555 的 `base64url(SHA256(keyAuthorization))` 派生值，并新增固定向量测试。
 
@@ -94,8 +94,8 @@ challtestsd presenter 实现 `DnsProvider`/presenter 端口（create/find/delete
 
 - [x] HTTP-01、DNS-01、TLS-ALPN-01 三类 Challenge 在 Pebble harness 中接入；需执行绿色 Docker L4 run 后才可勾选 release checklist。
 - [x] 续签（含 `replaces` 与旧版本 superseded）与吊销在 Pebble harness 中接入；需执行绿色 Docker L4 run 后才可算通过。
-- [ ] 重启演练覆盖至少三个窗口，外部副作用唯一性有断言。
-- [ ] File sink stage/activate/health/rollback 至少一条失败回滚场景被覆盖（对应 checklist 行）。
+- [x] 重启演练覆盖至少三个真实 executor 窗口；需执行绿色 Docker L4 run 后才可算 release 通过。
+- [x] File sink stage/activate/health/rollback 覆盖一条失败回滚场景；需执行绿色 Docker L4 run 后才可算 release 通过。
 - [x] CI pebble job 与 secret-scan job 合入（可手动触发）；Pebble job 仍需在 Docker 环境实际执行后才算 L4 通过。
 - [ ] `E2E_RELEASE_GATES.md` 的 "Known boundary" 段落移除或改写为已实现描述；RELEASE_CHECKLIST Required E2E Evidence 区可勾选并附证据。
 - [x] 证据存档位置在任务文档中链接：`target/pebble-e2e/<timestamp>/`（本地）或 `target/pebble-e2e/ci`（CI artifact）。

@@ -39,8 +39,9 @@ use acmex::challenge::{
 };
 use acmex::domain::{
     CertificateIntent, ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState, ChallengeSet,
-    DeliveryTarget, DeliveryTargetKind, IdentifierSet, IntentId, LineageId, OperationId,
-    OperationKind, OperationRecord, OperationSubject, TenantId, ValidationPolicy, VersionId,
+    DeliveryTarget, DeliveryTargetKind, DeploymentId, DeploymentState, IdentifierSet, IntentId,
+    LineageId, OperationId, OperationKind, OperationRecord, OperationStatus, OperationSubject,
+    TenantId, ValidationPolicy, VersionId, WorkflowStepKind,
 };
 use acmex::key::SoftwareKeyProvider;
 use acmex::protocol::Jwk;
@@ -505,10 +506,28 @@ impl ChallengePresenter for ChalltestsrvTlsAlpnPresenter {
 // the test
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PebbleRunMode {
+    Basic,
+    Lifecycle,
+    Restart,
+    Rollback,
+}
+
+fn pebble_presenters(admin: &str) -> PresenterRegistry {
+    let mut presenters = PresenterRegistry::new();
+    presenters.register(Arc::new(ChalltestsrvDnsPresenter::new(admin.to_string())));
+    presenters.register(Arc::new(ChalltestsrvHttpPresenter::new(admin.to_string())));
+    presenters.register(Arc::new(ChalltestsrvTlsAlpnPresenter::new(
+        admin.to_string(),
+    )));
+    presenters
+}
+
 async fn run_pebble_issue(
     challenge_type: ChallengeType,
     suffix: &str,
-    full_lifecycle: bool,
+    mode: PebbleRunMode,
 ) -> VersionId {
     if std::env::var("RUN_PEBBLE_E2E").as_deref() != Ok("1") {
         eprintln!(
@@ -619,17 +638,6 @@ async fn run_pebble_issue(
     ));
     let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
 
-    let mut presenters = PresenterRegistry::new();
-    presenters.register(Arc::new(ChalltestsrvDnsPresenter::new(
-        env.challtestsrv_admin.clone(),
-    )));
-    presenters.register(Arc::new(ChalltestsrvHttpPresenter::new(
-        env.challtestsrv_admin.clone(),
-    )));
-    presenters.register(Arc::new(ChalltestsrvTlsAlpnPresenter::new(
-        env.challtestsrv_admin.clone(),
-    )));
-
     let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
         FileSecretStore::new(key_dir.clone()),
     ));
@@ -639,24 +647,28 @@ async fn run_pebble_issue(
             Arc::new(acmex::delivery::FileCertificateSink::new()),
         );
 
-    let mut engine = WorkflowEngine::new("pebble-e2e", repositories.clone());
-    register_executors(
-        &mut engine,
-        &WorkflowWorkerSettings {
-            propagation_timeout: Duration::from_secs(120),
-            challenge_poll_interval: Duration::from_secs(2),
-            trust_anchor_pems: vec![trust_anchor_pem],
-            terms_agreed: true,
-            ..Default::default()
-        },
-        WorkflowWorkerComponents {
-            backend,
-            account_jwk,
-            presenters,
-            key_provider,
-            orchestrator,
-        },
-    );
+    let build_engine = || {
+        let mut engine = WorkflowEngine::new("pebble-e2e", repositories.clone());
+        register_executors(
+            &mut engine,
+            &WorkflowWorkerSettings {
+                propagation_timeout: Duration::from_secs(120),
+                challenge_poll_interval: Duration::from_secs(2),
+                trust_anchor_pems: vec![trust_anchor_pem.clone()],
+                terms_agreed: true,
+                ..Default::default()
+            },
+            WorkflowWorkerComponents {
+                backend: backend.clone(),
+                account_jwk: account_jwk.clone(),
+                presenters: pebble_presenters(&env.challtestsrv_admin),
+                key_provider: key_provider.clone(),
+                orchestrator: orchestrator.clone(),
+            },
+        );
+        engine
+    };
+    let mut engine = build_engine();
 
     // Submit + drive to terminal (real wall-clock: Pebble polls + Retry-After).
     let op_id = OperationId::new(format!("op_pebble_e2e_{suffix}")).unwrap();
@@ -676,6 +688,32 @@ async fn run_pebble_issue(
         ))
         .await
         .unwrap();
+
+    if mode == PebbleRunMode::Restart {
+        for expected_step in [
+            WorkflowStepKind::Plan,
+            WorkflowStepKind::EnsureAccount,
+            WorkflowStepKind::CreateOrResumeOrder,
+        ] {
+            assert!(engine.run_step(&op_id).await.unwrap());
+            let stored = repositories
+                .operations
+                .get(&op_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .value;
+            assert!(
+                stored.steps.iter().any(|step| step.kind == expected_step
+                    && step.status == acmex::domain::StepStatus::Completed),
+                "restart window did not complete {}: {:#?}",
+                expected_step.as_str(),
+                stored.steps
+            );
+            drop(engine);
+            engine = build_engine();
+        }
+    }
 
     let finished = engine
         .run_until_terminal(&op_id, Duration::from_secs(300))
@@ -729,6 +767,54 @@ async fn run_pebble_issue(
     assert!(!version.serial.is_empty());
 
     let deploy_op = OperationId::new(format!("op_deploy_{version_id}_file")).unwrap();
+    if mode == PebbleRunMode::Rollback {
+        assert!(engine.run_step(&deploy_op).await.unwrap());
+        assert!(engine.run_step(&deploy_op).await.unwrap());
+        let deployment_id = DeploymentId::new(format!("dep_{version_id}_file")).unwrap();
+        let deployment = repositories
+            .deployments
+            .get(&deployment_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(deployment.state, DeploymentState::Active);
+        let staged_ref = deployment.staged_ref.expect("deployment staged ref");
+        let metadata = std::path::Path::new(&staged_ref).join("metadata.json");
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&metadata).await.unwrap()).unwrap();
+        payload["leaf_sha256"] = serde_json::json!("corrupted-by-pebble-rollback-test");
+        tokio::fs::write(&metadata, serde_json::to_vec_pretty(&payload).unwrap())
+            .await
+            .unwrap();
+
+        let failed_deploy = engine
+            .run_until_terminal(&deploy_op, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(
+            failed_deploy.status,
+            OperationStatus::Failed,
+            "rollback deploy steps: {:#?}",
+            failed_deploy.steps
+        );
+        let rolled_back = repositories
+            .deployments
+            .get(&deployment_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(rolled_back.state, DeploymentState::RolledBack);
+        assert!(
+            !deploy_root.join("current").exists(),
+            "rollback without a previous active ref must remove current pointer"
+        );
+        let _ = std::fs::remove_dir_all(&key_dir);
+        let _ = std::fs::remove_dir_all(&deploy_root);
+        return version_id;
+    }
+
     let deploy_record = engine
         .run_until_terminal(&deploy_op, Duration::from_secs(120))
         .await
@@ -757,7 +843,7 @@ async fn run_pebble_issue(
         .value;
     assert_eq!(lineage.active_version_id.as_ref(), Some(&version_id));
 
-    if full_lifecycle {
+    if mode == PebbleRunMode::Lifecycle {
         let renew_op = OperationId::new(format!("op_pebble_renew_{suffix}")).unwrap();
         repositories
             .operations
@@ -882,21 +968,21 @@ async fn run_pebble_issue(
 #[tokio::test]
 #[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
 async fn pebble_full_issuance_dns01() {
-    let _ = run_pebble_issue(ChallengeType::Dns01, "dns01", false).await;
+    let _ = run_pebble_issue(ChallengeType::Dns01, "dns01", PebbleRunMode::Basic).await;
 }
 
 /// Full issuance against a real Pebble with HTTP-01 via challtestsrv.
 #[tokio::test]
 #[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
 async fn pebble_full_issuance_http01() {
-    let _ = run_pebble_issue(ChallengeType::Http01, "http01", false).await;
+    let _ = run_pebble_issue(ChallengeType::Http01, "http01", PebbleRunMode::Basic).await;
 }
 
 /// Full issuance against a real Pebble with TLS-ALPN-01 via challtestsrv.
 #[tokio::test]
 #[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
 async fn pebble_full_issuance_tls_alpn01() {
-    let _ = run_pebble_issue(ChallengeType::TlsAlpn01, "tlsalpn01", false).await;
+    let _ = run_pebble_issue(ChallengeType::TlsAlpn01, "tlsalpn01", PebbleRunMode::Basic).await;
 }
 
 /// Full DNS-01 lifecycle against Pebble: initial issue, File sink activation,
@@ -904,5 +990,36 @@ async fn pebble_full_issuance_tls_alpn01() {
 #[tokio::test]
 #[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
 async fn pebble_dns01_renewal_and_revocation() {
-    let _ = run_pebble_issue(ChallengeType::Dns01, "dns01_lifecycle", true).await;
+    let _ = run_pebble_issue(
+        ChallengeType::Dns01,
+        "dns01_lifecycle",
+        PebbleRunMode::Lifecycle,
+    )
+    .await;
+}
+
+/// Real executor restart evidence: rebuild the engine after three early
+/// step boundaries, then finish the same durable operation against Pebble.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_dns01_restart_windows_resume_real_executors() {
+    let _ = run_pebble_issue(
+        ChallengeType::Dns01,
+        "dns01_restart",
+        PebbleRunMode::Restart,
+    )
+    .await;
+}
+
+/// Real File sink failure evidence: corrupt staged metadata after activation,
+/// require health failure, and assert rollback removes the active pointer.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_dns01_file_sink_health_failure_rolls_back() {
+    let _ = run_pebble_issue(
+        ChallengeType::Dns01,
+        "dns01_rollback",
+        PebbleRunMode::Rollback,
+    )
+    .await;
 }
