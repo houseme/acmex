@@ -174,15 +174,20 @@ impl AcmeTransport for InsecurePebbleTransport {
 #[derive(Clone)]
 struct ChalltestsrvAdmin {
     admin: String,
+    client: reqwest::Client,
 }
 
 impl ChalltestsrvAdmin {
     fn new(admin: String) -> Self {
-        Self { admin }
+        Self {
+            admin,
+            client: reqwest::Client::new(),
+        }
     }
 
     async fn post(&self, path: &str, body: serde_json::Value) -> acmex::error::Result<()> {
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .post(format!("{}{path}", self.admin))
             .json(&body)
             .send()
@@ -199,7 +204,8 @@ impl ChalltestsrvAdmin {
     }
 
     async fn get_text(&self, path: &str) -> acmex::error::Result<String> {
-        let response = reqwest::Client::new()
+        let response = self
+            .client
             .get(format!("{}{path}", self.admin))
             .send()
             .await
