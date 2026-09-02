@@ -197,15 +197,96 @@ impl StepExecutor for EnsureAccountStep {
 /// Creates the ACME order (the workflow resumes a persisted order after a
 /// crash instead of creating a new one — the handle lives in the step
 /// output, which is written before later steps run).
+///
+/// When constructed without explicit identifiers the order identifiers are
+/// resolved from the operation's subject (intent or lineage) at execution
+/// time, so one worker assembly serves every intent. Renewals carry ARI
+/// `replaces` (RFC 9773 CertId of the lineage's active version) and the
+/// intent's CA profile.
 pub struct CreateOrderStep {
     deps: Arc<ChallengeStepDeps>,
-    identifiers: Vec<crate::domain::Identifier>,
+    identifiers: Option<Vec<crate::domain::Identifier>>,
 }
 
 impl CreateOrderStep {
-    /// Creates the step for the given identifiers.
+    /// Creates the step for fixed identifiers.
     pub fn new(deps: Arc<ChallengeStepDeps>, identifiers: Vec<crate::domain::Identifier>) -> Self {
-        Self { deps, identifiers }
+        Self {
+            deps,
+            identifiers: Some(identifiers),
+        }
+    }
+
+    /// Creates the step that resolves identifiers from the operation
+    /// subject (for shared worker assemblies).
+    pub fn resolving(deps: Arc<ChallengeStepDeps>) -> Self {
+        Self {
+            deps,
+            identifiers: None,
+        }
+    }
+
+    async fn resolve_identifiers(
+        &self,
+        ctx: &StepContext<'_>,
+    ) -> std::result::Result<Vec<crate::domain::Identifier>, StepResult> {
+        if let Some(identifiers) = &self.identifiers {
+            return Ok(identifiers.clone());
+        }
+        let record = ctx.operation;
+        if let Some(intent_id) = &record.subject.intent_id {
+            let intent = match ctx.repositories.intents.get(intent_id).await {
+                Ok(Some(stored)) => stored.value,
+                Ok(None) => {
+                    return Err(policy_error(format!("intent `{intent_id}` not found")));
+                }
+                Err(err) => return Err(retryable(err.to_string())),
+            };
+            return Ok(intent.identifiers.iter().cloned().collect());
+        }
+        if let Some(lineage_id) = &record.subject.lineage_id {
+            let lineage = match ctx.repositories.lineages.get(lineage_id).await {
+                Ok(Some(stored)) => stored.value,
+                Ok(None) => {
+                    return Err(policy_error(format!("lineage `{lineage_id}` not found")));
+                }
+                Err(err) => return Err(retryable(err.to_string())),
+            };
+            return Ok(lineage.identifiers.iter().cloned().collect());
+        }
+        Err(policy_error(
+            "operation subject references neither intent nor lineage",
+        ))
+    }
+
+    /// The ARI CertId of the lineage's active version (for renewals).
+    async fn replaces_cert_id(&self, ctx: &StepContext<'_>) -> Option<String> {
+        let lineage_id = ctx.operation.subject.lineage_id.as_ref()?;
+        let lineage = ctx.repositories.lineages.get(lineage_id).await.ok()??;
+        let active = lineage.value.active_version_id.as_ref()?;
+        let version = ctx.repositories.versions.get(active).await.ok()??;
+        super::super::ca_backend::ari_cert_id_from_pem(&version.value.certificate_chain_pem).ok()
+    }
+
+    /// The CA profile pinned by the operation's intent, when any. The
+    /// subject may reference the intent directly or through its lineage
+    /// (same precedence as identifier resolution).
+    async fn pinned_profile(&self, ctx: &StepContext<'_>) -> Option<String> {
+        let record = ctx.operation;
+        let intent = if let Some(intent_id) = &record.subject.intent_id {
+            ctx.repositories.intents.get(intent_id).await.ok()??.value
+        } else if let Some(lineage_id) = &record.subject.lineage_id {
+            let lineage = ctx.repositories.lineages.get(lineage_id).await.ok()??.value;
+            ctx.repositories
+                .intents
+                .get(&lineage.intent_id)
+                .await
+                .ok()??
+                .value
+        } else {
+            return None;
+        };
+        intent.ca_policy.profile.clone()
     }
 }
 
@@ -238,7 +319,60 @@ impl StepExecutor for CreateOrderStep {
                 Err(_) => return policy_error("EnsureAccount has not completed yet"),
             };
 
-        let request = OrderRequest::for_identifiers(self.identifiers.clone());
+        let identifiers = match self.resolve_identifiers(&ctx).await {
+            Ok(identifiers) => identifiers,
+            Err(result) => return result,
+        };
+
+        // Capability cross-checks (T07): consult the CA's advertised
+        // capabilities *before* creating the order so unsupported requests
+        // fail as PolicyViolation, never with a confusing CA-side rejection
+        // mid-flow. Two dimensions are checked:
+        // * IP identifiers (RFC 8738) need advertised `ip` support.
+        // * A profile pinned by the intent must be advertised by the CA.
+        let needs_ip = identifiers
+            .iter()
+            .any(|identifier| matches!(identifier, crate::domain::Identifier::Ip(_)));
+        let pinned_profile = self.pinned_profile(&ctx).await;
+        if needs_ip || pinned_profile.is_some() {
+            match self.deps.backend.capabilities().await {
+                Ok(caps) => {
+                    if needs_ip && !caps.supports_identifier_type("ip") {
+                        return policy_error(
+                            "CA does not advertise `ip` identifier support (RFC 8738); \
+                             use a CA with IP support or dns identifiers",
+                        );
+                    }
+                    if let Some(profile) = pinned_profile.as_deref()
+                        && !caps.supports_profile(profile)
+                    {
+                        let offered: Vec<&str> =
+                            caps.profiles.iter().map(|p| p.name.as_str()).collect();
+                        return policy_error(format!(
+                            "CA does not advertise profile `{profile}` \
+                             (offered profiles: {offered:?}); \
+                             pick an advertised profile or clear the pin"
+                        ));
+                    }
+                }
+                Err(err) => return retryable(err.to_string()),
+            }
+        }
+
+        // Renewals announce which certificate they replace (RFC 9773) and
+        // may pin a CA profile from the intent.
+        let mut request = OrderRequest::for_identifiers(identifiers);
+        if let Some(cert_id) = self.replaces_cert_id(&ctx).await {
+            request.replaces = Some(cert_id);
+        }
+        if let Some(lineage_id) = &ctx.operation.subject.lineage_id
+            && let Ok(Some(lineage)) = ctx.repositories.lineages.get(lineage_id).await
+            && let Ok(Some(intent)) = ctx.repositories.intents.get(&lineage.value.intent_id).await
+            && let Some(profile) = &intent.value.ca_policy.profile
+        {
+            request.profile = Some(profile.clone());
+        }
+
         match self.deps.backend.create_order(&account, &request).await {
             Ok(handle) => {
                 let payload = serde_json::to_string(&OrderPayload {

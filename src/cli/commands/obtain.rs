@@ -1,6 +1,8 @@
 /// Obtain new certificate command implementation.
 /// This module handles the 'obtain' CLI command, coordinating with the
 /// orchestrator and the new multi-CA configuration system.
+use std::time::Duration;
+
 use crate::application::{
     ActorContext, ApplicationServiceBuilder, CertificateApplication, CreateCertificateIntent,
     IssueCertificate,
@@ -8,19 +10,55 @@ use crate::application::{
 use crate::config::{AcmeSettings, Config};
 use crate::error::{AcmeError, Result};
 
+/// Arguments for [`handle_obtain`] (mirrors `cli::args::ObtainArgs`).
+#[derive(Debug, Clone)]
+pub struct ObtainCommand {
+    /// Domains (SANs) to request.
+    pub domains: Vec<String>,
+    /// Contact email for the ACME account.
+    pub email: String,
+    /// Challenge type: http-01, dns-01 or tls-alpn-01.
+    pub challenge_type: String,
+    /// Legacy output path (unused: material goes to sinks).
+    pub _cert_path: String,
+    /// Legacy output path (unused: material goes to sinks).
+    pub _key_path: String,
+    /// Target the production environment instead of staging.
+    pub prod: bool,
+    /// Optional DNS provider id for dns-01.
+    pub dns_provider: Option<String>,
+    /// Drive the engine in-process and wait for the terminal state.
+    pub wait: bool,
+}
+
+/// How long `--wait` polls the embedded engine before giving up.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// Handles the 'obtain' command to request a new certificate.
 ///
 /// This implementation leverages the `CAConfig` system to automatically
 /// resolve the correct ACME directory URL based on the provided parameters.
-pub async fn handle_obtain(
-    domains: Vec<String>,
-    email: String,
-    challenge_type: String,
-    _cert_path: String,
-    _key_path: String,
-    prod: bool,
-    dns_provider: Option<String>,
-) -> Result<()> {
+///
+/// Two modes:
+///
+/// * **fire-and-forget (default)** — creates the intent and the issue
+///   operation in the durable repository, prints their ids and exits. A
+///   running worker (`acmex serve`, `acmex daemon`) executes the flow.
+/// * **`--wait`** — additionally assembles the production workflow engine
+///   in-process (`server::worker::build_engine_from_config`) and drives the
+///   operation to a terminal state, so a one-shot invocation actually
+///   requests the certificate end to end.
+pub async fn handle_obtain(args: ObtainCommand) -> Result<()> {
+    let ObtainCommand {
+        domains,
+        email,
+        challenge_type,
+        _cert_path: _,
+        _key_path: _,
+        prod,
+        dns_provider,
+        wait,
+    } = args;
     // 1. Validate basic inputs
     if domains.is_empty() {
         return Err(AcmeError::invalid_input("No domains specified"));
@@ -70,7 +108,7 @@ pub async fn handle_obtain(
     println!("   ACME Directory: {}", acme_url);
 
     println!("\n⏳ Creating certificate intent and issue operation...");
-    let (service, _repositories) = ApplicationServiceBuilder::from_config(&config)
+    let (service, repositories) = ApplicationServiceBuilder::from_config(&config)
         .await?
         .build()?;
     let idempotency_seed = domains.join(",");
@@ -96,6 +134,53 @@ pub async fn handle_obtain(
 
     println!("✓ Intent: {}", intent.id);
     println!("✓ Issue operation: {}", operation.id);
+
+    if wait {
+        println!("\n⏳ Driving the workflow engine in-process (this talks to the real CA)...");
+        let settings = crate::server::worker::WorkflowWorkerSettings {
+            // HTTP-01 needs a reachable listener; DNS-01 needs provider
+            // credentials from the environment. Anything missing fails with
+            // an explicit classified error rather than pretending.
+            http01_listen: config
+                .challenge
+                .http01
+                .as_ref()
+                .map(|http| http.listen_addr.clone()),
+            ..Default::default()
+        };
+        let metrics = std::sync::Arc::new(crate::metrics::MetricsRegistry::new());
+        let engine = crate::server::worker::build_engine_from_config(
+            &config,
+            repositories,
+            metrics,
+            settings,
+        )
+        .await?;
+        let record = engine
+            .run_until_terminal(&operation.id, WAIT_TIMEOUT)
+            .await?;
+        match record.status {
+            crate::domain::OperationStatus::Succeeded => {
+                println!("✅ Operation {} succeeded", operation.id);
+            }
+            status => {
+                return Err(AcmeError::protocol(format!(
+                    "operation {} ended in {}: {}",
+                    operation.id,
+                    status.as_str(),
+                    record
+                        .error
+                        .as_ref()
+                        .and_then(|e| e.detail.clone())
+                        .unwrap_or_else(|| "no detail".to_string())
+                )));
+            }
+        }
+    } else {
+        println!(
+            "Operation submitted. Start a worker (`acmex serve` or `acmex daemon`) or re-run with --wait to execute it now."
+        );
+    }
     println!(
         "Certificate material is delivered by configured sinks or controlled export endpoints."
     );

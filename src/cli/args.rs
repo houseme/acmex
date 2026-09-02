@@ -16,6 +16,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Scaffold a new AcmeX project (config + storage directories)
+    Init(InitArgs),
+
     /// Obtain a new certificate
     Obtain(ObtainArgs),
 
@@ -83,6 +86,29 @@ pub enum CertCommands {
 }
 
 #[derive(Parser, Debug)]
+pub struct InitArgs {
+    /// Target directory for the project (created if missing)
+    #[arg(short, long, default_value = ".")]
+    pub dir: String,
+
+    /// Certificate authority: letsencrypt, google, zerossl, custom
+    #[arg(short, long, default_value = "letsencrypt")]
+    pub ca: String,
+
+    /// CA environment: staging or production
+    #[arg(short, long, default_value = "staging")]
+    pub env: String,
+
+    /// Default challenge type: dns-01, http-01, tls-alpn-01
+    #[arg(long, default_value = "dns-01")]
+    pub challenge: String,
+
+    /// Contact email for the ACME account
+    #[arg(long)]
+    pub email: Option<String>,
+}
+
+#[derive(Parser, Debug)]
 pub struct ObtainArgs {
     /// Domain(s) to obtain certificate for
     #[arg(short, long, required = true)]
@@ -111,6 +137,13 @@ pub struct ObtainArgs {
     /// DNS provider (cloudflare, digitalocean, linode, route53)
     #[arg(long)]
     pub dns_provider: Option<String>,
+
+    /// Drive the workflow engine in-process and wait for the operation to
+    /// reach a terminal state (prints the result). Without this flag the
+    /// command submits the operation and exits immediately — a worker
+    /// (acmex serve / acmex daemon) picks it up.
+    #[arg(long, default_value_t = false)]
+    pub wait: bool,
 }
 
 #[derive(Parser, Debug)]

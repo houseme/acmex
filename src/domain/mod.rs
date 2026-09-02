@@ -28,7 +28,8 @@ pub mod policy;
 
 pub use account::{AccountRecord, AccountStatus};
 pub use certificate::{
-    CertificateLineage, CertificateVersion, ImportedBundle, KeyRef, VersionState,
+    CertificateLineage, CertificateVerificationCheck, CertificateVerificationReport,
+    CertificateVersion, ImportedBundle, KeyRef, VersionState,
 };
 pub use challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
 pub use deployment::{DeploymentRecord, DeploymentState};
@@ -47,5 +48,6 @@ pub use policy::{
     CaEnvironment, CaPolicy, ChallengeExclusion, ChallengeSet, DeliveryRequirement, DeliveryTarget,
     DeliveryTargetKind, ExclusionReason, KeyAlgorithm, KeyManagementMode, KeyPolicy,
     KeyRotationPolicy, PropagationPolicy, Quorum, RenewalPolicy, ValidationPlan,
-    ValidationPlanItem, ValidationPolicy, compatible_challenges, validate_order_policy,
+    ValidationPlanItem, ValidationPolicy, compatible_challenges, validate_identifier_scope,
+    validate_order_policy,
 };

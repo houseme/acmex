@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use crate::domain::{
     ClassifiedError, CompensationState, ErrorClass, OperationId, OperationRecord, OperationStatus,
-    StepStatus, WorkflowStepKind, error_codes,
+    StepRecord, StepStatus, WorkflowStepKind, error_codes,
 };
 use crate::error::{AcmeError, Result};
-use crate::repository::{CasOutcome, CreateOutcome, LeaseOutcome, RepositorySet, Revision};
+use crate::repository::{
+    CasOutcome, CreateOutcome, LeaseOutcome, RepositorySet, Revision, repository_error_class,
+};
+use tracing::Instrument;
 
 use super::{CompensationResult, StepContext, StepExecutor, StepResult, compute_backoff};
 
@@ -49,6 +52,7 @@ pub struct WorkflowEngine {
     repositories: RepositorySet,
     executors: HashMap<WorkflowStepKind, Arc<dyn StepExecutor>>,
     config: EngineConfig,
+    metrics: Option<crate::metrics::SharedMetrics>,
 }
 
 impl WorkflowEngine {
@@ -59,12 +63,21 @@ impl WorkflowEngine {
             repositories,
             executors: HashMap::new(),
             config: EngineConfig::default(),
+            metrics: None,
         }
     }
 
     /// Overrides tuning.
     pub fn with_config(mut self, config: EngineConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Attaches the shared metrics registry (T11): operation terminal
+    /// outcomes and per-step durations are recorded with low-cardinality
+    /// labels.
+    pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -142,17 +155,27 @@ impl WorkflowEngine {
     /// Returns the number of operations advanced.
     pub async fn run_once(&self) -> Result<usize> {
         let now = self.repositories.clock.now();
-        let ready = self
+        let ready = match self
             .repositories
             .operations
             .list_ready(now, self.config.batch_size)
-            .await?;
+            .await
+        {
+            Ok(ready) => ready,
+            Err(err) => {
+                self.record_repository_error(&err);
+                return Err(err);
+            }
+        };
         let mut advanced = 0;
         for stored in ready {
             match self.process_one(&stored.value, stored.revision).await {
                 Ok(true) => advanced += 1,
                 Ok(false) => {}
                 Err(err) => {
+                    // Repository failure (step failures arrive as
+                    // classified `StepResult`s, never as `Err`).
+                    self.record_repository_error(&err);
                     tracing::warn!(
                         operation = stored.value.id.as_str(),
                         error = %err,
@@ -168,10 +191,22 @@ impl WorkflowEngine {
     /// pass). Returns `false` when nothing was done (not ready / lease
     /// held). This is also the crash-recovery test entry point.
     pub async fn run_step(&self, id: &OperationId) -> Result<bool> {
-        let Some(stored) = self.repositories.operations.get(id).await? else {
+        let Some(stored) = (match self.repositories.operations.get(id).await {
+            Ok(stored) => stored,
+            Err(err) => {
+                self.record_repository_error(&err);
+                return Err(err);
+            }
+        }) else {
             return Ok(false);
         };
-        self.process_one(&stored.value, stored.revision).await
+        match self.process_one(&stored.value, stored.revision).await {
+            Ok(advanced) => Ok(advanced),
+            Err(err) => {
+                self.record_repository_error(&err);
+                Err(err)
+            }
+        }
     }
 
     /// Runs the operation to a terminal state, polling `run_step` until
@@ -232,6 +267,21 @@ impl WorkflowEngine {
     }
 
     async fn process_one(&self, operation: &OperationRecord, revision: Revision) -> Result<bool> {
+        // Wrap the whole advancement (lease, re-read, step execution, persist)
+        // in the convention span. Entering a span guard across `.await` is
+        // unsound in async code, so the work runs as an instrumented future:
+        // `Instrument` re-enters the span on every poll, keeping the fields
+        // attached across all awaits below.
+        self.process_one_inner(operation, revision)
+            .instrument(operation_span(operation))
+            .await
+    }
+
+    async fn process_one_inner(
+        &self,
+        operation: &OperationRecord,
+        revision: Revision,
+    ) -> Result<bool> {
         if operation.status.is_terminal() {
             return Ok(false);
         }
@@ -330,7 +380,20 @@ impl WorkflowEngine {
                 .finish(record, revision, OperationStatus::Succeeded, None)
                 .await;
         };
+        // Step-level span, instrumented over the async body for the same
+        // soundness reasons as `process_one`.
+        let span = step_span(record, step.kind);
+        self.execute_step(record, revision, step)
+            .instrument(span)
+            .await
+    }
 
+    async fn execute_step(
+        &self,
+        record: &mut OperationRecord,
+        revision: &mut Revision,
+        step: StepRecord,
+    ) -> Result<bool> {
         // Queued -> Running on first activity; Waiting -> Running on wake.
         if record.status != OperationStatus::Running {
             *record = record
@@ -372,7 +435,9 @@ impl WorkflowEngine {
             operation: record,
             repositories: &self.repositories,
         };
+        let step_started = std::time::Instant::now();
         let result = executor.execute(ctx).await;
+        self.record_step_duration(step.kind, &result, step_started.elapsed());
         let now = self.repositories.clock.now();
 
         match result {
@@ -689,6 +754,7 @@ impl WorkflowEngine {
         if !self.save(record, revision).await? {
             return Ok(false);
         }
+        self.record_operation_terminal(record);
         self.repositories
             .outbox
             .append(
@@ -702,6 +768,62 @@ impl WorkflowEngine {
             )
             .await?;
         Ok(true)
+    }
+
+    /// Records `acmex_repository_errors_total` for a repository failure
+    /// observed while listing, loading or advancing operations (T11).
+    fn record_repository_error(&self, err: &AcmeError) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        metrics
+            .repository_errors_total
+            .with_label_values(&[self.repositories.backend, repository_error_class(err)])
+            .inc();
+    }
+
+    /// Records `acmex_operations_total` for terminal outcomes.
+    fn record_operation_terminal(&self, record: &OperationRecord) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        let (result, class) = match record.status {
+            OperationStatus::Succeeded => ("succeeded", "none"),
+            OperationStatus::Failed => ("failed", terminal_error_class(record)),
+            OperationStatus::Cancelled => ("cancelled", "none"),
+            OperationStatus::CompensationFailed => {
+                ("compensation_failed", "operator_action_required")
+            }
+            _ => return,
+        };
+        metrics
+            .operations_total
+            .with_label_values(&[record.kind.as_str(), result, class])
+            .inc();
+    }
+
+    /// Records `acmex_operation_step_duration_seconds` for one execution.
+    fn record_step_duration(
+        &self,
+        step: WorkflowStepKind,
+        result: &StepResult,
+        elapsed: std::time::Duration,
+    ) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        let (outcome, class) = match result {
+            StepResult::Complete { .. } => ("completed", "none"),
+            StepResult::WaitUntil { .. } => ("waiting", "none"),
+            StepResult::RetryAt { error, .. } => {
+                ("retry_scheduled", error_class_label(&error.class))
+            }
+            StepResult::Fail(error) => ("failed", error_class_label(&error.class)),
+        };
+        metrics
+            .operation_step_duration_seconds
+            .with_label_values(&[step.as_str(), outcome, class])
+            .observe(elapsed.as_secs_f64());
     }
 
     async fn emit_step_event(
@@ -724,6 +846,87 @@ impl WorkflowEngine {
             )
             .await;
     }
+}
+
+/// Low-cardinality label for an error class (metrics convention).
+fn error_class_label(class: &ErrorClass) -> &'static str {
+    match class {
+        ErrorClass::Retryable => "retryable",
+        ErrorClass::RateLimited { .. } => "rate_limited",
+        ErrorClass::Terminal => "terminal",
+        ErrorClass::PolicyViolation => "policy_violation",
+        ErrorClass::OperatorActionRequired => "operator_action_required",
+        ErrorClass::Cancelled => "cancelled",
+    }
+}
+
+/// Error class label for a terminally finished operation.
+fn terminal_error_class(record: &OperationRecord) -> &'static str {
+    record
+        .error
+        .as_ref()
+        .map(|e| error_class_label(&e.class))
+        .unwrap_or("none")
+}
+
+// ---------------------------------------------------------------------
+// trace spans (T11 convention, see docs/SECURITY_OBSERVABILITY_HA.md)
+// ---------------------------------------------------------------------
+
+/// Records the optional `OperationSubject` identifier fields onto a span
+/// that declared them as `field::Empty`.
+///
+/// Only convention fields for values that actually exist are recorded.
+/// `tenant_id` is intentionally omitted: it lives on the intent/lineage,
+/// not on the operation record. Tokens, key material and caller-supplied
+/// identifiers (`idempotency_key`, `request_hash`) are never recorded.
+fn record_subject_fields(span: &tracing::Span, record: &OperationRecord) {
+    if let Some(id) = &record.subject.intent_id {
+        span.record("intent_id", tracing::field::display(id));
+    }
+    if let Some(id) = &record.subject.lineage_id {
+        span.record("lineage_id", tracing::field::display(id));
+    }
+    if let Some(id) = &record.subject.version_id {
+        span.record("version_id", tracing::field::display(id));
+    }
+}
+
+/// Operation-level span for one worker advancement pass.
+///
+/// DEBUG level on purpose: a span is emitted for every step advancement
+/// (17 per issuance), so INFO would dominate default deployments; lifecycle
+/// signal already flows through outbox events and metrics. Fields snapshot
+/// the record at pickup — identifiers are immutable once assigned.
+fn operation_span(record: &OperationRecord) -> tracing::Span {
+    let span = tracing::debug_span!(
+        "workflow.operation",
+        operation_id = %record.id,
+        kind = %record.kind.as_str(),
+        intent_id = tracing::field::Empty,
+        lineage_id = tracing::field::Empty,
+        version_id = tracing::field::Empty,
+    );
+    record_subject_fields(&span, record);
+    span
+}
+
+/// Step-level span for the execution of the current workflow step.
+///
+/// DEBUG level, mirroring `workflow.operation` (per-step spans are even
+/// more frequent than operation passes).
+fn step_span(record: &OperationRecord, step: WorkflowStepKind) -> tracing::Span {
+    let span = tracing::debug_span!(
+        "workflow.step",
+        operation_id = %record.id,
+        kind = %record.kind.as_str(),
+        workflow_step = %step.as_str(),
+        intent_id = tracing::field::Empty,
+        lineage_id = tracing::field::Empty,
+        version_id = tracing::field::Empty,
+    );
+    record_subject_fields(&span, record);
+    span
 }
 
 #[cfg(test)]

@@ -98,6 +98,12 @@ pub struct CaPolicy {
     /// Whether falling back to another allowed CA is permitted.
     #[serde(default)]
     pub allow_fallback: bool,
+    /// Whether private/reserved IP identifiers (RFC 1918, loopback,
+    /// link-local, documentation ranges, ...) may be requested. Public CAs
+    /// never validate them; the default `false` rejects them at policy time
+    /// — before any order is created (see [`validate_identifier_scope`]).
+    #[serde(default)]
+    pub allow_private_identifiers: bool,
 }
 
 /// CA environment selector.
@@ -538,6 +544,73 @@ pub fn validate_order_policy(
     Ok(ValidationPlan { items })
 }
 
+/// Rejects IP identifiers that no public CA will validate, unless the CA
+/// policy explicitly opts in (`allow_private_identifiers`).
+///
+/// Runs *before* any ACME side effect (the `Plan` step). DNS names are out
+/// of scope here — only `Identifier::Ip` values are checked.
+pub fn validate_identifier_scope(
+    identifiers: &[Identifier],
+    ca_policy: &CaPolicy,
+) -> crate::error::Result<()> {
+    if ca_policy.allow_private_identifiers {
+        return Ok(());
+    }
+    for identifier in identifiers {
+        if let Identifier::Ip(address) = identifier
+            && !is_publicly_routable(*address)
+        {
+            return Err(crate::error::AcmeError::InvalidInput(format!(
+                "identifier `{identifier}` is a private/reserved address; \
+                 public CAs will not validate it (set \
+                 ca_policy.allow_private_identifiers for private PKI)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether an IP address is globally routable (i.e. a public CA could plausibly
+/// validate a challenge for it).
+///
+/// Rejects: loopback, unspecified, multicast, broadcast, link-local,
+/// RFC 1918 private (v4), unique-local (fc00::/7) and the documentation
+/// ranges (TEST-NET-1/2/3 and 2001:db8::/32). This list is intentionally
+/// conservative; anything not explicitly listed as non-routable passes.
+fn is_publicly_routable(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(v4) => {
+            if v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+            {
+                return false;
+            }
+            let octets = v4.octets();
+            // TEST-NET-1/2/3 (RFC 5737): 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24.
+            !matches!(
+                octets,
+                [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _]
+            )
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unicast_link_local()
+                || v6.is_unique_local()
+            {
+                return false;
+            }
+            // Documentation range 2001:db8::/32 (RFC 3849).
+            !(v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+        }
+    }
+}
+
 fn exclusion_summary(reason: ExclusionReason) -> &'static str {
     match reason {
         ExclusionReason::IncompatibleWithIdentifier => {
@@ -553,6 +626,54 @@ fn exclusion_summary(reason: ExclusionReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_ip_identifiers_are_rejected_by_default() {
+        let policy = CaPolicy::default();
+        for value in [
+            "10.1.2.3",     // RFC 1918
+            "192.168.1.1",  // RFC 1918
+            "127.0.0.1",    // loopback
+            "169.254.1.1",  // link-local
+            "192.0.2.10",   // TEST-NET-1 (documentation)
+            "198.51.100.7", // TEST-NET-2
+            "203.0.113.9",  // TEST-NET-3
+            "fd00::1",      // unique local
+            "fe80::1",      // link-local v6
+            "2001:db8::1",  // documentation v6
+        ] {
+            let identifier = Identifier::try_ip(value)
+                .unwrap_or_else(|_| panic!("fixture {value} must parse as an IP identifier"));
+            let err = validate_identifier_scope(&[identifier], &policy)
+                .expect_err(&format!("{value} must be rejected"));
+            assert!(
+                err.to_string().contains("private/reserved"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_ips_pass_and_opt_in_allows_private() {
+        let policy = CaPolicy::default();
+        let public = [
+            Identifier::try_ip("93.184.216.34").unwrap(),
+            Identifier::try_ip("2606:2800:220:1:248:1893:25c8:1946").unwrap(),
+        ];
+        assert!(validate_identifier_scope(&public, &policy).is_ok());
+
+        // DNS identifiers are never scope-checked.
+        let dns = Identifier::try_dns("example.com").unwrap();
+        assert!(validate_identifier_scope(&[dns], &policy).is_ok());
+
+        // Explicit opt-in (private PKI) unblocks private addresses.
+        let opt_in = CaPolicy {
+            allow_private_identifiers: true,
+            ..CaPolicy::default()
+        };
+        let private = Identifier::try_ip("10.0.0.5").unwrap();
+        assert!(validate_identifier_scope(&[private], &opt_in).is_ok());
+    }
 
     fn dns(name: &str) -> Identifier {
         Identifier::try_dns(name).unwrap()

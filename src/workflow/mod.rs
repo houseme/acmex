@@ -23,6 +23,7 @@
 //! into this engine; `issue.rs` provides the skeleton with no-op executors.
 
 pub mod engine;
+pub mod issuance;
 pub mod issue;
 
 use std::sync::Arc;
@@ -36,6 +37,12 @@ use crate::domain::{ClassifiedError, OperationRecord, WorkflowStepKind};
 use crate::repository::RepositorySet;
 
 pub use engine::{EngineConfig, WorkflowEngine};
+pub use issuance::{
+    ActivateDeploymentStep, CompleteStep, CreateCsrStep, DownloadCertificateStep,
+    FinalizeOrderStep, IssuanceStepDeps, PersistVersionStep, PlanStep, ScheduleDeploymentsStep,
+    StageDeploymentStep, SubmitRevocationStep, VerifyCertificateStep, VerifyDeploymentStep,
+    WaitOrderStep,
+};
 pub use issue::IssueWorkflow;
 
 type ExecuteFn = dyn for<'ctx> Fn(StepContext<'ctx>) -> StepResult + Send + Sync;

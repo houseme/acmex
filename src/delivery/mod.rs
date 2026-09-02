@@ -16,8 +16,7 @@ use x509_parser::prelude::*;
 use crate::domain::{
     CertificateLineage, CertificateVersion, DeliveryRequirement, DeliveryTargetKind, DeploymentId,
     DeploymentRecord, DeploymentState, OperationId, OperationKind, OperationRecord,
-    OperationStatus, OperationSubject, StepStatus, TargetId, VersionId, VersionState,
-    WorkflowStepKind,
+    OperationSubject, TargetId, VersionId, VersionState,
 };
 use crate::error::{AcmeError, Result};
 use crate::key::SecretBytes;
@@ -239,6 +238,7 @@ pub enum DeploymentActivationOutcome {
 pub struct DeploymentOrchestrator {
     repositories: RepositorySet,
     sinks: HashMap<&'static str, Arc<dyn CertificateSink>>,
+    metrics: Option<crate::metrics::SharedMetrics>,
 }
 
 impl fmt::Debug for DeploymentOrchestrator {
@@ -255,7 +255,15 @@ impl DeploymentOrchestrator {
         Self {
             repositories,
             sinks: HashMap::new(),
+            metrics: None,
         }
+    }
+
+    /// Attaches the shared metrics registry (T11): deployment attempts are
+    /// counted per sink type with coarse result/error labels.
+    pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Registers a sink implementation for a delivery target kind.
@@ -342,6 +350,43 @@ impl DeploymentOrchestrator {
         deployment_id: &DeploymentId,
         material: &CertificateMaterial,
     ) -> Result<DeploymentRecord> {
+        // Snapshot the sink type up front for metric labels (best effort:
+        // an unreadable spec still runs, just unlabeled).
+        let spec_kind = match self.repositories.deployments.get(deployment_id).await {
+            Ok(Some(stored)) => self
+                .deployment_spec(&stored.value)
+                .await
+                .map(|spec| sink_key(spec.kind))
+                .ok(),
+            _ => None,
+        };
+        let result = self
+            .run_deployment_once_inner(deployment_id, material)
+            .await;
+        if let (Some(metrics), Some(kind)) = (&self.metrics, spec_kind) {
+            let (result_label, class) = match &result {
+                Ok(record) => match record.state {
+                    DeploymentState::Staged | DeploymentState::Active => ("succeeded", "none"),
+                    DeploymentState::Healthy => ("healthy", "none"),
+                    DeploymentState::Failed => ("failed", "sink_error"),
+                    DeploymentState::RolledBack => ("rolled_back", "health_check_failed"),
+                    _ => ("advanced", "none"),
+                },
+                Err(_) => ("error", "internal"),
+            };
+            metrics
+                .deployment_total
+                .with_label_values(&[kind, result_label, class])
+                .inc();
+        }
+        result
+    }
+
+    async fn run_deployment_once_inner(
+        &self,
+        deployment_id: &DeploymentId,
+        material: &CertificateMaterial,
+    ) -> Result<DeploymentRecord> {
         let stored = self
             .repositories
             .deployments
@@ -384,13 +429,6 @@ impl DeploymentOrchestrator {
                                 None,
                             )
                             .await?;
-                        self.record_deploy_operation_step(
-                            &record,
-                            WorkflowStepKind::StageDeployment,
-                            true,
-                            None,
-                        )
-                        .await?;
                         self.emit_deployment_event(&record, "deployment.staged", None)
                             .await?;
                         Ok(record)
@@ -403,15 +441,6 @@ impl DeploymentOrchestrator {
                                 None,
                                 Some(err.to_string()),
                             )
-                            .await?;
-                        self.record_deploy_operation_step(
-                            &record,
-                            WorkflowStepKind::StageDeployment,
-                            false,
-                            Some(&err),
-                        )
-                        .await?;
-                        self.finish_deploy_operation(&record, OperationStatus::Failed, Some(&err))
                             .await?;
                         self.emit_deployment_event(&record, "deployment.failed", Some(&err))
                             .await?;
@@ -434,13 +463,6 @@ impl DeploymentOrchestrator {
                                 None,
                             )
                             .await?;
-                        self.record_deploy_operation_step(
-                            &record,
-                            WorkflowStepKind::ActivateDeployment,
-                            true,
-                            None,
-                        )
-                        .await?;
                         self.emit_deployment_event(&record, "deployment.activated", None)
                             .await?;
                         Ok(record)
@@ -455,15 +477,6 @@ impl DeploymentOrchestrator {
                                 Some(err.to_string()),
                             )
                             .await?;
-                        self.record_deploy_operation_step(
-                            &record,
-                            WorkflowStepKind::ActivateDeployment,
-                            false,
-                            Some(&err),
-                        )
-                        .await?;
-                        self.finish_deploy_operation(&record, OperationStatus::Failed, Some(&err))
-                            .await?;
                         self.emit_deployment_event(&record, "deployment.failed", Some(&err))
                             .await?;
                         Ok(record)
@@ -476,15 +489,6 @@ impl DeploymentOrchestrator {
                     DeploymentHealth::Healthy => {
                         let record = self
                             .transition_deployment(&stored, DeploymentState::Healthy, None, None)
-                            .await?;
-                        self.record_deploy_operation_step(
-                            &record,
-                            WorkflowStepKind::VerifyDeployment,
-                            true,
-                            None,
-                        )
-                        .await?;
-                        self.finish_deploy_operation(&record, OperationStatus::Succeeded, None)
                             .await?;
                         self.emit_deployment_event(&record, "deployment.healthy", None)
                             .await?;
@@ -509,19 +513,6 @@ impl DeploymentOrchestrator {
                             )
                             .await?;
                         let error = AcmeError::certificate("deployment health check failed");
-                        self.record_deploy_operation_step(
-                            &record,
-                            WorkflowStepKind::VerifyDeployment,
-                            false,
-                            Some(&error),
-                        )
-                        .await?;
-                        self.finish_deploy_operation(
-                            &record,
-                            OperationStatus::Failed,
-                            Some(&error),
-                        )
-                        .await?;
                         self.emit_deployment_event(&record, "deployment.rolled_back", Some(&error))
                             .await?;
                         Ok(record)
@@ -768,98 +759,6 @@ impl DeploymentOrchestrator {
             .await?
             .expect_updated()?;
         Ok(record)
-    }
-
-    async fn record_deploy_operation_step(
-        &self,
-        deployment: &DeploymentRecord,
-        step: WorkflowStepKind,
-        success: bool,
-        error: Option<&AcmeError>,
-    ) -> Result<()> {
-        let op_id = deploy_operation_id_for(&deployment.version_id, &deployment.target_id)?;
-        let Some(stored) = self.repositories.operations.get(&op_id).await? else {
-            return Ok(());
-        };
-        let mut op = stored.value;
-        if op.status == OperationStatus::Queued {
-            op = op
-                .transition(OperationStatus::Running)
-                .map_err(AcmeError::storage)?;
-        }
-        if let Some((index, step_record)) = op
-            .steps
-            .iter_mut()
-            .enumerate()
-            .find(|(_, candidate)| candidate.kind == step)
-        {
-            step_record.attempt += 1;
-            step_record.status = if success {
-                StepStatus::Completed
-            } else {
-                StepStatus::Failed
-            };
-            step_record.finished_at = Some(self.repositories.clock.now());
-            step_record.output_ref = Some(deployment.id.as_str().to_string());
-            step_record.error = error.map(|err| crate::domain::ClassifiedError {
-                code: crate::domain::error_codes::INTERNAL,
-                class: crate::domain::ErrorClass::Retryable,
-                detail: Some(err.to_string()),
-            });
-            if success && op.current_step_index <= index {
-                op.current_step_index = (index + 1).min(op.steps.len().saturating_sub(1));
-            }
-        }
-        op.updated_at = self.repositories.clock.now();
-        self.repositories
-            .operations
-            .update(stored.revision, op)
-            .await?
-            .expect_updated()?;
-        Ok(())
-    }
-
-    async fn finish_deploy_operation(
-        &self,
-        deployment: &DeploymentRecord,
-        status: OperationStatus,
-        error: Option<&AcmeError>,
-    ) -> Result<()> {
-        let op_id = deploy_operation_id_for(&deployment.version_id, &deployment.target_id)?;
-        let Some(stored) = self.repositories.operations.get(&op_id).await? else {
-            return Ok(());
-        };
-        if stored.value.status.is_terminal() {
-            return Ok(());
-        }
-        let mut op = stored
-            .value
-            .transition(status)
-            .map_err(AcmeError::storage)?;
-        op.error = error.map(|err| crate::domain::ClassifiedError {
-            code: crate::domain::error_codes::INTERNAL,
-            class: crate::domain::ErrorClass::Terminal,
-            detail: Some(err.to_string()),
-        });
-        op.updated_at = self.repositories.clock.now();
-        self.repositories
-            .operations
-            .update(stored.revision, op)
-            .await?
-            .expect_updated()?;
-        self.repositories
-            .outbox
-            .append(
-                "operation.finished",
-                serde_json::json!({
-                    "operation_id": op_id.as_str(),
-                    "status": status.as_str(),
-                    "deployment_id": deployment.id.as_str(),
-                }),
-                None,
-            )
-            .await?;
-        Ok(())
     }
 
     async fn emit_deployment_event(

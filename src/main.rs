@@ -1,79 +1,73 @@
-use acmex::prelude::*;
-use opentelemetry::trace::TracerProvider as _;
-use tracing_subscriber::prelude::*;
+//! The `acmex` binary entry point.
+//!
+//! The binary is the CLI defined in [`acmex::cli`] (`init`, `obtain`,
+//! `renew`, `daemon`, `serve`, `info`, `account`, `order`, `cert`). This
+//! file only wires process-level concerns before handing over:
+//!
+//! * optional OpenTelemetry tracing — enabled when
+//!   `OTEL_EXPORTER_OTLP_ENDPOINT` is set; failures degrade to plain
+//!   `tracing` output instead of aborting the command;
+//! * non-zero exit codes on command failure (with the error printed once).
+//!
+//! The previous behavior (a hard-coded ACME protocol demo) moved out of the
+//! binary — run `acmex info <cert>` or see the library quick start in the
+//! crate docs for equivalent examples.
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // 1. Initialize Tracing & OpenTelemetry
-    let fmt_layer = tracing_subscriber::fmt::layer();
-    let filter_layer = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+use acmex::cli;
 
-    // OpenTelemetry Layer
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
+/// Attaches an OTLP tracing layer when an endpoint is configured.
+///
+/// Returns `true` when OpenTelemetry was initialized. Any exporter failure
+/// is downgraded to a warning: a missing collector must not break CLI
+/// commands.
+fn try_init_open_telemetry() -> bool {
+    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_err() {
+        return false;
+    }
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::prelude::*;
+
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .build()
-        .expect("Failed to create OTLP exporter");
-
-    let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+    {
+        Ok(exporter) => exporter,
+        Err(err) => {
+            eprintln!("warning: OTLP exporter unavailable, continuing without traces: {err}");
+            return false;
+        }
+    };
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
         .build();
-
-    // Set as global
-    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
-
-    let tracer = tracer_provider.tracer("acmex");
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    tracing_subscriber::registry()
-        .with(filter_layer)
+    let tracer = provider.tracer("acmex");
+    opentelemetry::global::set_tracer_provider(provider);
+    // The fmt layer is installed by `cli::init_logging`; adding the OTel
+    // layer on top of the global default subscriber keeps both sinks live.
+    let fmt_layer = tracing_subscriber::fmt::layer();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::registry()
+        .with(filter)
         .with(fmt_layer)
-        .with(otel_layer)
-        .init();
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .try_init();
+    true
+}
 
-    tracing::info!("AcmeX starting with OpenTelemetry observability");
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    // Optional observability first so command logs can also be exported.
+    let otel = try_init_open_telemetry();
+    if otel {
+        eprintln!("OpenTelemetry tracing enabled");
+    }
 
-    // Create a configuration for Let's Encrypt staging
-    let config = AcmeConfig::lets_encrypt_staging()
-        .with_contact(Contact::email("admin@example.com"))
-        .with_tos_agreed(true);
-
-    println!("ACME Config:");
-    println!("  Directory URL: {}", config.directory_url);
-    println!("  Contacts: {:?}", config.contacts);
-    println!("  TOS Agreed: {}", config.terms_of_service_agreed);
-
-    // Example usage:
-    // 1. Create HTTP client
-    let http_client = reqwest::Client::new();
-
-    // 2. Get directory
-    let dir_manager =
-        acmex::protocol::DirectoryManager::new(&config.directory_url, http_client.clone());
-    let directory = dir_manager.get().await?;
-
-    println!("\nACME Directory endpoints:");
-    println!("  New Nonce: {}", directory.new_nonce);
-    println!("  New Account: {}", directory.new_account);
-    println!("  New Order: {}", directory.new_order);
-
-    // 3. Generate key pair
-    let key_pair = KeyPair::generate()?;
-    println!("\nKey pair generated successfully");
-
-    // 4. Create nonce manager
-    let nonce_manager =
-        acmex::protocol::NonceManager::new(&directory.new_nonce, http_client.clone());
-
-    // 5. Create account manager
-    let account_manager =
-        AccountManager::new(&key_pair, &nonce_manager, &dir_manager, &http_client)?;
-
-    println!("\nAccount manager created successfully");
-    println!("JWK: {:?}", account_manager.get_jwk());
-
-    println!("\nv0.1.0 - Core ACME Protocol Implementation");
-    println!("Successfully demonstrated basic ACME operations!");
-
-    Ok(())
+    match cli::run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

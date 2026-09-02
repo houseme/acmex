@@ -1,32 +1,131 @@
-//! # AcmeX - ACME v2 Client Library
+//! # AcmeX — ACME v2 certificate lifecycle control plane (library + CLI)
 //!
-//! A comprehensive Rust library for interacting with ACME v2 servers (RFC 8555).
-//! Supports Let's Encrypt, Google Trust Services, ZeroSSL, and custom ACME implementations.
+//! AcmeX is a Rust implementation of ACME v2 (RFC 8555) with the surrounding
+//! lifecycle machinery a production deployment actually needs: durable,
+//! restart-safe operations; typed identifiers (DNS names, wildcards, IPv4,
+//! IPv6 per RFC 8738); RFC 9773 (ARI) renewal windows; managed or external
+//! keys; and atomic delivery to downstream sinks with health-gated
+//! activation and rollback.
 //!
-//! ## Features
+//! The crate is dual-use:
 //!
-//! - **Complete ACME v2 Protocol Support**: Full RFC 8555 implementation
-//! - **Multiple Challenge Types**: HTTP-01, DNS-01, TLS-ALPN-01
-//! - **Account Management**: Registration, key rollover, deactivation
-//! - **Order Management**: Certificate ordering and finalization
-//! - **Storage Flexibility**: File-based (default) or Redis-backed storage
-//! - **Async/Await**: Built on Tokio for high performance
+//! * **as a library** — pull `acmex` into your own service and drive the
+//!   same pipeline through [`application::ApplicationServiceBuilder`] and
+//!   [`server::worker`];
+//! * **as a CLI** — the `acmex` binary wraps the same engine:
+//!   `acmex init` scaffolds a project, `acmex obtain --wait` requests a
+//!   certificate end to end, `acmex serve` runs the API + worker, and
+//!   `acmex daemon` runs renewal scanning + execution without the API.
 //!
-//! ## Quick Start
+//! ## Architecture in one screen
 //!
-//! ```rust,no_run
-//! use acmex::prelude::*;
+//! ```text
+//! Intent (desired state)
+//!   └─ ApplicationService  ── submit ──▶  Operation (durable, 17-step spine)
+//!        │                                      │
+//!        │                               WorkflowEngine (one step at a
+//!        │                               time, every step persisted,
+//!        │                               crash-resumable, lease-fenced)
+//!        │                                      │
+//!   CertificateQuery ◀── views ──    CaBackend (JWS, badNonce, Retry-After,
+//!        │                            ARI) · Presenters (DNS-01/HTTP-01/
+//!        │                            TLS-ALPN-01) · KeyProvider · Sinks
+//!        ▼
+//!   CertificateVersion (immutable) ──▶ Deployment (stage → activate →
+//!                                       health check → rollback) ──▶ active
+//! ```
+//!
+//! ## Library quick start
+//!
+//! Submit an issuance request and drive it with the embedded engine:
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! use acmex::application::{
+//!     ActorContext, ApplicationServiceBuilder, CertificateApplication,
+//!     CertificateQuery, CreateCertificateIntent, IssueCertificate,
+//! };
+//! use acmex::config::Config;
+//! use acmex::metrics::MetricsRegistry;
+//! use acmex::server::worker::{self, WorkflowWorkerSettings};
 //!
 //! #[tokio::main]
 //! async fn main() -> acmex::Result<()> {
-//!     // Create a client for Let's Encrypt staging
-//!     let config = AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory");
+//!     // Any `Config` works; `Config::default()` targets Let's Encrypt staging.
+//!     let config = Config::default();
 //!
-//!     // ... use the client
+//!     // 1. Application service over the durable repository (file or memory).
+//!     let (service, repositories) =
+//!         ApplicationServiceBuilder::from_config(&config).await?.build()?;
+//!
+//!     // 2. Declare the desired certificate (idempotent per key).
+//!     let intent = service
+//!         .create_intent(CreateCertificateIntent {
+//!             context: ActorContext::default(),
+//!             identifiers: vec!["example.com".to_string()],
+//!             ca_policy: Default::default(),
+//!             validation_policy: Default::default(),
+//!             key_policy: Default::default(),
+//!             renewal_policy: Default::default(),
+//!             delivery_targets: Vec::new(),
+//!             idempotency_key: "my-intent-1".to_string(),
+//!         })
+//!         .await?;
+//!
+//!     // 3. Submit the issue operation (returns immediately; durable).
+//!     let operation = service
+//!         .issue(IssueCertificate {
+//!             context: ActorContext::default(),
+//!             intent_id: intent.id.clone(),
+//!             idempotency_key: format!("issue-{}", intent.id),
+//!         })
+//!         .await?;
+//!
+//!     // 4. Build the production engine (CA backend, presenters, keys,
+//!     //    sinks) and drive the operation to a terminal state.
+//!     let engine = worker::build_engine_from_config(
+//!         &config,
+//!         repositories,
+//!         Arc::new(MetricsRegistry::new()),
+//!         WorkflowWorkerSettings::default(),
+//!     )
+//!     .await?;
+//!     let record = engine
+//!         .run_until_terminal(&operation.id, Duration::from_secs(900))
+//!         .await?;
+//!     println!("operation finished: {:?}", record.status);
 //!     Ok(())
 //! }
 //! ```
+//!
+//! ## Feature flags
+//!
+//! Crypto defaults to `aws-lc-rs` (`ring` selectable); each DNS provider is
+//! behind its own feature (`dns-cloudflare`, `dns-route53`, ...); `redis`
+//! enables Redis storage. See `Cargo.toml` for the full list and
+//! `docs/roadmap/v0.9.0/FEATURE_MATRIX.md` for validation status.
+//!
+//! ## Module map
+//!
+//! | Module | Responsibility |
+//! |---|---|
+//! | [`domain`] | Typed identifiers, intents, lineages, versions, operations |
+//! | [`repository`] | Pluggable durable state (memory/file), CAS, leases, outbox |
+//! | [`workflow`] | The step-wise durable engine and the real step executors |
+//! | [`application`] | The unified use-case API (create/issue/renew/revoke/deploy) |
+//! | [`ca_backend`] | RFC 8555 session, badNonce/Retry-After, ARI, capabilities |
+//! | [`challenge`] | Challenge sessions, leases, presenters, cleanup |
+//! | [`dns`] | Provider factory, zone discovery, propagation quorum |
+//! | [`key`] | Managed/external keys and CSRs |
+//! | [`delivery`] | Sinks, deployment orchestration, activation gating |
+//! | [`renewal`] | ARI-first renewal controller |
+//! | [`server`] | Axum API v1, auth, health, metrics endpoint, worker wiring |
+//! | [`cli`] | The `acmex` binary commands |
+//!
 
+// Module declarations
 // Module declarations
 pub mod account;
 pub mod application;
@@ -61,10 +160,12 @@ pub mod workflow;
 pub use account::{Account, AccountManager, KeyPair, KeyRollover};
 pub use application::{
     ActorContext, ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
-    CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate, OperationView,
-    Permission, RenewCertificate, RepositoryCertificateApplication, RevokeCertificate, VersionView,
+    ChallengeLeaseView, ChallengeSessionView, CreateCertificateIntent, DeployCertificate,
+    IntentView, IssueCertificate, OperationView, Permission, RenewCertificate,
+    RepositoryCertificateApplication, RevokeCertificate, UpdateCertificateIntent, VersionView,
 };
 pub use ca::{CAConfig, CertificateAuthority, Environment};
+pub use ca_backend::{DirectoryAriProvider, InstrumentedAcmeTransport};
 pub use certificate::{CertificateChain, CertificateSubjectAltNames};
 pub use challenge::{
     ACME_TLS_ALPN_PROTOCOL, CachingDnsResolver, ChallengeSolver, ChallengeSolverRegistry,
@@ -121,7 +222,8 @@ pub use key::{
 pub use metrics::{HealthStatus, MetricsRegistry};
 pub use notifications::{
     EventType, OutboxConsumer, OutboxConsumerConfig, OutboxConsumerReport, OutboxDelivery,
-    WebhookClient, WebhookConfig, WebhookEvent, WebhookManager,
+    WebhookClient, WebhookConfig, WebhookEvent, WebhookManager, WebhookVerificationError,
+    verify_webhook_signature,
 };
 pub use orchestrator::{CertificateProvisioner, DomainValidator, Orchestrator};
 pub use order::{
@@ -139,14 +241,25 @@ pub use renewal::{
 pub use renewal::{RenewalHook, SimpleRenewalScheduler};
 #[allow(deprecated)]
 pub use scheduler::{AdvancedRenewalScheduler, CleanupScheduler, RenewalScheduler};
-pub use server::{HealthCheck, WebhookHandler, start_server};
+pub use server::{
+    HealthCheck, WebhookHandler, start_server,
+    worker::{
+        WorkflowWorkerComponents, WorkflowWorkerSettings, build_engine_from_config,
+        register_executors, spawn_from_config,
+    },
+};
 #[cfg(feature = "redis")]
 pub use storage::RedisStorage;
 pub use storage::{EncryptedStorage, FileStorage};
 pub use types::{
     AuthorizationStatus, ChallengeType, Contact, Identifier, OrderStatus, RevocationReason,
 };
-pub use workflow::{EngineConfig, StepExecutor, StepResult, WorkflowEngine};
+pub use workflow::{
+    ActivateDeploymentStep, CompleteStep, CreateCsrStep, DownloadCertificateStep, EngineConfig,
+    FinalizeOrderStep, IssuanceStepDeps, PersistVersionStep, PlanStep, ScheduleDeploymentsStep,
+    StageDeploymentStep, StepExecutor, StepResult, SubmitRevocationStep, VerifyCertificateStep,
+    VerifyDeploymentStep, WaitOrderStep, WorkflowEngine,
+};
 
 /// Prelude module with commonly used types
 pub mod prelude {
@@ -183,7 +296,9 @@ pub mod prelude {
             RenewalControllerConfig, RenewalDecision, RenewalPriority, RenewalWindowSource,
         },
         scheduler::CleanupScheduler,
+        server::worker::{WorkflowWorkerSettings, build_engine_from_config},
         transport::HttpClient,
         types::{AuthorizationStatus, ChallengeType, Contact, OrderStatus, RevocationReason},
+        workflow::{EngineConfig, StepExecutor, StepResult, WorkflowEngine},
     };
 }

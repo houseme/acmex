@@ -233,6 +233,46 @@ impl CertificateChain {
             .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
         Ok(cert.serial.to_str_radix(16))
     }
+
+    /// Verifies the leaf certificate's signature against the public key of
+    /// the given issuer certificate (the DER of the next certificate in the
+    /// chain).
+    ///
+    /// Returns `Ok(false)` when the signature provably does not verify.
+    /// Unsupported signature algorithms and malformed input surface as
+    /// errors so callers can tell "provably not signed" from "cannot be
+    /// evaluated" (T07 strict verification).
+    pub fn verify_leaf_signed_by(&self, issuer_der: &[u8]) -> Result<bool> {
+        verify_cert_signature(&self.leaf, Some(issuer_der))
+    }
+
+    /// Whether the leaf is self-signed (its signature verifies with its own
+    /// subject public key).
+    pub fn verify_leaf_self_signed(&self) -> Result<bool> {
+        verify_cert_signature(&self.leaf, None)
+    }
+}
+
+/// Verifies a certificate's signature with the issuer's SubjectPublicKeyInfo
+/// (`None` = the certificate's own key, i.e. a self-signature check).
+fn verify_cert_signature(cert_der: &[u8], issuer_der: Option<&[u8]>) -> Result<bool> {
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| AcmeError::crypto(format!("Invalid certificate: {}", e)))?;
+    let mut issuer_cert = None;
+    if let Some(der) = issuer_der {
+        let (_, parsed) = X509Certificate::from_der(der)
+            .map_err(|e| AcmeError::certificate(format!("Invalid issuer certificate: {}", e)))?;
+        issuer_cert = Some(parsed);
+    }
+    let issuer_key = issuer_cert.as_ref().map(|issuer| issuer.public_key());
+    match cert.verify_signature(issuer_key) {
+        Ok(()) => Ok(true),
+        // A bad signature is a negative answer, not an error.
+        Err(x509_parser::error::X509Error::SignatureVerificationError) => Ok(false),
+        Err(err) => Err(AcmeError::certificate(format!(
+            "signature verification failed: {err}"
+        ))),
+    }
 }
 
 fn decode_ip_san(bytes: &[u8]) -> Option<IpAddr> {
@@ -251,6 +291,41 @@ fn decode_ip_san(bytes: &[u8]) -> Option<IpAddr> {
 mod tests {
     use super::*;
     use rcgen::{CertificateParams, SanType};
+
+    /// A self-signed test CA valid across a wide window.
+    fn test_ca(common_name: &str) -> rcgen::CertifiedIssuer<'_, rcgen::KeyPair> {
+        let mut params = CertificateParams::new(Vec::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, common_name);
+        params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2027, 1, 1);
+        rcgen::CertifiedIssuer::self_signed(params, rcgen::KeyPair::generate().unwrap()).unwrap()
+    }
+
+    /// A leaf for `domain` signed by `issuer` with the given subject key.
+    fn ca_signed_leaf_pem(
+        domain: &str,
+        leaf_key: &rcgen::KeyPair,
+        issuer: &rcgen::CertifiedIssuer<rcgen::KeyPair>,
+    ) -> String {
+        let mut params = CertificateParams::new(vec![domain.to_string()]).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, domain);
+        params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2027, 1, 1);
+        params.signed_by(leaf_key, issuer).unwrap().pem()
+    }
+
+    fn der_of(pem: &str) -> Vec<u8> {
+        parse_many(pem.as_bytes())
+            .unwrap()
+            .remove(0)
+            .contents()
+            .to_vec()
+    }
 
     #[test]
     fn test_certificate_chain_parsing() {
@@ -306,5 +381,51 @@ mod tests {
                 ])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn leaf_signature_verification_detects_wrong_issuer() {
+        let ca = test_ca("acmex test ca");
+        let other_ca = test_ca("acmex other ca");
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_pem = ca_signed_leaf_pem("example.com", &leaf_key, &ca);
+        let chain = CertificateChain {
+            leaf: der_of(&leaf_pem),
+            intermediates: vec![ca.der().to_vec()],
+            root: None,
+        };
+
+        // The leaf is signed by the included intermediate.
+        assert!(
+            chain
+                .verify_leaf_signed_by(&chain.intermediates[0])
+                .unwrap()
+        );
+        // ... and not by an unrelated CA.
+        assert!(
+            !chain
+                .verify_leaf_signed_by(other_ca.der().as_ref())
+                .unwrap()
+        );
+        // A CA-signed leaf is not self-signed.
+        assert!(!chain.verify_leaf_self_signed().unwrap());
+    }
+
+    #[test]
+    fn self_signed_leaf_verifies_against_its_own_key() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec!["example.com".to_string()]).unwrap();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "example.com");
+        params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2027, 1, 1);
+        let cert = params.self_signed(&key).unwrap();
+        let chain = CertificateChain {
+            leaf: cert.der().to_vec(),
+            intermediates: Vec::new(),
+            root: None,
+        };
+        assert!(chain.verify_leaf_self_signed().unwrap());
     }
 }

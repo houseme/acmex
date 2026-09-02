@@ -221,6 +221,62 @@ pub struct ImportedBundle {
     pub key_mode: KeyManagementMode,
 }
 
+/// One named check inside a [`CertificateVerificationReport`].
+///
+/// `name` is a stable, machine-readable identifier (e.g. `san_exact`);
+/// `detail` carries human context and must never contain key material.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CertificateVerificationCheck {
+    /// Stable check name (`chain_parsed`, `san_exact`, `validity_window`, ...).
+    pub name: String,
+    /// Whether the check passed.
+    pub passed: bool,
+    /// Optional human-readable context (no secrets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// The strict acceptance report produced when an issued chain is verified
+/// against its intent (roadmap T07): which checks ran, the observed
+/// validity window, serial and issuer. Persisted as the
+/// `VerifyCertificate` step output so the evidence survives restarts and
+/// audits — a certificate is only persisted when every check passed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CertificateVerificationReport {
+    /// Whether the SAN set exactly matches the intent identifiers.
+    pub identifiers_exact_match: bool,
+    /// Observed validity start (RFC 3339).
+    pub not_before: String,
+    /// Observed validity end (RFC 3339).
+    pub not_after: String,
+    /// Leaf serial (hex).
+    pub serial: String,
+    /// Issuing CA identity, when known from the intent's CA policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca: Option<String>,
+    /// Requested profile, when the intent pinned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The individual checks with their outcomes.
+    pub checks: Vec<CertificateVerificationCheck>,
+}
+
+impl CertificateVerificationReport {
+    /// Whether every recorded check passed.
+    pub fn all_passed(&self) -> bool {
+        self.checks.iter().all(|check| check.passed)
+    }
+
+    /// The names of the failed checks (diagnostics).
+    pub fn failed_checks(&self) -> Vec<&str> {
+        self.checks
+            .iter()
+            .filter(|check| !check.passed)
+            .map(|check| check.name.as_str())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

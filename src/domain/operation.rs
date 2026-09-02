@@ -108,6 +108,8 @@ pub enum WorkflowStepKind {
     EnsureAccount,
     /// Create an ACME order or resume a previously persisted one.
     CreateOrResumeOrder,
+    /// Submit a persisted certificate for revocation.
+    SubmitRevocation,
     /// Fetch all authorization objects for the order.
     LoadAuthorizations,
     /// Create external validation resources (DNS record, HTTP route...).
@@ -153,6 +155,7 @@ impl WorkflowStepKind {
             Self::Plan => "plan",
             Self::EnsureAccount => "ensure_account",
             Self::CreateOrResumeOrder => "create_or_resume_order",
+            Self::SubmitRevocation => "submit_revocation",
             Self::LoadAuthorizations => "load_authorizations",
             Self::PrepareChallenges => "prepare_challenges",
             Self::WaitPropagation => "wait_propagation",
@@ -475,6 +478,7 @@ impl OperationRecord {
             OperationKind::Revoke => &[
                 WorkflowStepKind::Plan,
                 WorkflowStepKind::EnsureAccount,
+                WorkflowStepKind::SubmitRevocation,
                 WorkflowStepKind::Complete,
             ],
             OperationKind::Deploy => &[

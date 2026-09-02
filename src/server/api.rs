@@ -92,12 +92,55 @@ pub async fn start_server(
         .build()?;
     let query: Arc<dyn CertificateQuery> = application_service.clone();
     let application: Arc<dyn CertificateApplication> = application_service;
+
+    // Shared metrics registry: observed by the ACME transport and exposed on
+    // the dedicated scrape listener (see `metrics_endpoint`).
+    let metrics: crate::metrics::SharedMetrics = Arc::new(crate::metrics::MetricsRegistry::new());
+    super::metrics_endpoint::spawn_from_config(&config, metrics.clone());
+
+    // The durable workflow worker: real executors (CA backend, challenge
+    // presenters, key provider, deployment orchestration) advancing queued
+    // operations. Assembly failures (e.g. unreadable key store) are logged,
+    // not fatal: the API stays up while the loop is down.
+    match super::worker::spawn_from_config(
+        &config,
+        repositories.clone(),
+        metrics.clone(),
+        super::worker::WorkflowWorkerSettings {
+            http01_listen: config
+                .challenge
+                .http01
+                .as_ref()
+                .map(|http| http.listen_addr.clone()),
+            secret_store_dir: super::worker::default_secret_store_dir(&config),
+            ..Default::default()
+        },
+    )
+    .await
+    {
+        Ok(handle) => {
+            tokio::spawn(async move {
+                if handle.await.is_err() {
+                    tracing::error!("workflow worker task terminated unexpectedly");
+                }
+            });
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "workflow worker not started");
+        }
+    }
+
     let scheduler = scheduler.or_else(|| {
+        // Key-free RFC 9773 ARI provider over the metrics-instrumented
+        // transport (shared assembly with the CLI daemon).
+        let ari = super::worker::build_ari_provider(&config, metrics.clone());
         let controller = RenewalController::new(
             repositories.clone(),
             application.clone(),
             RenewalControllerConfig::default(),
-        );
+        )
+        .with_ari_provider(ari)
+        .with_metrics(metrics.clone());
         Some(Arc::new(ControllerRenewalScheduler::new(controller)) as Arc<dyn RenewalScheduler>)
     });
 
@@ -215,8 +258,44 @@ impl axum::extract::FromRef<AppState> for Arc<HealthCheck> {
     }
 }
 
+/// Maps a configured CA name to a low-cardinality metric label
+/// (alphanumerics plus `-`/`_`; everything else collapses to `_`).
+pub(crate) fn sanitize_ca_label(ca: &str) -> String {
+    let cleaned: String = ca
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "custom".to_string()
+    } else {
+        cleaned
+    }
+}
+
 impl axum::extract::FromRef<AppState> for Arc<WebhookHandler> {
     fn from_ref(state: &AppState) -> Self {
         state.webhook.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_ca_label;
+
+    #[test]
+    fn ca_labels_stay_low_cardinality() {
+        assert_eq!(sanitize_ca_label("letsencrypt"), "letsencrypt");
+        assert_eq!(sanitize_ca_label("Let's Encrypt"), "let_s_encrypt");
+        assert_eq!(
+            sanitize_ca_label("https://ca.example.com/dir"),
+            "https___ca_example_com_dir"
+        );
+        assert_eq!(sanitize_ca_label(""), "custom");
     }
 }

@@ -33,17 +33,29 @@ pub async fn run() -> crate::error::Result<()> {
     tracing::info!("AcmeX CLI starting command: {:?}", cli.command);
 
     match cli.command {
+        Commands::Init(args) => {
+            tracing::info!("Scaffolding AcmeX project in {}", args.dir);
+            commands::handle_init(commands::InitOptions {
+                dir: std::path::PathBuf::from(&args.dir),
+                ca: args.ca,
+                env: args.env,
+                challenge: args.challenge,
+                email: args.email,
+            })
+            .await?;
+        }
         Commands::Obtain(args) => {
             tracing::info!("Handling 'obtain' command for domains: {:?}", args.domains);
-            commands::handle_obtain(
-                args.domains,
-                args.email,
-                args.challenge,
-                args.cert_path,
-                args.key_path,
-                args.prod,
-                args.dns_provider,
-            )
+            commands::handle_obtain(commands::ObtainCommand {
+                domains: args.domains,
+                email: args.email,
+                challenge_type: args.challenge,
+                _cert_path: args.cert_path,
+                _key_path: args.key_path,
+                prod: args.prod,
+                dns_provider: args.dns_provider,
+                wait: args.wait,
+            })
             .await?;
         }
         Commands::Renew(args) => {
@@ -71,7 +83,7 @@ pub async fn run() -> crate::error::Result<()> {
             }
         },
         Commands::Daemon(args) => {
-            if let Some(config_path) = args.config {
+            if let Some(config_path) = args.config.as_ref() {
                 tracing::info!("Loading daemon configuration from: {}", config_path);
             }
 
@@ -82,6 +94,7 @@ pub async fn run() -> crate::error::Result<()> {
                 args.check_interval,
                 args.renew_before_days,
                 args.notify_email,
+                args.config.clone(),
             )
             .await?;
         }

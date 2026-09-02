@@ -378,7 +378,10 @@ async fn deployment_failure_keeps_new_version_and_old_active_pointer_intact() {
     ));
     assert_eq!(lineage.active_version_id, Some(old_version.id));
     assert_eq!(new_after.state, VersionState::Issued);
-    assert_eq!(operation.status, OperationStatus::Failed);
+    // Operation bookkeeping belongs to the workflow engine: the orchestrator
+    // only mutates deployment records, so the child operation stays queued
+    // here and is failed by the engine when its executor surfaces the error.
+    assert_eq!(operation.status, OperationStatus::Queued);
     assert!(
         events
             .iter()
