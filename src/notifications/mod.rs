@@ -5,7 +5,7 @@
 
 use crate::dns::spec::{EnvFileSecretResolver, SecretRef, SecretResolver};
 use crate::error::{AcmeError, Result};
-use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet};
+use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet, repository_error_class};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
@@ -308,10 +308,10 @@ impl WebhookClient {
             let secret = self.secrets.resolve(secret_ref).await?;
             let signature = webhook_signature(secret.expose(), &timestamp, &body_bytes)?;
             request = request
-                .header("X-AcmeX-Event-Id", &event.event_id)
+                .header(WEBHOOK_EVENT_ID_HEADER, &event.event_id)
                 .header("X-AcmeX-Event-Type", &event.event_type)
-                .header("X-AcmeX-Signature-Timestamp", timestamp)
-                .header("X-AcmeX-Signature", signature);
+                .header(WEBHOOK_SIGNATURE_TIMESTAMP_HEADER, timestamp)
+                .header(WEBHOOK_SIGNATURE_HEADER, signature);
         }
 
         let response = request
@@ -435,6 +435,7 @@ pub struct OutboxConsumer<D> {
     repositories: RepositorySet,
     delivery: Arc<D>,
     config: OutboxConsumerConfig,
+    metrics: Option<crate::metrics::SharedMetrics>,
 }
 
 impl<D> OutboxConsumer<D>
@@ -450,10 +451,32 @@ where
             repositories,
             delivery,
             config,
+            metrics: None,
         }
     }
 
+    /// Attaches the shared metrics registry: `acmex_outbox_pending` tracks
+    /// the batch backlog per event type (a lower bound of the true backlog,
+    /// which a single `list_pending` batch cannot observe).
+    pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     pub async fn run_once(&self) -> Result<OutboxConsumerReport> {
+        // Every error escaping the pass below comes from a repository call:
+        // delivery failures are classified outcomes accounted through
+        // `mark_failed`/`dead_letter`, never propagated (T11).
+        match self.run_once_inner().await {
+            Ok(report) => Ok(report),
+            Err(err) => {
+                self.record_repository_error(&err);
+                Err(err)
+            }
+        }
+    }
+
+    async fn run_once_inner(&self) -> Result<OutboxConsumerReport> {
         let pending = self
             .repositories
             .outbox
@@ -461,6 +484,12 @@ where
             .await?;
         let mut report = OutboxConsumerReport::default();
         for event in pending {
+            if let Some(metrics) = &self.metrics {
+                metrics
+                    .outbox_pending
+                    .with_label_values(&[&event.event_type])
+                    .inc();
+            }
             let lease_key = format!("outbox/{}", event.sequence);
             let grant = match self
                 .repositories
@@ -482,6 +511,12 @@ where
                         .outbox
                         .mark_processed(event.sequence)
                         .await?;
+                    if let Some(metrics) = &self.metrics {
+                        metrics
+                            .outbox_pending
+                            .with_label_values(&[&event.event_type])
+                            .dec();
+                    }
                     report.delivered += 1;
                 }
                 Err(err) => {
@@ -531,6 +566,19 @@ where
             .saturating_mul(2_u32.saturating_pow(shift))
             .min(self.config.retry_backoff_max)
     }
+
+    /// Records `acmex_repository_errors_total` for a repository failure
+    /// observed by the consumer (T11); delivery failures are excluded —
+    /// they are already accounted via `mark_failed`/`dead_letter`.
+    fn record_repository_error(&self, err: &AcmeError) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        metrics
+            .repository_errors_total
+            .with_label_values(&[self.repositories.backend, repository_error_class(err)])
+            .inc();
+    }
 }
 
 fn stable_delivery_error(err: &AcmeError) -> String {
@@ -543,8 +591,16 @@ fn stable_delivery_error(err: &AcmeError) -> String {
     }
 }
 
+/// RFC 3339 UTC timestamp for webhook signing.
+///
+/// Must be true UTC: the `Z` suffix is a format literal, so formatting
+/// `Zoned::now()` directly would stamp local time as UTC on non-UTC hosts
+/// and shift every signature outside any sane replay window.
 fn signing_timestamp() -> String {
-    Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
+    jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 fn webhook_signature(secret: &[u8], timestamp: &str, body: &[u8]) -> Result<String> {
@@ -557,6 +613,106 @@ fn webhook_signature(secret: &[u8], timestamp: &str, body: &[u8]) -> Result<Stri
         "sha256={}",
         hex::encode(mac.finalize().into_bytes())
     ))
+}
+
+/// Header carrying the stable event id (consumer-side deduplication).
+const WEBHOOK_EVENT_ID_HEADER: &str = "X-AcmeX-Event-Id";
+/// Header carrying the signature timestamp (RFC 3339, part of the MAC input).
+const WEBHOOK_SIGNATURE_TIMESTAMP_HEADER: &str = "X-AcmeX-Signature-Timestamp";
+/// Header carrying the `sha256=<hex>` HMAC-SHA256 signature.
+const WEBHOOK_SIGNATURE_HEADER: &str = "X-AcmeX-Signature";
+
+/// Why a webhook signature check failed (see [`verify_webhook_signature`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WebhookVerificationError {
+    /// A required signing header was absent or not valid UTF-8. Carries the
+    /// header name.
+    #[error("missing or invalid webhook header `{0}`")]
+    MissingHeader(&'static str),
+    /// The signature timestamp is not a parsable RFC 3339 instant
+    /// (`YYYY-MM-DDTHH:MM:SSZ` as sent by [`WebhookClient`]).
+    #[error("webhook signature timestamp is not a valid RFC 3339 timestamp")]
+    InvalidTimestamp,
+    /// The signature timestamp lies outside the allowed replay window
+    /// (`max_skew`), so the request is rejected even before HMAC checking.
+    #[error("webhook signature timestamp is outside the allowed replay window")]
+    StaleTimestamp,
+    /// The HMAC did not match: wrong secret, or tampered body/timestamp.
+    /// A malformed signature value (bad prefix, bad hex) is reported here
+    /// as well.
+    #[error("webhook signature mismatch")]
+    BadSignature,
+}
+
+/// Reads a required header as UTF-8.
+fn header_str<'a>(
+    headers: &'a reqwest::header::HeaderMap,
+    name: &'static str,
+) -> std::result::Result<&'a str, WebhookVerificationError> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(WebhookVerificationError::MissingHeader(name))
+}
+
+/// Verifies a signed AcmeX webhook on the consumer side (T11 replay-window
+/// residual).
+///
+/// The sender ([`WebhookClient`]) adds `X-AcmeX-Event-Id`,
+/// `X-AcmeX-Signature-Timestamp` and `X-AcmeX-Signature`, where the
+/// signature is HMAC-SHA256 over `{timestamp}.{body}` with the shared
+/// secret, hex-encoded with a `sha256=` prefix. This helper:
+///
+/// 1. requires all three headers ([`WebhookVerificationError::MissingHeader`]);
+/// 2. rejects timestamps further than `max_skew` from the current system
+///    time, bounding the replay window
+///    ([`WebhookVerificationError::StaleTimestamp`]);
+/// 3. recomputes the HMAC over the exact same signing input and compares it
+///    in constant time via `hmac`'s `verify_slice`
+///    ([`WebhookVerificationError::BadSignature`]).
+///
+/// The header map type is `http::HeaderMap` as re-exported by `reqwest`;
+/// `axum` serves the identical type, so HTTP-server consumers can pass their
+/// request headers directly.
+///
+/// Returns the event id on success so consumers can deduplicate the
+/// at-least-once delivery.
+pub fn verify_webhook_signature<'headers>(
+    headers: &'headers reqwest::header::HeaderMap,
+    body: &[u8],
+    secret: &[u8],
+    max_skew: Duration,
+) -> std::result::Result<&'headers str, WebhookVerificationError> {
+    let event_id = header_str(headers, WEBHOOK_EVENT_ID_HEADER)?;
+    let timestamp = header_str(headers, WEBHOOK_SIGNATURE_TIMESTAMP_HEADER)?;
+    let signature = header_str(headers, WEBHOOK_SIGNATURE_HEADER)?;
+
+    // Replay window: parse RFC 3339 (the sender's strftime layout is a
+    // subset) and bound |now - signed_at|, compared in nanoseconds so no
+    // duration conversion can panic.
+    let signed_at: jiff::Timestamp = timestamp
+        .parse()
+        .map_err(|_| WebhookVerificationError::InvalidTimestamp)?;
+    let skew_ns = (jiff::Timestamp::now().as_nanosecond() - signed_at.as_nanosecond()).abs();
+    let max_skew_ns = max_skew.as_nanos().min(i128::MAX as u128) as i128;
+    if skew_ns > max_skew_ns {
+        return Err(WebhookVerificationError::StaleTimestamp);
+    }
+
+    // Recompute the MAC over the same `{timestamp}.{body}` input the sender
+    // signs; `verify_slice` performs the constant-time comparison.
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret)
+        .map_err(|_| WebhookVerificationError::BadSignature)?;
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let expected = signature
+        .strip_prefix("sha256=")
+        .and_then(|hex_digest| hex::decode(hex_digest).ok())
+        .ok_or(WebhookVerificationError::BadSignature)?;
+    mac.verify_slice(&expected)
+        .map_err(|_| WebhookVerificationError::BadSignature)?;
+    Ok(event_id)
 }
 
 #[cfg(test)]
@@ -639,5 +795,130 @@ mod tests {
         let sig = webhook_signature(b"secret", "2026-01-01T00:00:00Z", br#"{"ok":true}"#).unwrap();
         assert!(sig.starts_with("sha256="));
         assert_eq!(sig.len(), "sha256=".len() + 64);
+    }
+
+    /// Builds the same headers a signed delivery would carry, via the same
+    /// signing helpers the sender uses.
+    fn signed_headers(
+        secret: &[u8],
+        timestamp: &str,
+        body: &[u8],
+        event_id: &str,
+    ) -> reqwest::header::HeaderMap {
+        let signature = webhook_signature(secret, timestamp, body).unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(WEBHOOK_EVENT_ID_HEADER, event_id.parse().unwrap());
+        headers.insert(
+            WEBHOOK_SIGNATURE_TIMESTAMP_HEADER,
+            timestamp.parse().unwrap(),
+        );
+        headers.insert(WEBHOOK_SIGNATURE_HEADER, signature.parse().unwrap());
+        headers
+    }
+
+    const TEST_SKEW: Duration = Duration::from_secs(300);
+
+    #[test]
+    fn verify_webhook_signature_accepts_fresh_signatures() {
+        let body = br#"{"event_type":"renewal_success"}"#;
+        let headers = signed_headers(b"topsecret", &signing_timestamp(), body, "evt_1");
+        let event_id = verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW).unwrap();
+        assert_eq!(event_id, "evt_1");
+    }
+
+    #[test]
+    fn verify_webhook_signature_rejects_stale_timestamps() {
+        let body = br#"{"a":1}"#;
+        let stale = jiff::Timestamp::now()
+            .checked_sub(jiff::Span::new().hours(1))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let headers = signed_headers(b"topsecret", &stale, body, "evt_1");
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::StaleTimestamp)
+        );
+    }
+
+    #[test]
+    fn verify_webhook_signature_rejects_future_timestamps() {
+        // A timestamp from the far future is equally outside the window.
+        let body = br#"{"a":1}"#;
+        let future = jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(1))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let headers = signed_headers(b"topsecret", &future, body, "evt_1");
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::StaleTimestamp)
+        );
+    }
+
+    #[test]
+    fn verify_webhook_signature_rejects_tampered_body() {
+        let signed_body = br#"{"amount":1}"#;
+        let tampered_body = br#"{"amount":2}"#;
+        let headers = signed_headers(b"topsecret", &signing_timestamp(), signed_body, "evt_1");
+        assert_eq!(
+            verify_webhook_signature(&headers, tampered_body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn verify_webhook_signature_rejects_wrong_secret() {
+        let body = br#"{"a":1}"#;
+        let headers = signed_headers(b"topsecret", &signing_timestamp(), body, "evt_1");
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"other-secret", TEST_SKEW),
+            Err(WebhookVerificationError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn verify_webhook_signature_requires_all_three_headers() {
+        let body = br#"{"a":1}"#;
+        let mut headers = signed_headers(b"topsecret", &signing_timestamp(), body, "evt_1");
+        headers.remove(WEBHOOK_SIGNATURE_HEADER);
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::MissingHeader(
+                WEBHOOK_SIGNATURE_HEADER
+            ))
+        );
+
+        let mut headers = signed_headers(b"topsecret", &signing_timestamp(), body, "evt_1");
+        headers.remove(WEBHOOK_EVENT_ID_HEADER);
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::MissingHeader(
+                WEBHOOK_EVENT_ID_HEADER
+            ))
+        );
+    }
+
+    #[test]
+    fn verify_webhook_signature_rejects_unparsable_timestamp() {
+        let body = br#"{"a":1}"#;
+        // Signed like the sender would, but with a garbage timestamp value.
+        let headers = signed_headers(b"topsecret", "not-a-timestamp", body, "evt_1");
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::InvalidTimestamp)
+        );
+    }
+
+    #[test]
+    fn verify_webhook_signature_rejects_malformed_signature_value() {
+        let body = br#"{"a":1}"#;
+        let mut headers = signed_headers(b"topsecret", &signing_timestamp(), body, "evt_1");
+        headers.insert(WEBHOOK_SIGNATURE_HEADER, "rawhex".parse().unwrap());
+        assert_eq!(
+            verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
+            Err(WebhookVerificationError::BadSignature)
+        );
     }
 }

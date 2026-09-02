@@ -5,6 +5,8 @@
 //! scanner is the safety net that runs periodically (or on startup) and
 //! retries until every lease is `Cleaned` or explicitly alerting.
 
+use std::collections::HashMap;
+
 use crate::domain::challenge::{ChallengeLease, ChallengeLeaseState};
 use crate::error::Result;
 use crate::repository::RepositorySet;
@@ -16,6 +18,7 @@ pub struct ChallengeCleanupScanner {
     presenters: PresenterRegistry,
     repositories: RepositorySet,
     max_cleanup_attempts: u32,
+    metrics: Option<crate::metrics::SharedMetrics>,
 }
 
 /// One lease's cleanup outcome in a scan pass.
@@ -40,20 +43,46 @@ impl ChallengeCleanupScanner {
             presenters,
             repositories,
             max_cleanup_attempts: 5,
+            metrics: None,
         }
+    }
+
+    /// Attaches the shared metrics registry: `acmex_cleanup_pending` reflects
+    /// the pending-lease backlog per challenge type and provider/agent.
+    pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Runs one scan pass over all leases needing cleanup.
     pub async fn scan_once(&self) -> Result<Vec<(String, ScanOutcome)>> {
-        let mut results = Vec::new();
-        for lease in self
+        let pending = self
             .repositories
             .challenge_leases
             .list_needing_cleanup()
-            .await?
-        {
-            let outcome = self.cleanup_lease(&lease.value).await?;
-            results.push((lease.value.id.to_string(), outcome));
+            .await?;
+        if let Some(metrics) = &self.metrics {
+            let mut backlog: HashMap<(String, String), i64> = HashMap::new();
+            for stored in &pending {
+                let lease = &stored.value;
+                *backlog
+                    .entry((
+                        lease.challenge_type.as_str().to_string(),
+                        locator_target(lease),
+                    ))
+                    .or_default() += 1;
+            }
+            for ((challenge_type, target), count) in &backlog {
+                metrics
+                    .challenge_cleanup_pending
+                    .with_label_values(&[challenge_type, target])
+                    .set(*count);
+            }
+        }
+        let mut results = Vec::new();
+        for stored in pending {
+            let outcome = self.cleanup_lease(&stored.value).await?;
+            results.push((stored.value.id.to_string(), outcome));
         }
         Ok(results)
     }
@@ -118,5 +147,17 @@ impl ChallengeCleanupScanner {
                 crate::repository::CasOutcome::Conflict { .. } => continue,
             }
         }
+    }
+}
+
+/// The provider/agent target behind a lease locator (`provider_type`
+/// metric label: the instance id — bounded per deployment).
+fn locator_target(lease: &ChallengeLease) -> String {
+    match &lease.locator {
+        crate::domain::challenge::ChallengeLeaseLocator::Dns { provider_id, .. } => {
+            provider_id.clone()
+        }
+        crate::domain::challenge::ChallengeLeaseLocator::Http { agent_id, .. } => agent_id.clone(),
+        crate::domain::challenge::ChallengeLeaseLocator::Tls { agent_id, .. } => agent_id.clone(),
     }
 }

@@ -695,3 +695,36 @@ async fn session_states_are_validated() {
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn cleanup_scanner_sets_pending_backlog_metric() {
+    let clock = Arc::new(FakeClock::at(now()));
+    let repositories = MemoryRepository::with_clock(clock.clone()).into_set();
+    let presenter = MemoryPresenter::dns01(MemoryPresenterBehavior {
+        cleanup_failures_first: 1,
+        ..Default::default()
+    });
+    let lease = presenter
+        .prepare(PrepareChallenge {
+            session: session_of("metric-scan"),
+            key_authorization: "token.fp".to_string(),
+        })
+        .await
+        .unwrap();
+    repositories.challenge_leases.create(lease).await.unwrap();
+
+    let mut presenters = PresenterRegistry::new();
+    presenters.register(presenter);
+    let metrics = Arc::new(acmex::metrics::MetricsRegistry::new());
+    let scanner = ChallengeCleanupScanner::new(presenters, repositories.clone())
+        .with_metrics(metrics.clone());
+
+    // Pass 1: scripted cleanup failure → lease stays pending (gauge 1).
+    scanner.scan_once().await.unwrap();
+    let text = metrics.gather_text();
+    let gauge = text
+        .lines()
+        .find(|line| line.starts_with("acmex_challenge_cleanup_pending{"))
+        .unwrap_or_else(|| panic!("missing cleanup backlog gauge:\n{text}"));
+    assert!(gauge.ends_with(" 1"), "expected backlog 1, got: {gauge}");
+}

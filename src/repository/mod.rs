@@ -425,6 +425,9 @@ pub trait MigrationManifestStore: Send + Sync {
 /// Cheap to clone; all members are shared handles.
 #[derive(Clone)]
 pub struct RepositorySet {
+    /// Backend identifier used as the `backend` metric label
+    /// (`"memory"`, `"file"`, ...).
+    pub backend: &'static str,
     /// Intents.
     pub intents: Arc<dyn IntentRepository>,
     /// Lineages.
@@ -449,6 +452,26 @@ pub struct RepositorySet {
     pub manifests: Arc<dyn MigrationManifestStore>,
     /// The clock used by this repository (virtualizable in tests).
     pub clock: Arc<dyn Clock>,
+}
+
+/// Coarse error-class label for repository failures (T11 metrics
+/// convention).
+///
+/// Mirrors the mapping of `renewal::acme_error_class_label`, with one
+/// addition: storage-native variants (`Storage`, `Io`, `Json`) map to
+/// `"storage"` instead of falling through to `"internal"`, because they
+/// dominate repository errors and deserve their own low-cardinality class.
+pub(crate) fn repository_error_class(err: &AcmeError) -> &'static str {
+    match err {
+        AcmeError::Storage(_) | AcmeError::Io(_) | AcmeError::Json(_) => "storage",
+        AcmeError::RateLimited(_) => "rate_limited",
+        AcmeError::Timeout(_) | AcmeError::Transport(_) => "retryable",
+        AcmeError::NotFound(_) => "not_found",
+        AcmeError::Conflict(_) => "conflict",
+        AcmeError::Configuration(_) => "configuration",
+        AcmeError::InvalidInput(_) => "invalid_input",
+        _ => "internal",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -906,4 +929,47 @@ pub(crate) fn bump_envelope(previous: &Value, data: &Value, now: Timestamp) -> R
         "updated_at": now.to_string(),
         "data": data,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_error_class_is_coarse_and_stable() {
+        assert_eq!(
+            repository_error_class(&AcmeError::Storage("io".to_string())),
+            "storage"
+        );
+        assert_eq!(
+            repository_error_class(&AcmeError::Io(std::io::Error::other("io"))),
+            "storage"
+        );
+        assert_eq!(
+            repository_error_class(&AcmeError::RateLimited(None)),
+            "rate_limited"
+        );
+        assert_eq!(
+            repository_error_class(&AcmeError::Timeout("slow".to_string())),
+            "retryable"
+        );
+        assert_eq!(
+            repository_error_class(&AcmeError::Conflict("cas".to_string())),
+            "conflict"
+        );
+        assert_eq!(
+            repository_error_class(&AcmeError::Protocol("bug".to_string())),
+            "internal"
+        );
+    }
+
+    #[test]
+    fn repository_sets_declare_their_backend() {
+        let memory = MemoryRepository::new().into_set();
+        assert_eq!(memory.backend, "memory");
+        assert!(crate::metrics::validate_metric_label(
+            "backend",
+            memory.backend
+        ));
+    }
 }

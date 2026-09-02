@@ -7,11 +7,16 @@ use tracing::info;
 use x509_parser::prelude::*;
 
 /// Orchestrator for certificate renewal
+#[deprecated(
+    since = "0.9.0",
+    note = "use the ARI-aware RenewalController (T09) via ApplicationServiceBuilder; this renewer only inspects the legacy `cert:` store"
+)]
 pub struct CertificateRenewer<B: StorageBackend> {
     store: CertificateStore<B>,
     renew_before_days: u64,
 }
 
+#[allow(deprecated)]
 impl<B: StorageBackend> CertificateRenewer<B> {
     /// Create a new renewer
     pub fn new(store: CertificateStore<B>, renew_before_days: u64) -> Self {
@@ -36,6 +41,7 @@ impl<B: StorageBackend> CertificateRenewer<B> {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl<B: StorageBackend + 'static> Orchestrator for CertificateRenewer<B> {
     async fn execute(&self, _config: &Config) -> Result<()> {

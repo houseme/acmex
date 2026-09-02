@@ -391,6 +391,60 @@ pub trait RenewalInfoProvider: Send + Sync {
     async fn renewal_window(&self, chain_pem: &str) -> Result<Option<RenewalWindow>>;
 }
 
+/// The CA metric label for an intent: pinned `ca_id`, else the first
+/// allowed CA, else `any` — always sanitized to label-safe characters.
+fn ca_metric_label(intent: &CertificateIntent) -> String {
+    let raw = intent
+        .ca_policy
+        .ca_id
+        .clone()
+        .or_else(|| intent.ca_policy.allowed_cas.first().cloned())
+        .unwrap_or_else(|| "any".to_string());
+    sanitize_metric_label(&raw)
+}
+
+fn sanitize_metric_label(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "any".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Low-cardinality priority label.
+fn priority_label(priority: RenewalPriority) -> &'static str {
+    match priority {
+        RenewalPriority::Low => "low",
+        RenewalPriority::Normal => "normal",
+        RenewalPriority::High => "high",
+        RenewalPriority::Urgent => "urgent",
+        RenewalPriority::Critical => "critical",
+    }
+}
+
+/// Coarse error-class label for an [`AcmeError`] (metrics convention).
+fn acme_error_class_label(err: &AcmeError) -> &'static str {
+    match err {
+        AcmeError::RateLimited(_) => "rate_limited",
+        AcmeError::Timeout(_) | AcmeError::Transport(_) => "retryable",
+        AcmeError::NotFound(_) => "not_found",
+        AcmeError::Conflict(_) => "conflict",
+        AcmeError::Configuration(_) => "configuration",
+        AcmeError::InvalidInput(_) => "invalid_input",
+        _ => "internal",
+    }
+}
+
 #[async_trait]
 impl<T> RenewalInfoProvider for T
 where
@@ -407,6 +461,7 @@ pub struct RenewalController {
     application: Arc<dyn CertificateApplication>,
     ari: Option<Arc<dyn RenewalInfoProvider>>,
     config: RenewalControllerConfig,
+    metrics: Option<crate::metrics::SharedMetrics>,
 }
 
 impl RenewalController {
@@ -421,6 +476,7 @@ impl RenewalController {
             application,
             ari: None,
             config,
+            metrics: None,
         }
     }
 
@@ -428,6 +484,48 @@ impl RenewalController {
     pub fn with_ari_provider(mut self, provider: Arc<dyn RenewalInfoProvider>) -> Self {
         self.ari = Some(provider);
         self
+    }
+
+    /// Attaches the shared metrics registry (T11): due renewals, failures
+    /// and active-version expiry are recorded with low-cardinality labels.
+    pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Records expiry and due-renewal gauges for one scanned lineage.
+    fn record_decision_metrics(
+        &self,
+        intent: &CertificateIntent,
+        version: &CertificateVersion,
+        decision: &RenewalDecision,
+        due_counts: &mut std::collections::HashMap<(String, &'static str), i64>,
+    ) {
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        let ca = ca_metric_label(intent);
+        if let Ok(not_after) = jiff::Timestamp::from_str(&version.not_after) {
+            let seconds = self
+                .repositories
+                .clock
+                .now()
+                .until(not_after)
+                .ok()
+                .and_then(|span| span.total(jiff::Unit::Second).ok())
+                .map(|total| total as i64);
+            if let Some(seconds) = seconds {
+                metrics
+                    .certificate_seconds_to_expiry
+                    .with_label_values(&[&ca, version.state.as_str()])
+                    .set(seconds);
+            }
+        }
+        if decision.should_create_operation() {
+            *due_counts
+                .entry((ca, priority_label(decision.priority)))
+                .or_default() += 1;
+        }
     }
 
     /// Evaluates one lineage/version pair.
@@ -494,6 +592,8 @@ impl RenewalController {
             next_cursor,
             ..RenewalScanReport::default()
         };
+        let mut due_counts: std::collections::HashMap<(String, &'static str), i64> =
+            std::collections::HashMap::new();
         for stored_lineage in page {
             report.scanned += 1;
             let lineage = stored_lineage.value;
@@ -510,6 +610,7 @@ impl RenewalController {
             let decision = self
                 .decision_for(&lineage, &version.value, &intent.value)
                 .await?;
+            self.record_decision_metrics(&intent.value, &version.value, &decision, &mut due_counts);
             let should_create = decision.should_create_operation();
             report.decisions.push(decision);
             if !should_create {
@@ -522,13 +623,32 @@ impl RenewalController {
                 report.shadowed += 1;
                 continue;
             }
-            if self
+            match self
                 .create_renewal_operation_with_lease(&lineage, active_version_id)
-                .await?
+                .await
             {
-                report.operations_created += 1;
-            } else {
-                report.leases_skipped += 1;
+                Ok(true) => report.operations_created += 1,
+                Ok(false) => report.leases_skipped += 1,
+                Err(err) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics
+                            .renewal_failures_total
+                            .with_label_values(&[
+                                &ca_metric_label(&intent.value),
+                                acme_error_class_label(&err),
+                            ])
+                            .inc();
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            for ((ca, priority), count) in &due_counts {
+                metrics
+                    .renewal_due
+                    .with_label_values(&[ca.as_str(), priority])
+                    .set(*count);
             }
         }
         Ok(report)

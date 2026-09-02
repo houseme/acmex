@@ -334,6 +334,7 @@ impl FileRepository {
             ))
         };
         RepositorySet {
+            backend: "file",
             intents: mk(),
             lineages: mk(),
             versions: mk(),

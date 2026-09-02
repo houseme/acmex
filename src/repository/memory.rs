@@ -146,6 +146,7 @@ impl MemoryRepository {
             ))
         };
         RepositorySet {
+            backend: "memory",
             intents: mk(),
             lineages: mk(),
             versions: mk(),

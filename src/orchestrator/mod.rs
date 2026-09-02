@@ -84,5 +84,6 @@ pub trait Orchestrator: Send + Sync {
 }
 
 pub use provisioner::CertificateProvisioner;
+#[allow(deprecated)]
 pub use renewer::CertificateRenewer;
 pub use validator::DomainValidator;

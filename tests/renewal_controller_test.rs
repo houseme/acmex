@@ -628,3 +628,65 @@ async fn renewal_activation_switches_active_version_and_supersedes_old_after_dep
     assert_eq!(old_version.state, VersionState::Superseded);
     assert_eq!(old_version.superseded_by.as_ref(), Some(&new_version_id));
 }
+
+#[tokio::test]
+async fn renewal_scan_records_metrics() {
+    let (repositories, application, _lineage_id, _version_id) =
+        seeded_controller(ts("2026-01-09T12:00:00Z")).await;
+    let metrics = Arc::new(acmex::metrics::MetricsRegistry::new());
+    let controller = RenewalController::new(
+        repositories.clone(),
+        application,
+        RenewalControllerConfig::default(),
+    )
+    .with_metrics(metrics.clone());
+
+    let report = controller.scan_once().await.unwrap();
+
+    let text = metrics.gather_text();
+    // Active-version expiry gauge in seconds (positive: ~12h remain).
+    let expiry_line = text
+        .lines()
+        .find(|line| {
+            line.starts_with(r#"acmex_certificate_seconds_to_expiry{ca="any",state="active""#)
+        })
+        .unwrap_or_else(|| panic!("missing expiry gauge:\n{text}"));
+    let value: i64 = expiry_line.rsplit(' ').next().unwrap().parse().unwrap();
+    assert!(
+        (0..=86_400).contains(&value),
+        "expiry gauge should be ~12h in seconds, got {value}"
+    );
+
+    // Due renewals are counted by priority (seeded lineage is critical here).
+    if report.operations_created > 0 {
+        assert!(
+            text.contains(r#"acmex_renewal_due{ca="any",priority="critical"} 1"#),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn renewal_scan_records_failure_metric() {
+    let (repositories, _application, _lineage_id, _version_id) =
+        seeded_controller(ts("2026-01-09T12:00:00Z")).await;
+    let metrics = Arc::new(acmex::metrics::MetricsRegistry::new());
+    let controller = RenewalController::new(
+        repositories.clone(),
+        Arc::new(FailingRenewApplication),
+        RenewalControllerConfig {
+            owner: "scanner-a".to_string(),
+            ..RenewalControllerConfig::default()
+        },
+    )
+    .with_metrics(metrics.clone());
+
+    // The scan surfaces the failure after recording it.
+    assert!(controller.scan_once().await.is_err());
+
+    let text = metrics.gather_text();
+    assert!(
+        text.contains(r#"acmex_renewal_failures_total{ca="any",error_class="retryable"} 1"#),
+        "{text}"
+    );
+}
