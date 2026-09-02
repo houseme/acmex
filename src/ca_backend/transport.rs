@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -99,8 +99,17 @@ pub struct AcmeProblem {
 /// This is the *only* place HTTP-status-based classification happens;
 /// callers never match on status strings themselves.
 pub fn classify_response(response: &AcmeResponse) -> Result<serde_json::Value> {
+    classify_status(response)?;
+    response.json()
+}
+
+/// Status/problem classification without parsing the body.
+///
+/// Use for endpoints whose 2xx body is not JSON (e.g. the PEM certificate
+/// download) — `classify_response` would reject any non-JSON 2xx body.
+pub fn classify_status(response: &AcmeResponse) -> Result<()> {
     if (200..300).contains(&response.status) {
-        return response.json();
+        return Ok(());
     }
 
     let problem = response.problem();
@@ -285,6 +294,92 @@ impl AcmeTransport for ReqwestAcmeTransport {
     }
 }
 
+/// Transport decorator that records ACME request metrics (total, duration,
+/// badNonce count) without altering responses. Labels stay low-cardinality:
+/// the CA id plus coarse result/error classes.
+pub struct InstrumentedAcmeTransport {
+    inner: Arc<dyn AcmeTransport>,
+    ca: String,
+    metrics: crate::metrics::SharedMetrics,
+}
+
+impl InstrumentedAcmeTransport {
+    /// Wraps `inner`; `ca` is the low-cardinality CA label (e.g. `letsencrypt`).
+    pub fn wrap(
+        ca: impl Into<String>,
+        inner: Arc<dyn AcmeTransport>,
+        metrics: crate::metrics::SharedMetrics,
+    ) -> Arc<dyn AcmeTransport> {
+        Arc::new(Self {
+            inner,
+            ca: ca.into(),
+            metrics,
+        })
+    }
+
+    fn observe(&self, response: &AcmeResponse, elapsed: std::time::Duration) {
+        let bad_nonce = response.is_bad_nonce();
+        let (result, error_class) = if bad_nonce {
+            ("bad_nonce".to_string(), "urn_bad_nonce".to_string())
+        } else if (200..400).contains(&response.status) {
+            ("ok".to_string(), "none".to_string())
+        } else {
+            // Problem types are a bounded RFC set; keep only the short
+            // suffix to stay label-safe.
+            let class = response
+                .problem()
+                .map(|p| {
+                    p.error_type
+                        .rsplit(':')
+                        .next()
+                        .unwrap_or("problem")
+                        .to_string()
+                })
+                .unwrap_or_else(|| format!("http_{}xx", response.status / 100));
+            ("error".to_string(), class)
+        };
+        self.metrics
+            .acme_requests_total
+            .with_label_values(&[&self.ca, &result, &error_class])
+            .inc();
+        self.metrics
+            .acme_request_duration_seconds
+            .with_label_values(&[&self.ca, &result, &error_class])
+            .observe(elapsed.as_secs_f64());
+        if bad_nonce {
+            self.metrics
+                .bad_nonce_total
+                .with_label_values(&[&self.ca])
+                .inc();
+        }
+    }
+}
+
+#[async_trait]
+impl AcmeTransport for InstrumentedAcmeTransport {
+    async fn request(&self, request: AcmeRequest) -> Result<AcmeResponse> {
+        let start = std::time::Instant::now();
+        match self.inner.request(request).await {
+            Ok(response) => {
+                self.observe(&response, start.elapsed());
+                Ok(response)
+            }
+            Err(err) => {
+                let elapsed = start.elapsed();
+                self.metrics
+                    .acme_requests_total
+                    .with_label_values(&[&self.ca, "error", "transport"])
+                    .inc();
+                self.metrics
+                    .acme_request_duration_seconds
+                    .with_label_values(&[&self.ca, "error", "transport"])
+                    .observe(elapsed.as_secs_f64());
+                Err(err)
+            }
+        }
+    }
+}
+
 /// One scripted response for [`FakeAcmeTransport`].
 #[derive(Debug, Clone)]
 pub struct ScriptedResponse {
@@ -376,6 +471,16 @@ impl FakeAcmeTransport {
     /// All requests seen so far.
     pub fn requests(&self) -> Vec<AcmeRequest> {
         self.requests.lock().expect("fake transport lock").clone()
+    }
+
+    /// Fragments of the still-queued scripted responses (debugging aid).
+    pub fn queued_fragments(&self) -> Vec<(String, usize)> {
+        self.responses
+            .lock()
+            .expect("fake transport lock")
+            .iter()
+            .map(|r| (r.url_contains.clone(), r.uses))
+            .collect()
     }
 
     /// Number of POSTs sent to URLs containing `fragment`.

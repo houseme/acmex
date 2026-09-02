@@ -8,8 +8,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
 use crate::account::KeyPair;
+use crate::dns::spec::{EnvFileSecretResolver, SecretResolver};
 use crate::domain::{AccountRecord, AccountStatus, KeyAlgorithm, KeyId, KeyRef, TenantId};
 use crate::error::{AcmeError, Result};
+use crate::protocol::{Jwk, JwsSigner};
 use crate::repository::RepositorySet;
 use crate::types::Identifier;
 
@@ -18,8 +20,8 @@ use super::session::{AcmeSession, JwsPayload, SessionAuth};
 use super::transport::{AcmeTransport, FakeAcmeTransport};
 use super::types::{
     AccountHandle, AccountRef, AuthorizationRef, AuthorizationResource, CaCapabilities, CaId,
-    CaProfile, ChallengeRef, IssuedChain, OrderHandle, OrderRequest, OrderResource, RenewalWindow,
-    RevocationRequest,
+    CaProfile, ChallengeRef, ExternalAccountBindingRef, IssuedChain, OrderHandle, OrderRequest,
+    OrderResource, RenewalWindow, RevocationRequest,
 };
 
 /// The port every CA integration goes through (frozen for v0.9).
@@ -33,6 +35,30 @@ pub trait CaBackend: Send + Sync {
 
     /// Creates or reuses an account; persists the account URL immediately.
     async fn ensure_account(&self, account: &AccountRef) -> Result<AccountHandle>;
+
+    /// RFC 8555 §7.3.5 account key rollover — the documented T04 extension
+    /// to the otherwise-frozen v0.9 trait.
+    ///
+    /// Sends the endpoint's double JWS: the outer JWS is signed by the
+    /// current account key (`kid` = account URL, `url` = the directory
+    /// keyChange endpoint) and carries an inner JWS signed by `new_key`
+    /// (`jwk` header, `{account, oldKey}` payload). On success the switch
+    /// is atomic and durable: the persisted account record's key
+    /// reference, this backend's signing key and every cached session for
+    /// the account URL move to `new_key` together, so the next request —
+    /// and, after a restart, the first request — signs with the new key.
+    ///
+    /// # Failure invariant (no partial switch)
+    ///
+    /// On failure — transport error, non-2xx keyChange response or a
+    /// persistence error — nothing changes: the old key keeps signing,
+    /// the session cache stays intact and the stored account record still
+    /// references the old key.
+    async fn roll_account_key(
+        &self,
+        account: &AccountHandle,
+        new_key: Arc<crate::account::KeyPair>,
+    ) -> Result<()>;
 
     /// Creates an order (or, at the engine level, is skipped when a
     /// persisted handle already exists).
@@ -98,7 +124,11 @@ pub struct AcmeCaBackend {
     ca_id: CaId,
     directory_url: String,
     transport: Arc<dyn AcmeTransport>,
-    key_pair: Arc<KeyPair>,
+    /// The account signing key. Behind a lock because a successful key
+    /// rollover (RFC 8555 §7.3.5) swaps it atomically with the session
+    /// cache. Always cloned out (never held across another lock): rollover
+    /// acquires this lock first, then the session-cache lock.
+    key_pair: tokio::sync::RwLock<Arc<KeyPair>>,
     repositories: RepositorySet,
     tenant: TenantId,
     nonce_pool: Arc<super::session::SharedNoncePool>,
@@ -119,7 +149,7 @@ impl AcmeCaBackend {
             ca_id: ca_id.into(),
             directory_url: directory_url.into(),
             transport,
-            key_pair,
+            key_pair: tokio::sync::RwLock::new(key_pair),
             repositories,
             tenant: TenantId::default_tenant(),
             nonce_pool: Arc::new(super::session::SharedNoncePool::new()),
@@ -142,6 +172,13 @@ impl AcmeCaBackend {
         AccountRecord::compute_id(&self.tenant, &self.ca_id)
     }
 
+    /// The current account key. The read lock is held only for the clone
+    /// (never across another lock or await), so rollover can swap the key
+    /// under the write lock without deadlocking session creation.
+    async fn current_key(&self) -> Arc<KeyPair> {
+        Arc::clone(&*self.key_pair.read().await)
+    }
+
     /// The session bound to an account URL.
     async fn session_for(&self, account_url: &str) -> Result<Arc<AcmeSession>> {
         {
@@ -150,10 +187,14 @@ impl AcmeCaBackend {
                 return Ok(Arc::clone(session));
             }
         }
+        // Clone the key and release its lock before taking the sessions
+        // write lock: the rollover switch nests both locks (key_pair, then
+        // sessions), and this is the only other place either is taken.
+        let key_pair = self.current_key().await;
         let session = Arc::new(AcmeSession::with_nonce_pool(
             self.ca_id.clone(),
             self.directory_url.clone(),
-            SessionAuth::with_account(Arc::clone(&self.key_pair), account_url),
+            SessionAuth::with_account(key_pair, account_url),
             Arc::clone(&self.transport),
             Arc::clone(&self.nonce_pool),
         ));
@@ -165,13 +206,55 @@ impl AcmeCaBackend {
     }
 
     /// The key-only session (registration).
-    fn registration_session(&self) -> AcmeSession {
+    async fn registration_session(&self) -> AcmeSession {
         AcmeSession::with_nonce_pool(
             self.ca_id.clone(),
             self.directory_url.clone(),
-            SessionAuth::key_only(Arc::clone(&self.key_pair)),
+            SessionAuth::key_only(self.current_key().await),
             Arc::clone(&self.transport),
             Arc::clone(&self.nonce_pool),
+        )
+    }
+
+    /// Builds the RFC 8555 §7.3.4 `externalAccountBinding` JWS for a
+    /// newAccount request.
+    ///
+    /// The MAC key is resolved from its [`SecretRef`](crate::dns::spec::SecretRef)
+    /// via the built-in env/file resolver and must be base64url-encoded (the
+    /// form CAs hand out). It exists only in memory here; errors and logs
+    /// mention the reference description, never the key value.
+    async fn external_account_binding_jws(
+        &self,
+        eab: &ExternalAccountBindingRef,
+        new_account_url: &str,
+    ) -> Result<serde_json::Value> {
+        tracing::debug!(
+            ca = self.ca_id,
+            eab = eab.redacted(),
+            "binding external account"
+        );
+        let secret = EnvFileSecretResolver
+            .resolve(&eab.hmac_key)
+            .await
+            .map_err(|err| {
+                AcmeError::configuration(format!(
+                    "cannot resolve EAB MAC key for CA {}: {err}",
+                    self.ca_id
+                ))
+            })?;
+        let mac_key = URL_SAFE_NO_PAD.decode(secret.expose()).map_err(|_| {
+            AcmeError::configuration(format!(
+                "EAB MAC key {} is not valid base64url; CAs issue base64url-encoded MAC keys",
+                eab.hmac_key.describe()
+            ))
+        })?;
+        let account_jwk =
+            Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.current_key().await.public_key_bytes()));
+        eab_binding_jws(
+            &account_jwk.to_value(),
+            &eab.key_id,
+            new_account_url,
+            &mac_key,
         )
     }
 }
@@ -183,7 +266,7 @@ impl CaBackend for AcmeCaBackend {
     }
 
     async fn capabilities(&self) -> Result<CaCapabilities> {
-        let session = self.registration_session();
+        let session = self.registration_session().await;
         let directory = session.directory().await?;
         let profiles = directory
             .profiles
@@ -192,7 +275,9 @@ impl CaBackend for AcmeCaBackend {
                 map.keys()
                     .map(|name| CaProfile {
                         name: name.clone(),
-                        short_lived: name.contains("shortlived") || name.contains("shortlived"),
+                        short_lived: name.contains("shortlived")
+                            || name.contains("short-lived")
+                            || name.contains("short_lived"),
                     })
                     .collect()
             })
@@ -230,22 +315,20 @@ impl CaBackend for AcmeCaBackend {
             });
         }
 
-        let session = self.registration_session();
+        let session = self.registration_session().await;
         let directory = session.directory().await?;
         let mut payload = json!({
             "termsOfServiceAgreed": account.tenant_terms_agreed(&self.tenant),
             "contact": account.contacts,
         });
-        if let Some(eab) = &account.external_account_binding
-            && let Some(hmac) = account.resolve_eab_hmac(eab)
-        {
-            let (kid, mac) = eab_protected(&self.key_pair, &eab.key_id);
-            payload["externalAccountBinding"] = json!({
-                "protected": kid,
-                "payload": "",
-                "signature": hmac_sign(&mac, &hmac),
-            });
-            let _ = (&kid, mac);
+        // RFC 8555 §7.3.4: when the CA requires EAB, newAccount carries a
+        // detached HS256 JWS binding the account key to the CA-issued
+        // external key. Without an EAB reference registration proceeds
+        // unbound (CAs that do not require EAB).
+        if let Some(eab) = &account.external_account_binding {
+            payload["externalAccountBinding"] = self
+                .external_account_binding_jws(eab, &directory.new_account)
+                .await?;
         }
 
         let response = session
@@ -266,7 +349,7 @@ impl CaBackend for AcmeCaBackend {
             })?;
 
         // Persist immediately: a restart must reuse, not re-register.
-        let key_id = account_key_id(&self.key_pair.public_key_bytes());
+        let key_id = account_key_id(&self.current_key().await.public_key_bytes());
         let now = self.repositories.clock.now();
         self.repositories
             .accounts
@@ -290,6 +373,99 @@ impl CaBackend for AcmeCaBackend {
             account_url,
             key_id: key_id.clone(),
         })
+    }
+
+    async fn roll_account_key(&self, account: &AccountHandle, new_key: Arc<KeyPair>) -> Result<()> {
+        tracing::info!(
+            ca = self.ca_id,
+            account = account.account_url,
+            "rolling account key (RFC 8555 §7.3.5)"
+        );
+        // The rollover target must be a persisted account: the stored
+        // record is updated with the new key reference below, mirroring
+        // `ensure_account` persistence.
+        let repo_id = self.account_repo_id();
+        let existing = self
+            .repositories
+            .accounts
+            .get(&repo_id)
+            .await?
+            .ok_or_else(|| {
+                AcmeError::account(format!(
+                    "cannot roll the key of account {repo_id}: no persisted record"
+                ))
+            })?;
+
+        // Both the outer JWS and the pre-switch sessions must still use the
+        // old key; clone it before anything can swap it.
+        let old_key = self.current_key().await;
+        let session = self.session_for(&account.account_url).await?;
+        let directory = session.directory().await?;
+        let key_change_url = directory.key_change.clone();
+
+        // Inner JWS (RFC 8555 §7.3.5): signed by the NEW key, authenticated
+        // by its JWK (no nonce, no kid), binding the account URL to the OLD
+        // key's JWK. `JwsSigner` is used directly because this nested JWS is
+        // unique to keyChange; every other request goes through
+        // `execute_jws`.
+        let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
+        let old_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes()));
+        let inner_header = json!({
+            "alg": "EdDSA",
+            "jwk": new_jwk.to_value(),
+            "url": key_change_url,
+        });
+        let inner_payload = json!({
+            "account": account.account_url,
+            "oldKey": old_jwk.to_value(),
+        });
+        let inner_jws = JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)?;
+        let inner_parts: Vec<&str> = inner_jws.split('.').collect();
+        let inner_object = json!({
+            "protected": inner_parts[0],
+            "payload": inner_parts[1],
+            "signature": inner_parts[2],
+        });
+
+        // Outer JWS: the ordinary account-authenticated request path signs
+        // it with the OLD key (kid = account URL, url = keyChange) — nonce
+        // handling, badNonce recovery, Replay-Nonce capture and status
+        // classification included. Its payload is the inner JWS object.
+        session
+            .execute_jws(&key_change_url, JwsPayload::Object(inner_object))
+            .await?;
+
+        // ---- keyChange accepted: switch everything to the new key. ----
+        // Durable state first: the stored record now references the new key
+        // so a restart resumes with it. On persistence failure nothing
+        // in-memory has switched yet — the old key keeps signing and the
+        // error surfaces (no partial switch).
+        let key_id = account_key_id(&new_key.public_key_bytes());
+        let now = self.repositories.clock.now();
+        let mut record = existing.value;
+        record.key_ref = KeyRef::software(KeyId::new(key_id)?, KeyAlgorithm::Ed25519);
+        record.updated_at = now;
+        self.repositories.accounts.upsert(record).await?;
+
+        // Atomic in-memory switch: swap the signing key and evict every
+        // cached session for this account URL. Cached sessions hold a clone
+        // of the old key, so eviction forces the next request to build a
+        // session — and sign — with the new key. Both locks are held only
+        // here, nested in the documented order (key_pair first, then
+        // sessions); session creation releases the key lock before locking
+        // the cache.
+        {
+            *self.key_pair.write().await = Arc::clone(&new_key);
+            let mut sessions = self.sessions.write().await;
+            sessions.retain(|(url, _)| url != &account.account_url);
+        }
+
+        tracing::info!(
+            ca = self.ca_id,
+            account = account.account_url,
+            "account key rolled over"
+        );
+        Ok(())
     }
 
     async fn create_order(
@@ -426,7 +602,7 @@ impl CaBackend for AcmeCaBackend {
     }
 
     async fn renewal_window(&self, chain_pem: &str) -> Result<Option<RenewalWindow>> {
-        let session = self.registration_session();
+        let session = self.registration_session().await;
         let directory = session.directory().await?;
         let Some(base) = directory.renewal_info else {
             // ARI not advertised: not an error, callers fall back.
@@ -456,13 +632,6 @@ impl AccountRef {
     fn tenant_terms_agreed(&self, _tenant: &TenantId) -> bool {
         self.terms_of_service_agreed
     }
-
-    fn resolve_eab_hmac(&self, _eab: &super::types::ExternalAccountBindingRef) -> Option<Vec<u8>> {
-        // Secret resolution is centralized in T11's SecretResolver; until
-        // then EAB HMAC values are supplied by callers out-of-band and this
-        // returns None so no credential is embedded here.
-        None
-    }
 }
 
 /// Deterministic account key id from the public key bytes.
@@ -473,12 +642,41 @@ pub fn account_key_id(public_key: &[u8]) -> String {
     format!("key_acct_{}", &hex::encode(hasher.finalize())[..16])
 }
 
-fn eab_protected(_key: &KeyPair, _kid: &str) -> (String, Vec<u8>) {
-    (String::new(), Vec::new())
+/// Builds the RFC 8555 §7.3.4 `externalAccountBinding` JWS: the protected
+/// header carries `HS256`, the CA-assigned EAB `kid` and the newAccount
+/// URL; the payload is the account key's JWK (the thumbprint input); the
+/// signature is HMAC-SHA256 over `<protected>.<payload>` with the CA-issued
+/// MAC key. All segments are base64url, compact serialization.
+fn eab_binding_jws(
+    account_jwk: &serde_json::Value,
+    kid: &str,
+    new_account_url: &str,
+    mac_key: &[u8],
+) -> Result<serde_json::Value> {
+    let protected = json!({
+        "alg": "HS256",
+        "kid": kid,
+        "url": new_account_url,
+    });
+    let protected_b64 = URL_SAFE_NO_PAD.encode(protected.to_string());
+    let payload_b64 = URL_SAFE_NO_PAD.encode(account_jwk.to_string());
+    let signature = hmac_sha256(mac_key, format!("{protected_b64}.{payload_b64}").as_bytes())?;
+    Ok(json!({
+        "protected": protected_b64,
+        "payload": payload_b64,
+        "signature": URL_SAFE_NO_PAD.encode(signature),
+    }))
 }
 
-fn hmac_sign(_mac: &[u8], _data: &[u8]) -> String {
-    String::new()
+/// HMAC-SHA256, the only symmetric ACME signature (EAB, RFC 8555 §7.3.4).
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .map_err(|e| AcmeError::crypto(format!("EAB MAC key rejected by HMAC-SHA256: {e}")))?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
 }
 
 /// Converts domain identifiers to wire identifiers (type/value maps).

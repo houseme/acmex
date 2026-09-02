@@ -16,14 +16,15 @@ pub mod transport;
 pub mod types;
 
 pub use ari::{
-    RenewalInfo, SuggestedWindow, ari_cert_id, ari_cert_id_from_pem, leaf_id_components,
-    parse_renewal_window, renewal_info_url,
+    DirectoryAriProvider, RenewalInfo, SuggestedWindow, ari_cert_id, ari_cert_id_from_pem,
+    leaf_id_components, parse_renewal_window, renewal_info_url,
 };
 pub use backend::{AcmeCaBackend, CaBackend, account_key_id, identifiers_to_wire};
 pub use session::{AcmeSession, JwsPayload, SessionAuth, SharedNoncePool};
 pub use transport::{
     AcmeMethod, AcmeProblem, AcmeRequest, AcmeResponse, AcmeTransport, FakeAcmeTransport,
-    ReqwestAcmeTransport, ScriptedResponse, classify_response, parse_retry_after,
+    InstrumentedAcmeTransport, ReqwestAcmeTransport, ScriptedResponse, classify_response,
+    classify_status, parse_retry_after,
 };
 pub use types::{
     AccountHandle, AccountRef, AuthorizationRef, AuthorizationResource, CaCapabilities, CaId,

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use jiff::Timestamp;
 
+use crate::dns::spec::SecretRef;
 use crate::domain::Identifier;
 use crate::order::{Authorization, Order};
 use crate::types::RevocationReason;
@@ -31,18 +32,52 @@ pub struct AccountRef {
 
 /// EAB credential reference (values are supplied by the secret resolver;
 /// never persisted in domain objects).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExternalAccountBindingRef {
-    /// EAB key id (`kid`).
+    /// EAB key id (`kid`) assigned by the CA.
     pub key_id: String,
     /// Where the HMAC key is resolved from (env var name, file path...).
-    pub hmac_key_source: String,
+    pub hmac_key: SecretRef,
+}
+
+impl<'de> Deserialize<'de> for ExternalAccountBindingRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Wire form; `hmac_key_source` is the legacy text form
+        /// (`env:NAME`) kept so records written before the `SecretRef`
+        /// migration keep deserializing.
+        #[derive(Deserialize)]
+        struct Wire {
+            key_id: String,
+            #[serde(default)]
+            hmac_key: Option<SecretRef>,
+            #[serde(default)]
+            hmac_key_source: Option<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let hmac_key = match wire.hmac_key {
+            Some(reference) => reference,
+            None => {
+                let source = wire
+                    .hmac_key_source
+                    .ok_or_else(|| serde::de::Error::missing_field("hmac_key"))?;
+                SecretRef::parse(&source).map_err(serde::de::Error::custom)?
+            }
+        };
+        Ok(Self {
+            key_id: wire.key_id,
+            hmac_key,
+        })
+    }
 }
 
 impl ExternalAccountBindingRef {
     /// A debug-safe description (never the HMAC value).
     pub fn redacted(&self) -> String {
-        format!("eab(kid={}, key={})", self.key_id, self.hmac_key_source)
+        format!("eab(kid={}, key={})", self.key_id, self.hmac_key.describe())
     }
 }
 
@@ -262,11 +297,32 @@ mod tests {
     fn eab_ref_never_leaks_the_key_value() {
         let eab = ExternalAccountBindingRef {
             key_id: "kid-1".to_string(),
-            hmac_key_source: "env:EAB_HMAC".to_string(),
+            hmac_key: SecretRef::parse("env:EAB_HMAC").unwrap(),
         };
         let text = format!("{eab:?}");
-        assert!(text.contains("env:EAB_HMAC"));
-        // The source is a reference, not the secret itself; nothing else to leak.
+        // Only the reference (variable name) is visible, never a value slot.
+        assert!(text.contains("EAB_HMAC"));
         assert_eq!(eab.redacted(), "eab(kid=kid-1, key=env:EAB_HMAC)");
+    }
+
+    #[test]
+    fn eab_ref_deserializes_legacy_text_form_and_round_trips() {
+        // Records written before the `SecretRef` migration keep working.
+        let legacy = serde_json::json!({
+            "key_id": "kid-1",
+            "hmac_key_source": "env:EAB_HMAC"
+        });
+        let eab: ExternalAccountBindingRef = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            eab.hmac_key,
+            SecretRef::Env {
+                name: "EAB_HMAC".to_string()
+            }
+        );
+
+        // New records round-trip through the tagged wire form.
+        let json = serde_json::to_string(&eab).unwrap();
+        let back: ExternalAccountBindingRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(eab, back);
     }
 }

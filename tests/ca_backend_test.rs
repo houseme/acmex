@@ -2,15 +2,18 @@
 //! session reuse, nonce discipline, badNonce recovery, Retry-After,
 //! account persistence across restarts, profile orders and ARI.
 
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use acmex::account::KeyPair;
 use acmex::ca_backend::{
-    AccountRef, AcmeCaBackend, AcmeMethod, CaBackend, FakeAcmeTransport, OrderRequest,
-    ScriptedResponse,
+    AccountRef, AcmeCaBackend, AcmeMethod, CaBackend, ExternalAccountBindingRef, FakeAcmeTransport,
+    OrderRequest, ScriptedResponse,
 };
+use acmex::dns::spec::SecretRef;
 use acmex::domain::Identifier;
+use acmex::error::AcmeError;
 use acmex::repository::MemoryRepository;
 use jiff::Timestamp;
 
@@ -64,6 +67,63 @@ fn account_ref() -> AccountRef {
         terms_of_service_agreed: true,
         external_account_binding: None,
     }
+}
+
+/// An account ref that must be bound to the external key `eab-kid-42`.
+fn eab_account_ref(hmac_key: SecretRef) -> AccountRef {
+    let mut account = account_ref();
+    account.external_account_binding = Some(ExternalAccountBindingRef {
+        key_id: "eab-kid-42".to_string(),
+        hmac_key,
+    });
+    account
+}
+
+/// Writes a one-line secret to a uniquely-named temp file and returns its
+/// path (file refs are stable under test parallelism, unlike process-global
+/// env vars).
+fn secret_file(name: &str, content: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "acmex-ca-backend-{name}-{}.secret",
+        std::process::id()
+    ));
+    std::fs::write(&path, content).expect("write temp secret file");
+    path
+}
+
+/// Decodes and parses the single POST body sent to `url_fragment` as a JWS
+/// and returns (protected header, payload) as JSON values.
+fn decode_jws_post(
+    transport: &FakeAcmeTransport,
+    url_fragment: &str,
+) -> (serde_json::Value, serde_json::Value) {
+    use base64::Engine;
+    let requests = transport.requests();
+    let posts: Vec<_> = requests
+        .iter()
+        .filter(|r| r.url.contains(url_fragment) && r.method == AcmeMethod::Post)
+        .collect();
+    assert_eq!(
+        posts.len(),
+        1,
+        "expected exactly one POST to {url_fragment}"
+    );
+    let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
+    let segments: Vec<&str> = jws.split('.').collect();
+    assert_eq!(segments.len(), 3);
+    let header = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(segments[0])
+            .unwrap(),
+    )
+    .unwrap();
+    let payload = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(segments[1])
+            .unwrap(),
+    )
+    .unwrap();
+    (header, payload)
 }
 
 #[tokio::test]
@@ -590,4 +650,414 @@ async fn concurrent_requests_never_share_a_nonce() {
             .to_string();
         assert!(seen.insert(nonce), "nonce reuse detected");
     }
+}
+
+#[tokio::test]
+async fn eab_registration_binds_external_account_with_hs256() {
+    use base64::Engine;
+
+    // The MAC key a CA would hand out: raw bytes, delivered base64url.
+    let mac_key: Vec<u8> = (0u8..32).collect();
+    let mac_key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&mac_key);
+    let key_file = secret_file("eab-valid", &mac_key_b64);
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/88".to_string()),
+            ),
+    );
+    let backend = backend(transport.clone());
+    let account = eab_account_ref(SecretRef::File {
+        path: key_file.clone(),
+    });
+    let handle = backend.ensure_account(&account).await.unwrap();
+    assert_eq!(handle.account_url, "https://acme.example/acct/88");
+
+    let (header, payload) = decode_jws_post(&transport, "new-account");
+    let binding = &payload["externalAccountBinding"];
+    assert!(
+        binding.is_object(),
+        "externalAccountBinding expected: {payload}"
+    );
+
+    // Protected header: HS256, the CA-assigned kid and the newAccount URL.
+    let binding_header: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(binding["protected"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(binding_header["alg"], "HS256");
+    assert_eq!(binding_header["kid"], "eab-kid-42");
+    assert_eq!(binding_header["url"], "https://acme.example/new-account");
+    // Per RFC 8555 §7.3.4 the inner JWS carries no nonce.
+    assert!(binding_header.get("nonce").is_none());
+
+    // Payload: the JWK of the requesting account key — the same JWK the
+    // outer JWS protected header authenticates the request with.
+    let binding_payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(binding["payload"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(binding_payload, header["jwk"]);
+    assert_eq!(binding_payload["kty"], "OKP");
+    assert_eq!(binding_payload["crv"], "Ed25519");
+
+    // Signature: HMAC-SHA256 over `<protected>.<payload>` with the key from
+    // the file; deterministic, so a local recomputation must match exactly.
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    let signing_input = format!(
+        "{}.{}",
+        binding["protected"].as_str().unwrap(),
+        binding["payload"].as_str().unwrap()
+    );
+    let mut mac = Hmac::<Sha256>::new_from_slice(&mac_key).unwrap();
+    mac.update(signing_input.as_bytes());
+    let expected =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    assert_eq!(binding["signature"].as_str().unwrap(), expected);
+
+    std::fs::remove_file(&key_file).ok();
+}
+
+#[tokio::test]
+async fn registration_without_eab_omits_the_binding() {
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/89".to_string()),
+            ),
+    );
+    let backend = backend(transport.clone());
+    let handle = backend.ensure_account(&account_ref()).await.unwrap();
+    assert_eq!(handle.account_url, "https://acme.example/acct/89");
+
+    let (_, payload) = decode_jws_post(&transport, "new-account");
+    assert!(
+        payload.get("externalAccountBinding").is_none(),
+        "no EAB reference, no binding field: {payload}"
+    );
+}
+
+#[tokio::test]
+async fn eab_invalid_base64url_key_errors_without_leaking_the_secret() {
+    // The file resolves but its content is not base64url: an explicit
+    // configuration error that names the reference, never the value.
+    let secret_value = "SUPER-SECRET-RAW-VALUE!!!";
+    let key_file = secret_file("eab-invalid", secret_value);
+
+    let transport = standard_transport();
+    let backend = backend(transport.clone());
+    let account = eab_account_ref(SecretRef::File {
+        path: key_file.clone(),
+    });
+    let err = backend.ensure_account(&account).await.unwrap_err();
+    assert!(
+        matches!(err, AcmeError::Configuration(_)),
+        "explicit configuration error expected, got: {err}"
+    );
+    assert!(err.to_string().contains("base64url"), "got: {err}");
+    // The reference description is named for the operator...
+    assert!(
+        err.to_string().contains(&key_file.display().to_string()),
+        "got: {err}"
+    );
+    // ...while the secret value itself never appears.
+    assert!(
+        !err.to_string().contains(secret_value),
+        "secret value leaked: {err}"
+    );
+    // The failed registration never reached the CA.
+    assert_eq!(transport.post_count("new-account"), 0);
+
+    std::fs::remove_file(&key_file).ok();
+}
+
+#[tokio::test]
+async fn eab_unresolvable_secret_is_a_configuration_error() {
+    let transport = standard_transport();
+    let backend = backend(transport.clone());
+    // An env var that is guaranteed not to exist anywhere.
+    let account = eab_account_ref(SecretRef::parse("env:ACMEX_EAB_UNSET_9f3a").unwrap());
+    let err = backend.ensure_account(&account).await.unwrap_err();
+    assert!(
+        matches!(err, AcmeError::Configuration(_)),
+        "explicit configuration error expected, got: {err}"
+    );
+    // The error names the missing reference so the operator can fix it.
+    assert!(
+        err.to_string().contains("env:ACMEX_EAB_UNSET_9f3a"),
+        "got: {err}"
+    );
+    assert_eq!(transport.post_count("new-account"), 0);
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8555 §7.3.5 account key rollover
+// ---------------------------------------------------------------------------
+
+/// The raw compact-serialization JWS bodies of every POST sent to a URL
+/// containing `url_fragment`.
+fn jws_posts_to(transport: &FakeAcmeTransport, url_fragment: &str) -> Vec<String> {
+    transport
+        .requests()
+        .iter()
+        .filter(|r| r.url.contains(url_fragment) && r.method == AcmeMethod::Post)
+        .map(|r| String::from_utf8(r.body.clone().unwrap()).unwrap())
+        .collect()
+}
+
+/// Splits a compact JWS into (protected header, payload, signature b64).
+fn decode_jws(jws: &str) -> (serde_json::Value, serde_json::Value, String) {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let segments: Vec<&str> = jws.split('.').collect();
+    assert_eq!(segments.len(), 3, "compact JWS has three segments");
+    let header = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[0]).unwrap()).unwrap();
+    let payload = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[1]).unwrap()).unwrap();
+    (header, payload, segments[2].to_string())
+}
+
+/// Re-signs a captured JWS with `key` and returns the compact serialization.
+/// Ed25519 signatures are deterministic, so an exact string match proves
+/// which key produced the captured signature (and rules out the other key).
+fn resign_jws(jws: &str, key: &KeyPair) -> String {
+    let (header, payload, _) = decode_jws(jws);
+    acmex::protocol::JwsSigner::new(&key.0)
+        .sign(&header, &payload)
+        .unwrap()
+}
+
+/// Generates an Ed25519 account key — the algorithm the session's JWS
+/// headers claim (`alg: EdDSA`, Ed25519 JWK) and the only one whose
+/// signatures are deterministic (needed by `resign_jws`). The default
+/// `KeyPair::generate()` yields ECDSA P-256, whose signatures are randomized.
+fn ed25519_key() -> Arc<KeyPair> {
+    let pem = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
+        .expect("generate Ed25519 key")
+        .serialize_pem();
+    Arc::new(KeyPair::from_pem(&pem).expect("parse Ed25519 PEM"))
+}
+
+#[tokio::test]
+async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
+    use acmex::protocol::Jwk;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/77".to_string()),
+            ),
+    );
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+    // A follow-up order after the rollover.
+    transport.push(
+        ScriptedResponse::json("new-order", 201, serde_json::json!({"status": "pending"}))
+            .with_headers(
+                Some("order-nonce".to_string()),
+                None,
+                Some("https://acme.example/order/9".to_string()),
+            ),
+    );
+
+    let old_key = ed25519_key();
+    let new_key = ed25519_key();
+    let repositories = MemoryRepository::new().into_set();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        old_key.clone(),
+        repositories.clone(),
+    );
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap();
+
+    // (a) The keyChange request: an outer JWS authenticated by the account
+    // (kid) and addressed to the directory's keyChange endpoint.
+    let key_change_posts = jws_posts_to(&transport, "key-change");
+    assert_eq!(key_change_posts.len(), 1, "exactly one keyChange POST");
+    let (outer_header, outer_payload, _) = decode_jws(&key_change_posts[0]);
+    assert_eq!(outer_header["alg"], "EdDSA");
+    assert_eq!(outer_header["kid"], "https://acme.example/acct/77");
+    assert_eq!(outer_header["url"], "https://acme.example/key-change");
+    // The outer signature is the old account key's.
+    assert_eq!(
+        resign_jws(&key_change_posts[0], &old_key),
+        key_change_posts[0]
+    );
+
+    // (b) The outer payload is itself a JWS signed by the NEW key: header
+    // {alg, jwk(new), url} and payload {account, oldKey}.
+    let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
+    let old_jwk_value =
+        Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes())).to_value();
+    let inner = format!(
+        "{}.{}.{}",
+        outer_payload["protected"].as_str().unwrap(),
+        outer_payload["payload"].as_str().unwrap(),
+        outer_payload["signature"].as_str().unwrap()
+    );
+    let (inner_header, inner_payload, _) = decode_jws(&inner);
+    assert_eq!(inner_header["alg"], "EdDSA");
+    assert_eq!(inner_header["jwk"], new_jwk.to_value());
+    assert_eq!(inner_header["url"], "https://acme.example/key-change");
+    // RFC 8555 §7.3.5: the inner JWS carries no nonce and no kid.
+    assert!(inner_header.get("nonce").is_none());
+    assert!(inner_header.get("kid").is_none());
+    assert_eq!(inner_payload["account"], "https://acme.example/acct/77");
+    assert_eq!(inner_payload["oldKey"], old_jwk_value);
+    // The inner signature verifies against the NEW key (and only it).
+    assert_eq!(resign_jws(&inner, &new_key), inner);
+    assert_ne!(resign_jws(&inner, &old_key), inner);
+
+    // (c) A follow-up request is signed by the NEW key. The JWS header keeps
+    // the unchanged account kid, so prove the signer via deterministic
+    // re-signing.
+    let order = backend
+        .create_order(
+            &account,
+            &OrderRequest::for_identifiers(vec![Identifier::try_dns("example.com").unwrap()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(order.url, "https://acme.example/order/9");
+    let new_order_posts = jws_posts_to(&transport, "new-order");
+    assert_eq!(new_order_posts.len(), 1);
+    assert_eq!(
+        resign_jws(&new_order_posts[0], &new_key),
+        new_order_posts[0],
+        "post-rollover orders must be signed by the new key"
+    );
+    assert_ne!(
+        resign_jws(&new_order_posts[0], &old_key),
+        new_order_posts[0]
+    );
+
+    // Persistence: the stored account record now references the NEW key
+    // (mirroring ensure_account persistence), so restarts resume with it.
+    let record = repositories
+        .accounts
+        .get("ten_default:test-ca")
+        .await
+        .unwrap()
+        .expect("account record persisted");
+    assert_eq!(
+        record.value.key_ref.key_id.to_string(),
+        acmex::ca_backend::account_key_id(&new_key.public_key_bytes())
+    );
+    assert_eq!(
+        record.value.account_url.as_deref(),
+        Some("https://acme.example/acct/77")
+    );
+}
+
+#[tokio::test]
+async fn key_rollover_failure_keeps_the_old_key_and_sessions_intact() {
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/77".to_string()),
+            ),
+    );
+    // keyChange rejected with a terminal 400 (not badNonce: no retry).
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        400,
+        serde_json::json!({
+            "type": "urn:ietf:params:acme:error:malformed",
+            "detail": "old key does not match account"
+        }),
+    ));
+    // A follow-up order after the failed rollover.
+    transport.push(
+        ScriptedResponse::json("new-order", 201, serde_json::json!({"status": "pending"}))
+            .with_headers(
+                Some("order-nonce".to_string()),
+                None,
+                Some("https://acme.example/order/9".to_string()),
+            ),
+    );
+
+    let old_key = ed25519_key();
+    let new_key = ed25519_key();
+    let repositories = MemoryRepository::new().into_set();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        old_key.clone(),
+        repositories.clone(),
+    );
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    let err = backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("ACME_HTTP_400"),
+        "classified HTTP error expected, got: {err}"
+    );
+    assert_eq!(
+        jws_posts_to(&transport, "key-change").len(),
+        1,
+        "exactly one keyChange attempt, no internal retry"
+    );
+
+    // No partial switch: the cached session still works and the follow-up
+    // request is signed by the OLD key.
+    let order = backend
+        .create_order(
+            &account,
+            &OrderRequest::for_identifiers(vec![Identifier::try_dns("example.com").unwrap()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(order.url, "https://acme.example/order/9");
+    let new_order_posts = jws_posts_to(&transport, "new-order");
+    assert_eq!(new_order_posts.len(), 1);
+    assert_eq!(
+        resign_jws(&new_order_posts[0], &old_key),
+        new_order_posts[0],
+        "after a failed rollover the old key must keep signing"
+    );
+
+    // The stored record still references the old key.
+    let record = repositories
+        .accounts
+        .get("ten_default:test-ca")
+        .await
+        .unwrap()
+        .expect("account record persisted");
+    assert_eq!(
+        record.value.key_ref.key_id.to_string(),
+        acmex::ca_backend::account_key_id(&old_key.public_key_bytes())
+    );
 }

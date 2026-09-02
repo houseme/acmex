@@ -26,7 +26,7 @@ use crate::domain::error_codes;
 use crate::error::{AcmeError, Result};
 use crate::protocol::{Directory, Jwk, JwsSigner};
 
-use super::transport::{AcmeMethod, AcmeRequest, AcmeResponse, AcmeTransport, classify_response};
+use super::transport::{AcmeMethod, AcmeRequest, AcmeResponse, AcmeTransport, classify_status};
 
 /// How many times a badNonce is retried internally before surfacing.
 const BAD_NONCE_MAX_RETRIES: usize = 3;
@@ -270,7 +270,10 @@ impl AcmeSession {
                 continue;
             }
 
-            return classify_response(&response).map(|_| response);
+            // Status/problem classification only: the 2xx body may be JSON
+            // *or* binary (e.g. the PEM certificate download); callers
+            // decide how to parse it.
+            return classify_status(&response).map(|_| response);
         }
     }
 
@@ -296,6 +299,6 @@ impl AcmeSession {
                 body: None,
             })
             .await?;
-        classify_response(&response).map(|_| response)
+        classify_status(&response).map(|_| response)
     }
 }
