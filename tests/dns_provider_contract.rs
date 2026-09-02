@@ -333,12 +333,14 @@ async fn partial_propagation_fails_quorum_then_succeeds() {
             matched: true,
             response_kind: ResponseKind::Matched,
             ttl_secs: None,
+            error: None,
         },
         QueryOutcome {
             server: "ns2".to_string(),
             matched: false,
             response_kind: ResponseKind::NoData,
             ttl_secs: None,
+            error: None,
         },
     ]);
 

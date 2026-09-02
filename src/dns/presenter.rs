@@ -124,6 +124,7 @@ impl ChallengePresenter for Dns01Presenter {
 
     async fn observe(&self, lease: &ChallengeLease) -> Result<Observation> {
         let ChallengeLeaseLocator::Dns {
+            provider_id,
             record_name,
             value_hash,
             ..
@@ -136,6 +137,7 @@ impl ChallengePresenter for Dns01Presenter {
         let report = self
             .observer
             .observe(&ExpectedTxt {
+                provider_id: Some(provider_id.clone()),
                 record_name: record_name.clone(),
                 value_hash: value_hash.clone(),
             })
@@ -144,7 +146,7 @@ impl ChallengePresenter for Dns01Presenter {
             Ok(Observation::Propagated)
         } else {
             Ok(Observation::NotYet {
-                retry_after: std::time::Duration::from_secs(5),
+                retry_after: self.observer.poll_interval(Some(provider_id)),
             })
         }
     }

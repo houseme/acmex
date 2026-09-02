@@ -79,8 +79,8 @@ scripts/verify_docs_and_openapi.sh
 
 ## 7. 验收标准
 
-- [ ] `[dns.propagation]` 全字段可配置并有校验错误信息（非法组合被拒绝且有测试）。
-- [ ] provider 级字段覆盖生效，未设置字段回落全局（有测试）。
-- [ ] quorum 不足不判定 Propagated；超时归类为可重试错误（有行为测试）。
-- [ ] 观察报告记录查询目标/值 hash/TTL/错误/quorum 达成情况。
-- [ ] `acmex init` 模板与文档示例与 schema 一致；v0.9.0 审计对应条目可标记关闭。
+- [x] `[dns.propagation]` 全字段可配置并有校验错误信息（非法组合被拒绝且有测试）。
+- [x] provider 级字段覆盖生效，未设置字段回落全局（有测试）。
+- [x] quorum 不足不判定 Propagated；超时归类为可重试错误（有行为测试）。
+- [x] 观察报告记录查询目标/值 hash/TTL/错误/quorum 达成情况。
+- [x] `acmex init` 模板与文档示例与 schema 一致；v0.9.0 审计对应条目可标记关闭。

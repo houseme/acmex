@@ -289,15 +289,41 @@ async fn build_dns_presenter(config: &Config) -> Option<Arc<dyn ChallengePresent
             return None;
         }
     };
-    // Propagation policy comes from `[challenge.dns01.propagation]` when
-    // present; otherwise the built-in defaults apply.
-    let policy = match &dns01.propagation {
-        Some(settings) => settings.to_policy(),
-        None => crate::dns::propagation::PropagationPolicyV2::default(),
+    let policy = match config.dns_propagation_policy_for(None) {
+        Ok(policy) => policy,
+        Err(err) => {
+            tracing::warn!(error = %err, "DNS propagation policy is invalid; DNS-01 challenges will not be available");
+            return None;
+        }
     };
-    let observer = match crate::dns::propagation::HickoryPropagationObserver::new(
+    let provider_policies = dns01
+        .providers
+        .iter()
+        .filter(|provider| {
+            config
+                .dns
+                .providers
+                .get(&provider.name)
+                .and_then(|settings| settings.propagation.as_ref())
+                .is_some()
+        })
+        .map(|provider| {
+            config
+                .dns_propagation_policy_for(Some(&provider.name))
+                .map(|policy| (provider.name.clone(), policy))
+        })
+        .collect::<crate::error::Result<std::collections::HashMap<_, _>>>();
+    let provider_policies = match provider_policies {
+        Ok(provider_policies) => provider_policies,
+        Err(err) => {
+            tracing::warn!(error = %err, "DNS provider propagation policy is invalid; DNS-01 challenges will not be available");
+            return None;
+        }
+    };
+    let observer = match crate::dns::propagation::HickoryPropagationObserver::with_provider_policies(
         zone_resolver.clone(),
         policy,
+        provider_policies,
     ) {
         Ok(observer) => observer,
         Err(err) => {
@@ -378,11 +404,9 @@ pub async fn build_engine_from_config(
     metrics: SharedMetrics,
     settings: WorkflowWorkerSettings,
 ) -> crate::error::Result<WorkflowEngine> {
-    // `[challenge.dns01]` owns the DNS propagation deadline when present;
-    // otherwise the caller-provided worker settings apply unchanged.
     let mut settings = settings;
-    if let Some(dns01) = config.challenge.dns01.as_ref() {
-        settings.propagation_timeout = Duration::from_secs(dns01.propagation_timeout_secs);
+    if config.challenge.dns01.is_some() {
+        settings.propagation_timeout = config.dns_propagation_policy_for(None)?.max_wait;
     }
     settings.external_account_binding = config.external_account_binding_ref()?;
     settings.trust_anchor_pems = load_trust_anchor_pems(config)?;

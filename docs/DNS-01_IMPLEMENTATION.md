@@ -177,8 +177,23 @@ TTL:    Varies (recommend < 60 seconds for ACME)
 
 ### 3. Propagation Verification
 
-The ACME server will query your DNS to verify the record exists. Your DNS provider must have fast propagation or support
-immediate queries.
+Before acknowledging the ACME challenge, AcmeX observes DNS propagation through
+`PropagationObserver`. The observer requires authoritative quorum first and then
+optionally checks recursive resolvers configured in `[dns.propagation]`.
+
+```toml
+[dns.propagation]
+authoritative_quorum = "all"
+recursive_resolvers = []
+recursive_quorum = 1
+max_wait_secs = 300
+poll_interval_secs = 5
+query_timeout_secs = 3
+```
+
+`recursive_resolvers = []` is an explicit opt-out from recursive confirmation.
+Provider-specific overrides use `[dns.providers.<id>.propagation]` and merge
+field-by-field with the global policy.
 
 ## Testing
 
@@ -281,4 +296,3 @@ Err(e) => eprintln ! ("Verify failed: {}", e),
 **Version**: v0.2.0  
 **Status**: ✅ Production Ready (Core)  
 **Providers**: 🔜 Coming Soon
-

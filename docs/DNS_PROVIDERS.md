@@ -29,6 +29,33 @@ Uses Tencent Cloud API v3 with TC3-HMAC-SHA256 signing.
 Uses Huawei Cloud API with SDK-HMAC-SHA256 signing.
 - **Region-specific**: Requires specifying the region (e.g., `cn-north-4`).
 
+## Propagation Policy
+
+DNS-01 propagation is configured through the stable v0.10.0 `[dns.propagation]`
+schema. AcmeX first observes the authoritative nameserver set for the resolved
+zone, then optionally checks the configured recursive resolvers. An empty
+`recursive_resolvers` list is an explicit opt-out from recursive confirmation.
+
+```toml
+[dns.propagation]
+authoritative_quorum = "all"        # "all" or a positive integer
+recursive_resolvers = []            # opt out by default; use ["1.1.1.1:53"] to enable
+recursive_quorum = 1
+max_wait_secs = 300
+poll_interval_secs = 5
+query_timeout_secs = 3
+```
+
+Provider-specific overrides live under `[dns.providers.<id>.propagation]` and
+merge field-by-field with the global policy. Fields that are not set keep the
+global value.
+
+```toml
+[dns.providers.internal.propagation]
+recursive_resolvers = []
+poll_interval_secs = 2
+```
+
 ## Implementation Standards
 
 All DNS providers in AcmeX must implement the `DnsProvider` trait:

@@ -16,7 +16,8 @@ use acmex::challenge::{
     WaitAuthorizationsStep, WaitPropagationStep,
 };
 use acmex::domain::{
-    Identifier, OperationId, OperationKind, OperationRecord, OperationStatus, OperationSubject,
+    ErrorClass, Identifier, OperationId, OperationKind, OperationRecord, OperationStatus,
+    OperationSubject,
 };
 use acmex::protocol::Jwk;
 use acmex::repository::{Clock, FakeClock, MemoryRepository, RepositorySet};
@@ -412,6 +413,29 @@ async fn propagation_waits_then_propagates() {
             .iter()
             .all(|s| s.value.state == ChallengeSessionState::Cleaned
                 || s.value.state == ChallengeSessionState::Valid)
+    );
+}
+
+/// Slow DNS propagation is retryable, not terminal.
+#[tokio::test]
+async fn propagation_timeout_is_retryable() {
+    let clock = Arc::new(FakeClock::at(now()));
+    let fixture = build_fixture(
+        MemoryPresenterBehavior {
+            observe_not_yet_first: usize::MAX,
+            ..Default::default()
+        },
+        vec![Identifier::try_dns("example.com").unwrap()],
+        clock.clone(),
+    );
+    let operation = fixture.submit().await;
+
+    let done = fixture.drive_to_terminal(&operation).await;
+
+    assert_eq!(done.status, OperationStatus::Failed);
+    assert_eq!(
+        done.error.expect("propagation timeout should fail").class,
+        ErrorClass::Retryable
     );
 }
 

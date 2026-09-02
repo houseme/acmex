@@ -770,7 +770,7 @@ impl StepExecutor for WaitPropagationStep {
                 }
                 return StepResult::Fail(ClassifiedError {
                     code: error_codes::CHALLENGE_PROPAGATION_TIMEOUT,
-                    class: ErrorClass::Terminal,
+                    class: ErrorClass::Retryable,
                     detail: Some(format!(
                         "propagation timed out for `{}`",
                         session.identifier

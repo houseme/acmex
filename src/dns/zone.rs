@@ -13,6 +13,7 @@
 //! `FakeZoneResolver` scripts resolutions for tests; `HickoryZoneResolver`
 //! performs live queries.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::IpAddr;
 
@@ -40,6 +41,9 @@ pub struct ZoneResolution {
     pub zone_apex: String,
     /// Authoritative nameserver names for the apex.
     pub authoritative_ns: Vec<String>,
+    /// Resolved nameserver addresses keyed by nameserver name.
+    #[serde(default)]
+    pub authoritative_addrs: HashMap<String, Vec<IpAddr>>,
     /// NS delegation detected on the challenge name itself.
     #[serde(default)]
     pub delegated: bool,
@@ -203,6 +207,15 @@ impl ZoneResolver for FakeZoneResolver {
             .get(if delegated { &final_name } else { &zone_apex })
             .cloned()
             .unwrap_or_default();
+        let authoritative_addrs = authoritative_ns
+            .iter()
+            .map(|ns| {
+                (
+                    ns.clone(),
+                    self.ns_addrs.get(ns).cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
 
         Ok(ZoneResolution {
             source_name: source,
@@ -210,6 +223,7 @@ impl ZoneResolver for FakeZoneResolver {
             cname_chain,
             zone_apex,
             authoritative_ns,
+            authoritative_addrs,
             delegated,
         })
     }
@@ -308,7 +322,7 @@ impl ZoneResolver for HickoryZoneResolver {
         };
 
         let ns_owner = if delegated { &final_name } else { &zone_apex };
-        let authoritative_ns = self
+        let authoritative_ns: Vec<String> = self
             .query(ns_owner, RecordType::NS)
             .await?
             .map(|records| {
@@ -323,6 +337,19 @@ impl ZoneResolver for HickoryZoneResolver {
                     .collect()
             })
             .unwrap_or_default();
+        let mut authoritative_addrs = HashMap::new();
+        for ns in &authoritative_ns {
+            let ns_name = Name::from_ascii(ns).map_err(|err| {
+                AcmeError::protocol(format!("invalid authoritative nameserver `{ns}`: {err}"))
+            })?;
+            let addrs = self
+                .resolver
+                .lookup_ip(ns_name)
+                .await
+                .map(|lookup| lookup.iter().collect())
+                .unwrap_or_default();
+            authoritative_addrs.insert(ns.clone(), addrs);
+        }
 
         Ok(ZoneResolution {
             source_name: source,
@@ -330,6 +357,7 @@ impl ZoneResolver for HickoryZoneResolver {
             cname_chain,
             zone_apex,
             authoritative_ns,
+            authoritative_addrs,
             delegated,
         })
     }
@@ -359,6 +387,10 @@ mod tests {
         assert_eq!(
             resolution.authoritative_ns,
             vec!["ns1.example.com".to_string()]
+        );
+        assert_eq!(
+            resolution.authoritative_addrs["ns1.example.com"],
+            vec!["192.0.2.53".parse::<IpAddr>().unwrap()]
         );
         assert!(!resolution.delegated);
         assert!(resolution.cname_chain.is_empty());

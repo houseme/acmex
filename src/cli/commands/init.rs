@@ -132,6 +132,21 @@ challenge_path = ".well-known/acme-challenge"
 [challenge.dns01]
 propagation_timeout_secs = 300
 
+[dns.propagation]
+authoritative_quorum = "all"
+recursive_resolvers = []
+recursive_quorum = 1
+max_wait_secs = 300
+poll_interval_secs = 5
+query_timeout_secs = 3
+
+# Provider-specific propagation overrides merge field-by-field with
+# [dns.propagation]. Empty recursive_resolvers explicitly skips recursive
+# confirmation, useful for Pebble/challtestsd or private authoritative zones.
+# [dns.providers.internal.propagation]
+# recursive_resolvers = []
+# poll_interval_secs = 2
+
 [tls_alpn]
 listen_addr = "127.0.0.1:5001"
 

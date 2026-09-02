@@ -34,6 +34,10 @@ pub struct Config {
     #[serde(default)]
     pub challenge: ChallengeSettings,
 
+    /// DNS provider and propagation settings.
+    #[serde(default)]
+    pub dns: DnsSettings,
+
     /// Certificate renewal settings.
     #[serde(default)]
     pub renewal: RenewalSettings,
@@ -345,13 +349,32 @@ pub struct Dns01Config {
     /// DNS propagation timeout in seconds.
     #[serde(default = "default_dns_timeout")]
     pub propagation_timeout_secs: u64,
-    /// DNS propagation observation policy (absent = built-in defaults).
+    /// Legacy DNS propagation observation policy. Prefer `[dns.propagation]`.
     #[serde(default)]
     pub propagation: Option<PropagationSettings>,
 }
 
+/// DNS provider and propagation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnsSettings {
+    /// Global DNS propagation observation policy.
+    #[serde(default)]
+    pub propagation: Option<PropagationSettings>,
+    /// Provider-specific overrides keyed by provider id.
+    #[serde(default)]
+    pub providers: HashMap<String, DnsProviderPolicyConfig>,
+}
+
+/// Provider-specific DNS settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DnsProviderPolicyConfig {
+    /// Field-level propagation override for this provider.
+    #[serde(default)]
+    pub propagation: Option<PropagationOverrideSettings>,
+}
+
 /// DNS-01 propagation observation settings
-/// (`[challenge.dns01.propagation]`).
+/// (`[dns.propagation]`).
 ///
 /// Controls how AcmeX observes TXT propagation before acknowledging a
 /// DNS-01 challenge: which recursive resolvers are queried and the quorum
@@ -368,12 +391,19 @@ pub struct PropagationSettings {
     /// Quorum over recursive resolvers: "all" or a positive integer.
     #[serde(default = "default_recursive_quorum")]
     pub recursive_quorum: QuorumSpec,
-    /// First re-check interval while waiting for propagation, in seconds.
-    #[serde(default = "default_initial_interval_secs")]
-    pub initial_interval_secs: u64,
-    /// Upper bound of the exponential back-off between re-checks, in seconds.
-    #[serde(default = "default_max_interval_secs")]
-    pub max_interval_secs: u64,
+    /// Overall wait budget, in seconds.
+    #[serde(default = "default_dns_timeout", alias = "max_wait")]
+    pub max_wait_secs: u64,
+    /// Re-check interval while waiting for propagation, in seconds.
+    #[serde(
+        default = "default_poll_interval_secs",
+        alias = "poll_interval",
+        alias = "initial_interval_secs"
+    )]
+    pub poll_interval_secs: u64,
+    /// Per-DNS-query timeout, in seconds.
+    #[serde(default = "default_query_timeout_secs", alias = "query_timeout")]
+    pub query_timeout_secs: u64,
 }
 
 impl Default for PropagationSettings {
@@ -382,56 +412,118 @@ impl Default for PropagationSettings {
             authoritative_quorum: default_authoritative_quorum(),
             recursive_resolvers: default_recursive_resolvers(),
             recursive_quorum: default_recursive_quorum(),
-            initial_interval_secs: default_initial_interval_secs(),
-            max_interval_secs: default_max_interval_secs(),
+            max_wait_secs: default_dns_timeout(),
+            poll_interval_secs: default_poll_interval_secs(),
+            query_timeout_secs: default_query_timeout_secs(),
         }
     }
 }
 
 impl PropagationSettings {
+    fn apply_override(&mut self, override_settings: &PropagationOverrideSettings) {
+        if let Some(authoritative_quorum) = override_settings.authoritative_quorum.clone() {
+            self.authoritative_quorum = authoritative_quorum;
+        }
+        if let Some(recursive_resolvers) = override_settings.recursive_resolvers.clone() {
+            self.recursive_resolvers = recursive_resolvers;
+        }
+        if let Some(recursive_quorum) = override_settings.recursive_quorum.clone() {
+            self.recursive_quorum = recursive_quorum;
+        }
+        if let Some(max_wait_secs) = override_settings.max_wait_secs {
+            self.max_wait_secs = max_wait_secs;
+        }
+        if let Some(poll_interval_secs) = override_settings.poll_interval_secs {
+            self.poll_interval_secs = poll_interval_secs;
+        }
+        if let Some(query_timeout_secs) = override_settings.query_timeout_secs {
+            self.query_timeout_secs = query_timeout_secs;
+        }
+    }
+
     /// Maps the settings onto the propagation policy used by the observer.
     ///
     /// Bare resolver IPs are normalized to `ip:53` so downstream consumers
     /// always see a full socket address.
     pub fn to_policy(&self) -> crate::dns::propagation::PropagationPolicyV2 {
-        crate::dns::propagation::PropagationPolicyV2::from_parts(
+        crate::dns::propagation::PropagationPolicyV2::from_config(
             self.authoritative_quorum.to_quorum(),
             self.recursive_resolvers
                 .iter()
                 .map(|resolver| normalize_resolver(resolver))
                 .collect(),
             self.recursive_quorum.to_quorum(),
+            Duration::from_secs(self.max_wait_secs),
+            Duration::from_secs(self.poll_interval_secs),
+            Duration::from_secs(self.query_timeout_secs),
         )
     }
 
     /// Validates interval bounds and resolver addresses.
-    fn validate(&self) -> Result<()> {
-        if self.initial_interval_secs == 0 {
-            return Err(AcmeError::configuration(
-                "challenge.dns01.propagation.initial_interval_secs must be at least 1 second",
-            ));
+    fn validate(&self, path: &str) -> Result<()> {
+        if self.max_wait_secs == 0 {
+            return Err(AcmeError::configuration(format!(
+                "{path}.max_wait_secs must be at least 1 second"
+            )));
         }
-        if self.max_interval_secs < self.initial_interval_secs {
-            return Err(AcmeError::configuration(
-                "challenge.dns01.propagation.max_interval_secs must be greater than or equal to initial_interval_secs",
-            ));
+        if self.poll_interval_secs == 0 {
+            return Err(AcmeError::configuration(format!(
+                "{path}.poll_interval_secs must be at least 1 second"
+            )));
         }
-        if self.recursive_resolvers.is_empty() {
-            return Err(AcmeError::configuration(
-                "challenge.dns01.propagation.recursive_resolvers must list at least one resolver",
-            ));
+        if self.query_timeout_secs == 0 {
+            return Err(AcmeError::configuration(format!(
+                "{path}.query_timeout_secs must be at least 1 second"
+            )));
+        }
+        if self.max_wait_secs < self.poll_interval_secs {
+            return Err(AcmeError::configuration(format!(
+                "{path}.max_wait_secs must be greater than or equal to poll_interval_secs"
+            )));
         }
         for resolver in &self.recursive_resolvers {
             let valid = resolver.parse::<std::net::SocketAddr>().is_ok()
                 || resolver.parse::<std::net::IpAddr>().is_ok();
             if !valid {
                 return Err(AcmeError::configuration(format!(
-                    "challenge.dns01.propagation.recursive_resolvers entry `{resolver}` is not a valid ip[:port] address"
+                    "{path}.recursive_resolvers entry `{resolver}` is not a valid ip[:port] address"
                 )));
             }
         }
+        if let QuorumSpec::AtLeast(n) = &self.recursive_quorum
+            && !self.recursive_resolvers.is_empty()
+            && *n > self.recursive_resolvers.len()
+        {
+            return Err(AcmeError::configuration(format!(
+                "{path}.recursive_quorum must be less than or equal to recursive_resolvers length ({})",
+                self.recursive_resolvers.len()
+            )));
+        }
         Ok(())
     }
+}
+
+/// Field-level provider override for `[dns.providers.<id>.propagation]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PropagationOverrideSettings {
+    /// Override authoritative quorum.
+    #[serde(default)]
+    pub authoritative_quorum: Option<QuorumSpec>,
+    /// Override recursive resolver list. Empty list explicitly skips recursive confirmation.
+    #[serde(default)]
+    pub recursive_resolvers: Option<Vec<String>>,
+    /// Override recursive quorum.
+    #[serde(default)]
+    pub recursive_quorum: Option<QuorumSpec>,
+    /// Override overall wait budget, in seconds.
+    #[serde(default, alias = "max_wait")]
+    pub max_wait_secs: Option<u64>,
+    /// Override poll interval, in seconds.
+    #[serde(default, alias = "poll_interval", alias = "initial_interval_secs")]
+    pub poll_interval_secs: Option<u64>,
+    /// Override single DNS query timeout, in seconds.
+    #[serde(default, alias = "query_timeout")]
+    pub query_timeout_secs: Option<u64>,
 }
 
 /// Quorum requirement as written in configuration: `"all"` or a count.
@@ -719,16 +811,16 @@ fn default_authoritative_quorum() -> QuorumSpec {
     QuorumSpec::All
 }
 fn default_recursive_resolvers() -> Vec<String> {
-    vec!["1.1.1.1:53".to_string(), "8.8.8.8:53".to_string()]
+    Vec::new()
 }
 fn default_recursive_quorum() -> QuorumSpec {
     QuorumSpec::AtLeast(1)
 }
-fn default_initial_interval_secs() -> u64 {
+fn default_poll_interval_secs() -> u64 {
     5
 }
-fn default_max_interval_secs() -> u64 {
-    60
+fn default_query_timeout_secs() -> u64 {
+    3
 }
 fn default_check_interval() -> u64 {
     3600
@@ -1011,10 +1103,17 @@ impl Config {
             _ => {}
         }
 
+        if let Some(ref propagation) = self.dns.propagation {
+            propagation.validate("dns.propagation")?;
+        }
         if let Some(dns01) = self.challenge.dns01.as_ref()
             && let Some(ref propagation) = dns01.propagation
         {
-            propagation.validate()?;
+            propagation.validate("challenge.dns01.propagation")?;
+        }
+        for provider_id in self.dns.providers.keys() {
+            self.dns_propagation_settings_for(Some(provider_id))?
+                .validate(&format!("dns.providers.{provider_id}.propagation"))?;
         }
 
         self.external_account_binding_ref()?;
@@ -1049,6 +1148,49 @@ impl Config {
             return Ok(Some(eab.to_backend_ref()));
         }
         Ok(None)
+    }
+
+    /// Resolves the effective DNS propagation settings for a provider.
+    ///
+    /// `[dns.propagation]` is the stable v0.10.0 configuration surface.
+    /// Legacy `[challenge.dns01.propagation]` remains a fallback for old
+    /// configs when the new global section is absent. Provider-level
+    /// overrides merge field-by-field on top of the chosen global settings.
+    pub fn dns_propagation_settings_for(
+        &self,
+        provider_id: Option<&str>,
+    ) -> Result<PropagationSettings> {
+        let settings = self.dns.propagation.clone().or_else(|| {
+            self.challenge
+                .dns01
+                .as_ref()
+                .and_then(|dns01| dns01.propagation.clone())
+        });
+        let mut settings = settings.unwrap_or_else(|| {
+            let mut settings = PropagationSettings::default();
+            if let Some(dns01) = self.challenge.dns01.as_ref() {
+                settings.max_wait_secs = dns01.propagation_timeout_secs;
+            }
+            settings
+        });
+
+        if let Some(provider_id) = provider_id
+            && let Some(provider) = self.dns.providers.get(provider_id)
+            && let Some(propagation) = provider.propagation.as_ref()
+        {
+            settings.apply_override(propagation);
+        }
+        Ok(settings)
+    }
+
+    /// Resolves the runtime DNS propagation policy for a provider.
+    pub fn dns_propagation_policy_for(
+        &self,
+        provider_id: Option<&str>,
+    ) -> Result<crate::dns::propagation::PropagationPolicyV2> {
+        let settings = self.dns_propagation_settings_for(provider_id)?;
+        settings.validate("dns.propagation")?;
+        Ok(settings.to_policy())
     }
 
     /// Returns the resolved ACME directory URL.
@@ -1204,24 +1346,20 @@ hmac_key = "env:EAB_HMAC"
     }
 
     #[test]
-    fn dns01_propagation_parses_string_and_int_quorum() {
+    fn dns_propagation_parses_string_and_int_quorum() {
         let toml = r#"
-[challenge.dns01]
-propagation_timeout_secs = 120
-
-[challenge.dns01.propagation]
+[dns.propagation]
 authoritative_quorum = "all"
 recursive_resolvers = ["9.9.9.9:53", "149.112.112.112:53"]
 recursive_quorum = 2
-initial_interval_secs = 3
-max_interval_secs = 45
+max_wait_secs = 120
+poll_interval_secs = 3
+query_timeout_secs = 2
 "#;
         let config = Config::from_str(toml).unwrap();
         config.validate().unwrap();
         let propagation = config
-            .challenge
-            .dns01
-            .unwrap()
+            .dns
             .propagation
             .expect("propagation section should parse");
         assert_eq!(propagation.authoritative_quorum, QuorumSpec::All);
@@ -1230,46 +1368,43 @@ max_interval_secs = 45
             vec!["9.9.9.9:53".to_string(), "149.112.112.112:53".to_string()]
         );
         assert_eq!(propagation.recursive_quorum, QuorumSpec::AtLeast(2));
-        assert_eq!(propagation.initial_interval_secs, 3);
-        assert_eq!(propagation.max_interval_secs, 45);
+        assert_eq!(propagation.max_wait_secs, 120);
+        assert_eq!(propagation.poll_interval_secs, 3);
+        assert_eq!(propagation.query_timeout_secs, 2);
     }
 
     #[test]
-    fn dns01_propagation_absent_section_keeps_policy_defaults() {
+    fn dns_propagation_absent_section_keeps_policy_defaults() {
         let config =
             Config::from_str("[challenge.dns01]\npropagation_timeout_secs = 300\n").unwrap();
-        let dns01 = config.challenge.dns01.as_ref().unwrap();
-        assert!(dns01.propagation.is_none());
         config.validate().unwrap();
 
-        // Default settings must map onto the built-in policy defaults so
-        // "section present with defaults" and "section absent" agree.
         assert_eq!(
-            PropagationSettings::default().to_policy(),
+            config.dns_propagation_policy_for(None).unwrap(),
             crate::dns::propagation::PropagationPolicyV2::default()
         );
     }
 
     #[test]
-    fn dns01_propagation_rejects_invalid_quorum_values() {
+    fn dns_propagation_rejects_invalid_quorum_values() {
         for (toml, expected_error) in [
             (
                 r#"
-[challenge.dns01.propagation]
+[dns.propagation]
 authoritative_quorum = "majority"
 "#,
                 "invalid quorum value `majority`",
             ),
             (
                 r#"
-[challenge.dns01.propagation]
+[dns.propagation]
 recursive_quorum = 0
 "#,
                 "invalid quorum value `0`",
             ),
             (
                 r#"
-[challenge.dns01.propagation]
+[dns.propagation]
 authoritative_quorum = -1
 "#,
                 "invalid quorum value `-1`",
@@ -1288,23 +1423,23 @@ authoritative_quorum = -1
     }
 
     #[test]
-    fn dns01_propagation_validation_rejects_bad_intervals_and_resolvers() {
-        let base = |propagation: &str| format!("[challenge.dns01.propagation]\n{propagation}");
+    fn dns_propagation_validation_rejects_bad_intervals_resolvers_and_quorum() {
+        let base = |propagation: &str| format!("[dns.propagation]\n{propagation}");
 
-        let zero_initial = base("initial_interval_secs = 0\nmax_interval_secs = 60");
-        let err = Config::from_str(&zero_initial).unwrap().validate();
+        let zero_poll = base("poll_interval_secs = 0");
+        let err = Config::from_str(&zero_poll).unwrap().validate();
         assert!(
             err.unwrap_err()
                 .to_string()
-                .contains("initial_interval_secs must be at least 1 second")
+                .contains("poll_interval_secs must be at least 1 second")
         );
 
-        let inverted = base("initial_interval_secs = 30\nmax_interval_secs = 10");
+        let inverted = base("poll_interval_secs = 30\nmax_wait_secs = 10");
         let err = Config::from_str(&inverted).unwrap().validate();
         assert!(
-            err.unwrap_err().to_string().contains(
-                "max_interval_secs must be greater than or equal to initial_interval_secs"
-            )
+            err.unwrap_err()
+                .to_string()
+                .contains("max_wait_secs must be greater than or equal to poll_interval_secs")
         );
 
         let bad_resolver = base("recursive_resolvers = [\"not-a-resolver\"]");
@@ -1315,46 +1450,102 @@ authoritative_quorum = -1
                 .contains("`not-a-resolver` is not a valid ip[:port] address")
         );
 
-        let empty_resolvers = base("recursive_resolvers = []");
-        let err = Config::from_str(&empty_resolvers).unwrap().validate();
+        let impossible_quorum =
+            base("recursive_resolvers = [\"1.1.1.1:53\"]\nrecursive_quorum = 2");
+        let err = Config::from_str(&impossible_quorum).unwrap().validate();
         assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("recursive_resolvers must list at least one resolver")
+            err.unwrap_err().to_string().contains(
+                "recursive_quorum must be less than or equal to recursive_resolvers length"
+            )
         );
 
-        // Bare IPs (port defaults to 53) and full socket addresses pass.
+        let empty_resolvers = base("recursive_resolvers = []\nrecursive_quorum = 2");
+        Config::from_str(&empty_resolvers)
+            .unwrap()
+            .validate()
+            .unwrap();
+
         let valid = base("recursive_resolvers = [\"1.1.1.1\", \"8.8.8.8:53\"]");
         Config::from_str(&valid).unwrap().validate().unwrap();
     }
 
     #[test]
-    fn dns01_propagation_maps_settings_onto_policy() {
+    fn dns_propagation_maps_settings_onto_policy() {
         let toml = r#"
-[challenge.dns01.propagation]
+[dns.propagation]
 authoritative_quorum = 2
 recursive_resolvers = ["1.1.1.1", "8.8.8.8:53"]
 recursive_quorum = "all"
+max_wait_secs = 90
+poll_interval_secs = 7
+query_timeout_secs = 4
 "#;
         let config = Config::from_str(toml).unwrap();
-        let policy = config
-            .challenge
-            .dns01
-            .unwrap()
-            .propagation
-            .unwrap()
-            .to_policy();
+        let policy = config.dns_propagation_policy_for(None).unwrap();
 
         assert_eq!(
             policy,
-            crate::dns::propagation::PropagationPolicyV2::from_parts(
+            crate::dns::propagation::PropagationPolicyV2::from_config(
                 crate::domain::Quorum::AtLeast(2),
-                vec![
-                    "1.1.1.1:53".to_string(), // bare IP normalized with :53
-                    "8.8.8.8:53".to_string()
-                ],
+                vec!["1.1.1.1:53".to_string(), "8.8.8.8:53".to_string()],
                 crate::domain::Quorum::All,
+                Duration::from_secs(90),
+                Duration::from_secs(7),
+                Duration::from_secs(4),
             )
         );
+    }
+
+    #[test]
+    fn dns_provider_propagation_override_merges_field_by_field() {
+        let toml = r#"
+[dns.propagation]
+authoritative_quorum = "all"
+recursive_resolvers = ["1.1.1.1:53", "8.8.8.8:53"]
+recursive_quorum = 1
+max_wait_secs = 120
+poll_interval_secs = 5
+query_timeout_secs = 3
+
+[dns.providers.internal.propagation]
+recursive_resolvers = []
+poll_interval_secs = 2
+"#;
+        let config = Config::from_str(toml).unwrap();
+        config.validate().unwrap();
+
+        let global = config.dns_propagation_policy_for(None).unwrap();
+        let internal = config.dns_propagation_policy_for(Some("internal")).unwrap();
+
+        assert_eq!(global.recursive_resolvers.len(), 2);
+        assert!(internal.recursive_resolvers.is_empty());
+        assert_eq!(internal.authoritative_quorum, crate::domain::Quorum::All);
+        assert_eq!(internal.recursive_quorum, crate::domain::Quorum::AtLeast(1));
+        assert_eq!(internal.max_wait, Duration::from_secs(120));
+        assert_eq!(internal.poll_interval, Duration::from_secs(2));
+        assert_eq!(internal.query_timeout, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn legacy_challenge_dns01_propagation_is_fallback_only() {
+        let toml = r#"
+[challenge.dns01]
+propagation_timeout_secs = 45
+
+[challenge.dns01.propagation]
+recursive_resolvers = ["9.9.9.9:53"]
+poll_interval_secs = 6
+
+[dns.propagation]
+recursive_resolvers = []
+poll_interval_secs = 3
+"#;
+        let config = Config::from_str(toml).unwrap();
+        config.validate().unwrap();
+        let policy = config.dns_propagation_policy_for(None).unwrap();
+
+        assert!(policy.recursive_resolvers.is_empty());
+        assert_eq!(policy.poll_interval, Duration::from_secs(3));
+        assert_eq!(policy.max_wait, Duration::from_secs(300));
     }
 }
