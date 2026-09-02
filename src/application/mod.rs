@@ -10,7 +10,8 @@ mod types;
 
 pub use service::{ApplicationServiceBuilder, RepositoryCertificateApplication};
 pub use types::{
-    ActorContext, CancelOperation, CertificateApplication, CertificateQuery,
-    CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate, OperationView,
-    Permission, RenewCertificate, RevokeCertificate, VersionView,
+    ActorContext, CancelOperation, CertificateApplication, CertificateQuery, ChallengeLeaseView,
+    ChallengeSessionView, CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate,
+    OperationView, Permission, RenewCertificate, RevokeCertificate, UpdateCertificateIntent,
+    VersionView,
 };

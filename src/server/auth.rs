@@ -229,6 +229,20 @@ pub fn required_permission(method: &Method, path: &str) -> Permission {
     if path.contains("/chain") && *method == Method::GET {
         return Permission::IntentRead;
     }
+    // Challenge inspection (T05) is token-safe operational read state and
+    // shares the read tier with intents and operations.
+    if path.contains("/challenges")
+        || (path.contains("/challenge-cleanup") && *method == Method::GET)
+    {
+        return Permission::IntentRead;
+    }
+    // Manual cleanup retry is an operator remediation that can drive
+    // external infrastructure changes on the scanner's next pass — it is
+    // not a certificate-intent mutation — so it requires the admin tier
+    // instead of `intent.write`; read-only keys are rejected with 403.
+    if path.contains("/challenge-cleanup") && *method == Method::POST {
+        return Permission::Admin;
+    }
     if path.contains("/issue") {
         return Permission::Issue;
     }
@@ -243,6 +257,13 @@ pub fn required_permission(method: &Method, path: &str) -> Permission {
     }
     if path.contains("key") && path.contains("export") {
         return Permission::KeyExport;
+    }
+    // Intent policy patches (PATCH /certificate-intents/{id}, T08) mutate
+    // the intent aggregate in place and stay in the intent.write tier with
+    // the other intent mutations; the method-based fallback below would
+    // map them the same way, this keeps the tier explicit.
+    if path.contains("/certificate-intents") && *method == Method::PATCH {
+        return Permission::IntentWrite;
     }
     match *method {
         Method::GET => Permission::IntentRead,
@@ -367,6 +388,22 @@ mod tests {
         assert_eq!(
             required_permission(&Method::POST, "/api/v1/keys/key_1/export"),
             Permission::KeyExport
+        );
+        assert_eq!(
+            required_permission(&Method::GET, "/api/v1/operations/op_1/challenges"),
+            Permission::IntentRead
+        );
+        assert_eq!(
+            required_permission(&Method::GET, "/api/v1/challenge-cleanup"),
+            Permission::IntentRead
+        );
+        assert_eq!(
+            required_permission(&Method::POST, "/api/v1/challenge-cleanup/chl_1/retry"),
+            Permission::Admin
+        );
+        assert_eq!(
+            required_permission(&Method::PATCH, "/api/v1/certificate-intents/int_1"),
+            Permission::IntentWrite
         );
     }
 }

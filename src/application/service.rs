@@ -1,11 +1,12 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::domain::{
-    CertificateIntent, CertificateLineage, ChallengeSet, IdentifierSet, IntentId, LineageId,
-    OperationId, OperationKind, OperationRecord, OperationRef, OperationStatus, OperationSubject,
-    TenantId, VersionId, validate_order_policy,
+    CertificateIntent, CertificateLineage, ChallengeLease, ChallengeLeaseState, ChallengeSet,
+    IdentifierSet, IntentId, LineageId, OperationId, OperationKind, OperationRecord, OperationRef,
+    OperationStatus, OperationSubject, TenantId, VersionId, validate_order_policy,
 };
 use crate::error::{AcmeError, Result};
 use crate::metrics::{AuditEvent, EventAuditor};
@@ -16,9 +17,10 @@ use crate::repository::{
 use crate::types::ChallengeType;
 
 use super::types::{
-    CancelOperation, CertificateApplication, CertificateQuery, CreateCertificateIntent,
-    DeployCertificate, IntentView, IssueCertificate, OperationView, RenewCertificate,
-    RevokeCertificate, VersionView, command_hash, ensure_idempotency_key, op_ref,
+    CancelOperation, CertificateApplication, CertificateQuery, ChallengeLeaseView,
+    ChallengeSessionView, CreateCertificateIntent, DeployCertificate, IntentView, IssueCertificate,
+    OperationView, RenewCertificate, RevokeCertificate, UpdateCertificateIntent, VersionView,
+    command_hash, ensure_idempotency_key, op_ref,
 };
 
 /// Builder for the default embedded Application Service.
@@ -333,6 +335,34 @@ impl RepositoryCertificateApplication {
         }
         Ok(false)
     }
+
+    /// Every stored operation id, bounded per status by the repository's
+    /// page cap. Used to enumerate challenge sessions, which are only
+    /// reachable per-operation.
+    async fn all_operation_ids(&self) -> Result<Vec<OperationId>> {
+        let mut ids = Vec::new();
+        for status in [
+            OperationStatus::Queued,
+            OperationStatus::Running,
+            OperationStatus::Waiting,
+            OperationStatus::Succeeded,
+            OperationStatus::Failed,
+            OperationStatus::CancelRequested,
+            OperationStatus::Cancelled,
+            OperationStatus::Compensating,
+            OperationStatus::CompensationFailed,
+        ] {
+            ids.extend(
+                self.repositories
+                    .operations
+                    .list_by_status(status, 500)
+                    .await?
+                    .into_iter()
+                    .map(|stored| stored.value.id),
+            );
+        }
+        Ok(ids)
+    }
 }
 
 #[async_trait]
@@ -417,6 +447,108 @@ impl CertificateApplication for RepositoryCertificateApplication {
                 .await?
                 .map(IntentView::from)
                 .ok_or_else(|| AcmeError::storage("intent create raced but entity is missing")),
+        }
+    }
+
+    async fn update_intent(&self, command: UpdateCertificateIntent) -> Result<IntentView> {
+        // The key is validated for presence (transport contract) but never
+        // persisted: v1 keeps no per-intent idempotency ledger, replay
+        // safety comes from the value-comparison no-op below.
+        ensure_idempotency_key(&command.idempotency_key)?;
+        loop {
+            let stored = self
+                .repositories
+                .intents
+                .get(&command.intent_id)
+                .await?
+                .ok_or_else(|| {
+                    AcmeError::not_found(format!("intent `{}` not found", command.intent_id))
+                })?;
+            ensure_tenant(
+                &command.context.tenant_id,
+                &stored.value.tenant_id,
+                "intent",
+            )?;
+
+            if let Some(expected) = command.expected_generation
+                && expected != stored.value.generation
+            {
+                return Err(AcmeError::conflict(format!(
+                    "intent `{}` is at generation {}, If-Match expected {expected}",
+                    command.intent_id, stored.value.generation
+                )));
+            }
+
+            // Apply only the mutable fields; each provided field fully
+            // replaces the stored value, omitted fields keep theirs.
+            let mut next = stored.value.clone();
+            let mut fields_changed: Vec<&'static str> = Vec::new();
+            if let Some(renewal_policy) = &command.renewal_policy
+                && &next.renewal_policy != renewal_policy
+            {
+                next.renewal_policy = renewal_policy.clone();
+                fields_changed.push("renewal_policy");
+            }
+            if let Some(delivery_targets) = &command.delivery_targets
+                && &next.delivery_targets != delivery_targets
+            {
+                next.delivery_targets = delivery_targets.clone();
+                fields_changed.push("delivery_targets");
+            }
+
+            // Identical replay: nothing differs from the stored values, so
+            // the current view is returned without a second generation
+            // bump (documented idempotency behavior).
+            if fields_changed.is_empty() {
+                return Ok(stored.into());
+            }
+
+            next.generation += 1;
+            next.validate()?;
+
+            match self
+                .repositories
+                .intents
+                .update(stored.revision, next.clone())
+                .await?
+            {
+                CasOutcome::Updated(_) => {
+                    // Outbox + audit trail follow the intent.created
+                    // pattern; only field names are recorded, never policy
+                    // contents.
+                    self.repositories
+                        .outbox
+                        .append(
+                            "intent.updated",
+                            serde_json::json!({
+                                "intent_id": next.id.as_str(),
+                                "tenant_id": next.tenant_id.as_str(),
+                                "generation": next.generation,
+                                "fields_changed": fields_changed,
+                                "actor": &command.context.actor,
+                            }),
+                            None,
+                        )
+                        .await?;
+                    EventAuditor::track_audit(
+                        &self.repositories,
+                        AuditEvent::success(
+                            &command.context,
+                            "intent.update",
+                            next.id.as_str(),
+                            None,
+                            Some(next.generation),
+                            self.repositories.clock.now(),
+                        ),
+                    )
+                    .await?;
+                    return Ok(IntentView::from_intent(&next));
+                }
+                // Another writer advanced the intent between read and
+                // write; re-validate against fresh state (including the
+                // If-Match generation guard).
+                CasOutcome::Conflict { .. } => continue,
+            }
         }
     }
 
@@ -552,6 +684,68 @@ impl CertificateApplication for RepositoryCertificateApplication {
             }
         }
     }
+
+    async fn retry_challenge_cleanup(
+        &self,
+        context: super::types::ActorContext,
+        lease_id: crate::domain::ChallengeLeaseId,
+    ) -> Result<ChallengeLeaseView> {
+        loop {
+            let stored = self
+                .repositories
+                .challenge_leases
+                .get(&lease_id)
+                .await?
+                .ok_or_else(|| {
+                    AcmeError::not_found(format!("challenge lease `{lease_id}` not found"))
+                })?;
+            // Leases carry no tenant of their own: authorize through the
+            // owning operation's subject lineage, like cancellation does.
+            let operation = self
+                .repositories
+                .operations
+                .get(&stored.value.operation_id)
+                .await?
+                .ok_or_else(|| {
+                    AcmeError::not_found(format!(
+                        "operation `{}` behind challenge lease `{lease_id}` not found",
+                        stored.value.operation_id
+                    ))
+                })?;
+            if !self
+                .operation_visible_to_tenant(&operation.value, &context.tenant_id)
+                .await?
+            {
+                // Cross-tenant probes must not reveal existence.
+                return Err(AcmeError::not_found(format!(
+                    "challenge lease `{lease_id}` not found"
+                )));
+            }
+            if stored.value.state != ChallengeLeaseState::CleanupFailed {
+                return Err(AcmeError::conflict(format!(
+                    "challenge lease `{lease_id}` is `{}`, only `cleanup_failed` leases can be requeued",
+                    stored.value.state.as_str()
+                )));
+            }
+            let mut next = stored.value.clone();
+            // Only the state flips: `cleanup_attempts` and
+            // `last_cleanup_error` stay untouched so the audit trail of the
+            // failed attempts survives. The lease is now back in the
+            // scanner queue and the background ChallengeCleanupScanner
+            // picks it up on its next pass.
+            next.state = ChallengeLeaseState::CleanupPending;
+            match self
+                .repositories
+                .challenge_leases
+                .update(stored.revision, next.clone())
+                .await?
+            {
+                CasOutcome::Updated(_) => return Ok(next.into()),
+                // The scanner raced us; re-validate against fresh state.
+                CasOutcome::Conflict { .. } => continue,
+            }
+        }
+    }
 }
 
 fn ensure_tenant(
@@ -577,15 +771,19 @@ impl CertificateQuery for RepositoryCertificateApplication {
             .map(IntentView::from))
     }
 
-    async fn list_intents(&self) -> Result<Vec<IntentView>> {
-        Ok(self
+    async fn list_intents(&self, limit: usize) -> Result<Vec<IntentView>> {
+        let limit = limit.clamp(1, 500);
+        let mut views: Vec<IntentView> = self
             .repositories
             .intents
             .list()
             .await?
             .into_iter()
             .map(IntentView::from)
-            .collect())
+            .collect();
+        views.sort_by(|a, b| b.id.as_str().cmp(a.id.as_str()));
+        views.truncate(limit);
+        Ok(views)
     }
 
     async fn get_operation(&self, id: &OperationId) -> Result<Option<OperationView>> {
@@ -651,6 +849,72 @@ impl CertificateQuery for RepositoryCertificateApplication {
             .get(id)
             .await?
             .map(|stored| stored.value.into()))
+    }
+
+    async fn list_challenge_sessions(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<Vec<ChallengeSessionView>> {
+        // Sessions reference only `operation_id` (no tenant of their own).
+        // For v1 reads are scoped by operation and tenancy is inherited from
+        // the operation's subject lineage, mirroring how operation lookups
+        // are addressed today.
+        Ok(self
+            .repositories
+            .challenge_sessions
+            .list_by_operation(operation_id)
+            .await?
+            .into_iter()
+            .map(|stored| stored.value.into())
+            .collect())
+    }
+
+    async fn list_cleanup_pending(&self) -> Result<Vec<ChallengeLeaseView>> {
+        // The scanner queue (`active` + `cleanup_pending`) comes straight
+        // from the repository.
+        let mut leases: Vec<ChallengeLease> = self
+            .repositories
+            .challenge_leases
+            .list_needing_cleanup()
+            .await?
+            .into_iter()
+            .map(|stored| stored.value)
+            .collect();
+        let mut known: HashSet<String> = leases
+            .iter()
+            .map(|lease| lease.id.as_str().to_string())
+            .collect();
+        // Leases that exhausted their automatic budget (`cleanup_failed`)
+        // leave the scanner queue even though their external resource still
+        // exists — and they are exactly what operators must see and retry
+        // (T05 manual retry entry). Every lease is referenced by its
+        // session's `lease_id`, so they are recovered by walking the
+        // sessions and merging in any referenced lease that is not yet
+        // `cleaned` and not already listed.
+        for operation_id in self.all_operation_ids().await? {
+            for session in self
+                .repositories
+                .challenge_sessions
+                .list_by_operation(&operation_id)
+                .await?
+            {
+                let Some(lease_id) = &session.value.lease_id else {
+                    continue;
+                };
+                if known.contains(lease_id.as_str()) {
+                    continue;
+                }
+                let Some(stored) = self.repositories.challenge_leases.get(lease_id).await? else {
+                    continue;
+                };
+                if stored.value.state != ChallengeLeaseState::Cleaned {
+                    known.insert(stored.value.id.as_str().to_string());
+                    leases.push(stored.value);
+                }
+            }
+        }
+        leases.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        Ok(leases.into_iter().map(Into::into).collect())
     }
 }
 

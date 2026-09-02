@@ -12,7 +12,7 @@ use crate::application::{
     CreateCertificateIntent, DeployCertificate, IssueCertificate, RenewCertificate,
     RevokeCertificate,
 };
-use crate::domain::{IntentId, LineageId, OperationId, TargetId, VersionId};
+use crate::domain::{ChallengeLeaseId, IntentId, LineageId, OperationId, TargetId, VersionId};
 use crate::error::{AcmeError, Result};
 use crate::server::api::AppState;
 
@@ -38,6 +38,15 @@ pub fn routes() -> Router<AppState> {
         .route("/operations", get(list_operations))
         .route("/operations/{id}", get(get_operation))
         .route("/operations/{id}/cancel", post(cancel_operation))
+        .route(
+            "/operations/{id}/challenges",
+            get(list_operation_challenges),
+        )
+        .route("/challenge-cleanup", get(list_challenge_cleanup))
+        .route(
+            "/challenge-cleanup/{id}/retry",
+            post(retry_challenge_cleanup),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +70,48 @@ pub struct RenewRequest {
     pub force: bool,
 }
 
+/// PATCH /certificate-intents/{id} body.
+///
+/// Only the mutable policy fields are modeled; immutable fields are
+/// captured as raw values purely so attempts can be rejected with a 400
+/// naming them (serde would otherwise silently drop unknown keys).
+#[derive(Debug, Deserialize)]
+pub struct PatchIntentRequest {
+    /// Full replacement of the renewal policy; omitted keeps the current.
+    #[serde(default)]
+    pub renewal_policy: Option<crate::domain::RenewalPolicy>,
+    /// Full replacement of the delivery target list; omitted keeps the
+    /// current list.
+    #[serde(default)]
+    pub delivery_targets: Option<Vec<crate::domain::DeliveryTarget>>,
+    #[serde(default)]
+    ca_policy: Option<serde_json::Value>,
+    #[serde(default)]
+    validation_policy: Option<serde_json::Value>,
+    #[serde(default)]
+    key_policy: Option<serde_json::Value>,
+    #[serde(default)]
+    identifiers: Option<serde_json::Value>,
+    #[serde(default)]
+    idempotency_key: Option<serde_json::Value>,
+}
+
+impl PatchIntentRequest {
+    /// Immutable intent fields present in the patch body, in stable order.
+    fn immutable_fields(&self) -> Vec<&'static str> {
+        [
+            ("identifiers", self.identifiers.is_some()),
+            ("ca_policy", self.ca_policy.is_some()),
+            ("validation_policy", self.validation_policy.is_some()),
+            ("key_policy", self.key_policy.is_some()),
+            ("idempotency_key", self.idempotency_key.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RevokeRequest {
     #[serde(default)]
@@ -81,6 +132,18 @@ pub struct PageQuery {
 
 fn default_limit() -> usize {
     100
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CleanupQuery {
+    /// Whether to list the pending cleanup queue. Defaults to `true`;
+    /// `false` is rejected because v1 exposes no non-pending lease view.
+    #[serde(default = "default_pending")]
+    pub pending: bool,
+}
+
+fn default_pending() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -124,7 +187,23 @@ impl ApiProblem {
 fn error_response(err: AcmeError) -> Response {
     let body = ApiProblem::from_error(&err);
     let status = StatusCode::from_u16(body.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (status, Json(body)).into_response()
+    let mut response = (status, Json(body)).into_response();
+    // A rate-limited response carries the server-provided hint as an HTTP
+    // header, not only inside the problem body.
+    if let AcmeError::RateLimited(Some(retry_after)) = &err {
+        let value = HeaderValue::from_str(&retry_after.as_secs().max(1).to_string());
+        if let Ok(value) = value {
+            response.headers_mut().insert("Retry-After", value);
+        }
+    }
+    response
+}
+
+/// Test-only exposure of the error→response mapping (header behavior is not
+/// reachable through a scripted handler failure).
+#[doc(hidden)]
+pub fn error_response_for_tests(err: AcmeError) -> Response {
+    error_response(err)
 }
 
 fn idempotency_key(headers: &HeaderMap) -> Result<String> {
@@ -139,6 +218,28 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String> {
                 "Idempotency-Key is required for mutating certificate requests",
             )
         })
+}
+
+/// Parses the optional `If-Match` header as the expected intent generation.
+///
+/// Accepts the bare generation (`2`) and the quoted ETag form (`"2"`);
+/// anything else is rejected as invalid input. Unconditional
+/// (last-write-wins) patches omit the header entirely.
+fn if_match_generation(headers: &HeaderMap) -> Result<Option<u64>> {
+    headers
+        .get("If-Match")
+        .map(|value| {
+            let raw = value
+                .to_str()
+                .map_err(|_| AcmeError::invalid_input("If-Match must carry the intent generation"))?
+                .trim();
+            raw.trim_matches('"').parse::<u64>().map_err(|_| {
+                AcmeError::invalid_input(format!(
+                    "If-Match `{raw}` is not a valid intent generation"
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn actor_context(actor: Option<Extension<ActorContext>>) -> ActorContext {
@@ -194,8 +295,11 @@ pub async fn create_intent(
     }
 }
 
-pub async fn list_intents(State(state): State<AppState>) -> Response {
-    let result = async { query(&state)?.list_intents().await }.await;
+pub async fn list_intents(
+    State(state): State<AppState>,
+    Query(page): Query<PageQuery>,
+) -> Response {
+    let result = async { query(&state)?.list_intents(page.limit).await }.await;
     match result {
         Ok(views) => Json(views).into_response(),
         Err(err) => error_response(err),
@@ -218,10 +322,64 @@ pub async fn get_intent(State(state): State<AppState>, Path(id): Path<String>) -
     }
 }
 
-pub async fn update_intent() -> Response {
-    error_response(AcmeError::invalid_input(
-        "intent patch is not implemented in v0.9.0 M3",
-    ))
+/// PATCH /certificate-intents/{id}
+///
+/// Synchronous mutable-policy patch (T08 residual): `renewal_policy` and
+/// `delivery_targets` are fully replaced when present, omitted fields keep
+/// their current values. `identifiers`, `ca_policy`, `validation_policy`,
+/// `key_policy` and `idempotency_key` are immutable for v1 (a certificate's
+/// SAN set cannot change in place — create a new intent instead); naming
+/// any of them is a 400 that lists the offending fields.
+///
+/// Optimistic concurrency: an `If-Match` header carrying the previously
+/// observed generation rejects stale writers with 409; without it the patch
+/// applies last-write-wins. Every effective patch bumps the intent
+/// generation by one; a patch that changes no stored value is an idempotent
+/// no-op returning the current view without a bump.
+///
+/// Returns 200 with the updated IntentView. No operation is created, so
+/// there is nothing to poll (no 202); an `Idempotency-Key` is still
+/// required, like every mutating certificate route.
+pub async fn update_intent(
+    State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<PatchIntentRequest>,
+) -> Response {
+    let result = async {
+        let intent_id = IntentId::new(id)?;
+        let immutable = payload.immutable_fields();
+        if !immutable.is_empty() {
+            return Err(AcmeError::invalid_input(format!(
+                "intent fields are immutable: {} (create a new intent instead)",
+                immutable.join(", ")
+            )));
+        }
+        if payload.renewal_policy.is_none() && payload.delivery_targets.is_none() {
+            return Err(AcmeError::invalid_input(
+                "patch requires at least one mutable field: renewal_policy or delivery_targets",
+            ));
+        }
+        application(&state)?
+            .update_intent(
+                (
+                    actor_context(actor),
+                    intent_id,
+                    payload.renewal_policy,
+                    payload.delivery_targets,
+                    if_match_generation(&headers)?,
+                    idempotency_key(&headers)?,
+                )
+                    .into(),
+            )
+            .await
+    }
+    .await;
+    match result {
+        Ok(view) => (StatusCode::OK, Json(view)).into_response(),
+        Err(err) => error_response(err),
+    }
 }
 
 pub async fn issue_intent(
@@ -472,6 +630,82 @@ pub async fn cancel_operation(
     }
 }
 
+/// GET /operations/{id}/challenges
+///
+/// Token-safe challenge sessions of one operation (T05): the serialized
+/// views never contain the token, its hash or a key authorization. Returns
+/// 404 when the operation is unknown, consistent with GET /operations/{id}.
+pub async fn list_operation_challenges(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let result = async {
+        let id = OperationId::new(id)?;
+        query(&state)?
+            .get_operation(&id)
+            .await?
+            .ok_or_else(|| AcmeError::not_found(format!("operation `{id}` not found")))?;
+        query(&state)?.list_challenge_sessions(&id).await
+    }
+    .await;
+    match result {
+        Ok(views) => Json(views).into_response(),
+        Err(err) => error_response(err),
+    }
+}
+
+/// GET /challenge-cleanup?pending=true
+///
+/// The operator's cleanup queue (T05): `active`, `cleanup_pending` and
+/// `cleanup_failed` leases as redacted lease views. `cleanup_failed` is
+/// what the manual retry entry acts on. Views never contain token or key
+/// authorization material.
+pub async fn list_challenge_cleanup(
+    State(state): State<AppState>,
+    Query(page): Query<CleanupQuery>,
+) -> Response {
+    let result = async {
+        if !page.pending {
+            return Err(AcmeError::invalid_input(
+                "challenge-cleanup only exposes the pending cleanup queue; set pending=true or omit it",
+            ));
+        }
+        query(&state)?.list_cleanup_pending().await
+    }
+    .await;
+    match result {
+        Ok(views) => Json(views).into_response(),
+        Err(err) => error_response(err),
+    }
+}
+
+/// POST /challenge-cleanup/{id}/retry
+///
+/// Manual retry entry for a stuck cleanup (T05): requeues a
+/// `cleanup_failed` lease back to `cleanup_pending` through a guarded CAS
+/// transition without resetting `cleanup_attempts` (the audit trail of the
+/// failed attempts is preserved). The background `ChallengeCleanupScanner`
+/// picks the lease up on its next pass. Returns 409 when the lease is not
+/// `cleanup_failed` and 404 when it is unknown. No Idempotency-Key is
+/// required: the state-guarded CAS transition is naturally idempotent.
+pub async fn retry_challenge_cleanup(
+    State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
+    Path(id): Path<String>,
+) -> Response {
+    let result = async {
+        let lease_id = ChallengeLeaseId::new(id)?;
+        application(&state)?
+            .retry_challenge_cleanup(actor_context(actor), lease_id)
+            .await
+    }
+    .await;
+    match result {
+        Ok(view) => Json(view).into_response(),
+        Err(err) => error_response(err),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +716,28 @@ mod tests {
         assert_eq!(problem.status, 409);
         assert_eq!(problem.error_code, "IDEMPOTENCY_OR_CAS_CONFLICT");
         assert!(!problem.retryable);
+    }
+
+    fn headers_with(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("If-Match", HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn if_match_accepts_bare_and_quoted_generations() {
+        assert_eq!(if_match_generation(&headers_with("2")).unwrap(), Some(2));
+        assert_eq!(
+            if_match_generation(&headers_with("\"2\"")).unwrap(),
+            Some(2)
+        );
+        assert_eq!(if_match_generation(&HeaderMap::new()).unwrap(), None);
+    }
+
+    #[test]
+    fn if_match_rejects_non_generation_values() {
+        assert!(if_match_generation(&headers_with("*")).is_err());
+        assert!(if_match_generation(&headers_with("abc")).is_err());
+        assert!(if_match_generation(&headers_with("-1")).is_err());
     }
 }

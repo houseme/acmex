@@ -2,10 +2,12 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
+use crate::challenge::ChallengeSession;
 use crate::domain::{
-    CaPolicy, CertificateIntent, CertificateLineage, CertificateVersion, IntentId, LineageId,
-    OperationId, OperationRef, OperationStatus, OperationSubject, RenewalPolicy, TargetId,
-    TenantId, ValidationPolicy, VersionId,
+    CaPolicy, CertificateIntent, CertificateLineage, CertificateVersion, ChallengeLease,
+    ChallengeLeaseId, ChallengeLeaseLocator, IntentId, LineageId, OperationId, OperationRef,
+    OperationStatus, OperationSubject, RenewalPolicy, TargetId, TenantId, ValidationPolicy,
+    VersionId,
 };
 use crate::error::Result;
 use crate::repository::Versioned;
@@ -133,6 +135,90 @@ pub struct CreateCertificateIntent {
     pub idempotency_key: String,
 }
 
+/// Patch the mutable policy fields of an existing certificate intent.
+///
+/// Semantics (T08 residual closure):
+///
+/// * only [`RenewalPolicy`] and `delivery_targets` are mutable; each
+///   provided field fully replaces the stored value, omitted fields keep
+///   their current value;
+/// * `identifiers`, `ca_policy`, `validation_policy` and `key_policy` are
+///   immutable — a certificate's SAN set and issuance policy cannot change
+///   in place (that is what new intents are for); transport layers reject
+///   attempts naming them;
+/// * optimistic concurrency: when `expected_generation` is set (carried as
+///   an HTTP `If-Match` header) and no longer equals the stored
+///   generation, the update fails with a conflict. Without it the patch
+///   applies unconditionally (last-write-wins);
+/// * every effective mutation bumps the intent `generation` by one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateCertificateIntent {
+    /// Caller context.
+    pub context: ActorContext,
+    /// Intent to patch.
+    pub intent_id: IntentId,
+    /// Full replacement of the renewal policy; `None` keeps the current one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewal_policy: Option<RenewalPolicy>,
+    /// Full replacement of the delivery target list; `None` keeps the
+    /// current list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_targets: Option<Vec<crate::domain::DeliveryTarget>>,
+    /// Expected current generation (`If-Match`); mismatch is a conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<u64>,
+    /// Caller-provided idempotency key. Validated for presence; v1 keeps no
+    /// per-intent idempotency ledger, so replay safety comes from the
+    /// value-comparison no-op documented on the application service.
+    pub idempotency_key: String,
+}
+
+impl
+    From<(
+        ActorContext,
+        IntentId,
+        Option<RenewalPolicy>,
+        Option<Vec<crate::domain::DeliveryTarget>>,
+        Option<u64>,
+        String,
+    )> for UpdateCertificateIntent
+{
+    /// Builds the command from its positional fields (same order as the
+    /// struct).
+    ///
+    /// Transport layers construct the command through this conversion
+    /// instead of naming the type: the application module's public
+    /// re-export surface is frozen while intent patching lands, the same
+    /// rationale behind [`CertificateApplication::retry_challenge_cleanup`]
+    /// taking direct parameters.
+    fn from(
+        (
+            context,
+            intent_id,
+            renewal_policy,
+            delivery_targets,
+            expected_generation,
+            idempotency_key,
+        ): (
+            ActorContext,
+            IntentId,
+            Option<RenewalPolicy>,
+            Option<Vec<crate::domain::DeliveryTarget>>,
+            Option<u64>,
+            String,
+        ),
+    ) -> Self {
+        Self {
+            context,
+            intent_id,
+            renewal_policy,
+            delivery_targets,
+            expected_generation,
+            idempotency_key,
+        }
+    }
+}
+
 /// Create an issuance operation for an intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueCertificate {
@@ -197,6 +283,92 @@ pub struct CancelOperation {
     pub context: ActorContext,
     /// Operation to cancel.
     pub operation_id: OperationId,
+}
+
+/// Token-safe challenge session projection (T05: the API may expose
+/// challenge state but must never leak token or key authorization
+/// material).
+///
+/// `token_hash`, the raw token and the key authorization are deliberately
+/// absent: nothing an operator needs to inspect lifecycle progress requires
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChallengeSessionView {
+    pub id: String,
+    pub operation_id: OperationId,
+    pub authorization_url: String,
+    pub identifier: String,
+    pub challenge_type: String,
+    pub state: String,
+    pub deadline: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+impl From<ChallengeSession> for ChallengeSessionView {
+    fn from(session: ChallengeSession) -> Self {
+        Self {
+            id: session.id,
+            operation_id: session.operation_id,
+            authorization_url: session.authorization_url,
+            // Canonical ACME wire value ("example.com", "192.0.2.1").
+            identifier: session.identifier.acme_value(),
+            challenge_type: session.challenge_type.as_str().to_string(),
+            state: session.state.as_str().to_string(),
+            deadline: session.deadline,
+            last_error: session.last_error,
+        }
+    }
+}
+
+/// Redacted challenge lease projection for the cleanup queue.
+///
+/// The typed locator is collapsed into a human-readable summary that
+/// carries no credential material: DNS leases show zone + record name,
+/// HTTP/TLS leases show agent + route ids. Locator hashes (DNS
+/// `value_hash`, HTTP `token_hash`) are one-way and therefore safe, but
+/// are still left out of the summary to keep it short.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChallengeLeaseView {
+    pub id: ChallengeLeaseId,
+    pub operation_id: OperationId,
+    pub challenge_type: String,
+    pub locator_summary: String,
+    pub cleanup_attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cleanup_error: Option<String>,
+    pub state: String,
+}
+
+impl ChallengeLeaseView {
+    /// Operator-safe locator summary (see the struct documentation).
+    fn summarize_locator(locator: &ChallengeLeaseLocator) -> String {
+        match locator {
+            ChallengeLeaseLocator::Dns {
+                zone, record_name, ..
+            } => format!("dns zone={zone} record={record_name}"),
+            ChallengeLeaseLocator::Http {
+                agent_id, route_id, ..
+            } => format!("http agent={agent_id} route={route_id}"),
+            ChallengeLeaseLocator::Tls {
+                agent_id, route_id, ..
+            } => format!("tls agent={agent_id} route={route_id}"),
+        }
+    }
+}
+
+impl From<ChallengeLease> for ChallengeLeaseView {
+    fn from(lease: ChallengeLease) -> Self {
+        Self {
+            id: lease.id,
+            operation_id: lease.operation_id,
+            challenge_type: lease.challenge_type.as_str().to_string(),
+            locator_summary: Self::summarize_locator(&lease.locator),
+            cleanup_attempts: lease.cleanup_attempts,
+            last_cleanup_error: lease.last_cleanup_error,
+            state: lease.state.as_str().to_string(),
+        }
+    }
 }
 
 /// Intent resource projection returned by API/CLI.
@@ -322,23 +494,70 @@ impl From<crate::domain::OperationRecord> for OperationView {
 #[async_trait]
 pub trait CertificateApplication: Send + Sync {
     async fn create_intent(&self, command: CreateCertificateIntent) -> Result<IntentView>;
+    /// Patches the mutable policy fields of an existing intent and returns
+    /// the updated view. See [`UpdateCertificateIntent`] for the field
+    /// semantics (mutable set, full replacement, generation bump).
+    ///
+    /// Repeated identical patches are idempotent: when every provided field
+    /// compares equal to the stored value the current view is returned
+    /// without bumping the generation (v1 has no persisted idempotency
+    /// ledger for intent patches, unlike operations).
+    ///
+    /// Default: adapters that do not implement intent patching report a
+    /// configuration error instead of failing silently.
+    async fn update_intent(&self, command: UpdateCertificateIntent) -> Result<IntentView> {
+        let _ = command;
+        Err(crate::error::AcmeError::configuration(
+            "intent patch is not implemented by this application service",
+        ))
+    }
     async fn issue(&self, command: IssueCertificate) -> Result<OperationRef>;
     async fn renew(&self, command: RenewCertificate) -> Result<OperationRef>;
     async fn revoke(&self, command: RevokeCertificate) -> Result<OperationRef>;
     async fn deploy(&self, command: DeployCertificate) -> Result<OperationRef>;
     async fn cancel_operation(&self, command: CancelOperation) -> Result<OperationView>;
+    /// Manually requeues a `cleanup_failed` challenge lease (T05 operator
+    /// retry entry). The parameters are passed directly instead of a
+    /// command struct so transport layers can call it without naming new
+    /// application types.
+    ///
+    /// Default: adapters that do not implement challenge cleanup report a
+    /// configuration error instead of failing silently.
+    async fn retry_challenge_cleanup(
+        &self,
+        context: ActorContext,
+        lease_id: ChallengeLeaseId,
+    ) -> Result<ChallengeLeaseView> {
+        let _ = (context, lease_id);
+        Err(crate::error::AcmeError::configuration(
+            "challenge cleanup retry is not implemented by this application service",
+        ))
+    }
 }
 
 /// Read-only projections.
 #[async_trait]
 pub trait CertificateQuery: Send + Sync {
     async fn get_intent(&self, id: &IntentId) -> Result<Option<IntentView>>;
-    async fn list_intents(&self) -> Result<Vec<IntentView>>;
+    /// Lists intents, newest page first, capped at `limit` (pagination for
+    /// large deployments).
+    async fn list_intents(&self, limit: usize) -> Result<Vec<IntentView>>;
     async fn get_operation(&self, id: &OperationId) -> Result<Option<OperationView>>;
     async fn list_operations(&self, limit: usize) -> Result<Vec<OperationView>>;
     async fn get_lineage(&self, id: &LineageId) -> Result<Option<CertificateLineage>>;
     async fn list_versions(&self, lineage_id: &LineageId) -> Result<Vec<VersionView>>;
     async fn get_version(&self, id: &VersionId) -> Result<Option<VersionView>>;
+    /// Lists the token-safe challenge sessions of one operation. Sessions
+    /// carry only `operation_id` (no tenant of their own): for v1 the API
+    /// scopes reads by operation and relies on the operation's tenant via
+    /// its subject lineage, the same addressing used by operation queries.
+    async fn list_challenge_sessions(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<Vec<ChallengeSessionView>>;
+    /// Lists leases still requiring cleanup attention, including
+    /// `cleanup_failed` ones awaiting the manual retry entry.
+    async fn list_cleanup_pending(&self) -> Result<Vec<ChallengeLeaseView>>;
 }
 
 pub(crate) fn command_hash<T: Serialize>(value: &T) -> Result<String> {

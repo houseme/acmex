@@ -1,4 +1,4 @@
-use crate::application::{ActorContext, RenewCertificate};
+use crate::application::{ActorContext, RenewCertificate, RevokeCertificate};
 use crate::domain::{LineageId, VersionId};
 use crate::error::ProblemDetails;
 use crate::server::api::AppState;
@@ -144,8 +144,50 @@ pub async fn renew_certificate(
 }
 
 pub async fn revoke_certificate(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    StatusCode::NO_CONTENT
+    info!("Requesting revocation for certificate version: {}", id);
+
+    let Some(application) = &state.application else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ProblemDetails {
+                problem_type: "https://acmex.sh/errors/config".into(),
+                title: "Server poorly configured".into(),
+                status: 503,
+                detail: "Application Service is not configured".into(),
+                instance: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let version_id = match VersionId::new(id.clone()) {
+        Ok(id) => id,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(err.to_problem_details())).into_response();
+        }
+    };
+
+    // Durable Revoke operation (like API v1) — never a silent success.
+    match application
+        .revoke(RevokeCertificate {
+            context: ActorContext::default(),
+            version_id,
+            reason: None,
+            idempotency_key: format!("legacy-revoke-{id}"),
+        })
+        .await
+    {
+        Ok(op) => (StatusCode::ACCEPTED, Json(op)).into_response(),
+        Err(err) => {
+            let problem = err.to_problem_details();
+            (
+                StatusCode::from_u16(problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(problem),
+            )
+                .into_response()
+        }
+    }
 }
