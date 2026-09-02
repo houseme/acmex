@@ -11,7 +11,9 @@ use async_trait::async_trait;
 
 use jiff::Timestamp;
 
-use crate::challenge::presenter::{CleanupOutcome, Observation, PrepareChallenge};
+use crate::challenge::presenter::{
+    CleanupOutcome, Observation, PrepareChallenge, dns01_validation_value,
+};
 use crate::challenge::{ChallengePresenter, ChallengeSession};
 use crate::domain::challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
 use crate::error::Result;
@@ -112,7 +114,7 @@ impl ChallengePresenter for Dns01Presenter {
             .present_txt(PresentTxt {
                 zone: resolution.zone_apex.clone(),
                 record_name: record_name.clone(),
-                value: request.key_authorization,
+                value: dns01_validation_value(&request.key_authorization),
                 idempotency_key: request.session.id.clone(),
             })
             .await?;

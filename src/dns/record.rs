@@ -18,7 +18,7 @@ pub struct PresentTxt {
     pub zone: String,
     /// Full record name (`_acme-challenge.example.com`).
     pub record_name: String,
-    /// The TXT value (the DNS-01 key authorization digest input).
+    /// The TXT value to publish.
     pub value: String,
     /// Idempotency key (session id): a retry with the same key must find or
     /// re-create the same resource, never duplicate it.

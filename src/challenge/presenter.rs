@@ -21,6 +21,22 @@ use crate::types::ChallengeType;
 
 use super::session::ChallengeSession;
 
+/// DNS-01 TXT value for an ACME key authorization.
+///
+/// RFC 8555 DNS-01 validation does not publish `token.thumbprint`
+/// directly. The TXT value is base64url(SHA256(keyAuthorization)), without
+/// padding. Keeping this in the presenter port prevents production DNS
+/// adapters and E2E harnesses from drifting onto different challenge values.
+pub fn dns01_validation_value(key_authorization: &str) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(key_authorization.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
 /// Input to `prepare`.
 pub struct PrepareChallenge {
     /// The session being prepared.
@@ -177,10 +193,11 @@ impl ChallengePresenter for MemoryPresenter {
     }
 
     async fn prepare(&self, request: PrepareChallenge) -> Result<ChallengeLease> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(request.key_authorization.as_bytes());
-        let value_hash = hex::encode(hasher.finalize());
+        let value = match self.kind {
+            ChallengeType::Dns01 => dns01_validation_value(&request.key_authorization),
+            ChallengeType::Http01 | ChallengeType::TlsAlpn01 => request.key_authorization.clone(),
+        };
+        let value_hash = crate::dns::record::txt_value_hash(&value);
 
         {
             // Scripted transient failures: the caller retries and the
@@ -200,7 +217,7 @@ impl ChallengePresenter for MemoryPresenter {
                     format!("_acme-challenge.{}", request.session.identifier),
                     value_hash.clone(),
                 ),
-                request.key_authorization.clone(),
+                value,
             );
         }
 

@@ -1,7 +1,7 @@
 # AcmeX v0.10.0 验证与收口实施路线图
 
-**状态**：规划完成，任务待领取
-**基线**：`main@f38a460` + 2026-09-02 第三轮优化批次（CLI 接入/lib 兼容，见 v0.9.0 审计文档）
+**状态**：实施中；代码级收口已部分落地，L4/L5 外部证据仍待执行
+**基线**：`main@f38a460` + 2026-09-02 第三轮优化批次；当前 main 后续已追加 T13-T18 多项实现
 **目标**：把 v0.9.0 已合并的控制平面闭环，变成被可复现证据验证过的可发布产品
 **最后更新**：2026-09-02
 
@@ -31,12 +31,14 @@
 
 ## 2. 与 v0.9.0 的关系
 
-v0.9.0 的 T01-T12 已全部合并，本地门槛（fmt/test/check/feature matrix/restart matrix/docs gate）通过，三轮优化批次补齐了生产运行时装配、CLI 接入和指标打点。但截至本路线图撰写时：
+v0.9.0 的 T01-T12 已全部合并，本地门槛（fmt/test/check/feature matrix/restart matrix/docs gate）通过，三轮优化批次补齐了生产运行时装配、CLI 接入和指标打点。本路线图初稿撰写时：
 
 - `docs/roadmap/v0.9.0/RELEASE_CHECKLIST.md` 的 **Required E2E Evidence** 与 **Explicit External Evidence** 区全部未勾选。
 - `scripts/run_pebble_e2e.sh` 即使设置 `RUN_PEBBLE_E2E=1` 也只运行 fake-adapter 套件，不存在任何启动 Pebble 的实现。
 - `Cargo.toml` 版本仍为 `0.8.0`，v0.9.0 尚未发布。
 - v0.9.0 审计确认了若干代码级验收缺口：EAB 为 stub、Account Key Rollover 缺失、双 JWS 栈并存、证书验收报告不完整、DNS 传播策略无配置入口、`PATCH /certificate-intents` 为 stub、可观测性三项收尾未完成。
+
+**当前实现复核（2026-09-02）**：main 已补入真实 Pebble DNS-01 harness 骨架、EAB/keyChange、VerificationReport、DNS propagation schema、PATCH/challenge status API、repository error metrics 与 webhook replay-window。上述代码仍需按各任务验收标准复跑 focused/full gates；Pebble/LE/live DNS/Redis/K8s/Vault/双实例等 L4/L5 证据未执行前不得标记为发布通过。
 
 v0.10.0 承接两类工作：
 
@@ -85,12 +87,12 @@ v0.9.0 的主题是架构：可恢复、可扩展、可安全接入上下游的�
 
 | ID | 任务 | 主要产出 | 前置依赖 | 建议里程碑 | 当前状态 |
 |---|---|---|---|---|---|
-| T13 | [Pebble E2E Harness 与真实进程验证](./T13_PEBBLE_E2E_HARNESS.md) | compose 环境、三类 Challenge 真实签发/续签/吊销、真实 executor 重启演练、CI pebble/secret-scan job | 无（复用 `server::worker` 装配） | M1 | 待领取 |
-| T14 | [EAB 与账户生命周期收口](./T14_EAB_AND_ACCOUNT_LIFECYCLE.md) | EAB SecretResolver 接线、Account Key Rollover、JWS 栈收敛 | 无 | M2 | 待领取 |
-| T15 | [证书验收报告与 CA 能力消费](./T15_CERTIFICATE_VERIFICATION_REPORT.md) | 完整 VerificationReport、`supports_identifier_type` 预检、OCSP 处置 | 无 | M2 | 待领取 |
-| T16 | [DNS 传播策略配置化](./T16_DNS_PROPAGATION_POLICY_CONFIG.md) | quorum/递归 resolver 配置 schema 与运行时接线 | 无 | M2 | 待领取 |
-| T17 | [API 契约与遗留面收口](./T17_API_CONTRACT_CLOSURE.md) | PATCH intents、授权/挑战状态 API、legacy `/api` 弃用计划、OpenAPI 校验门槛 | 无 | M2 | 待领取 |
-| T18 | [可观测性收尾](./T18_OBSERVABILITY_CLOSEOUT.md) | `repository_errors_total`、trace span 注入、webhook 重放窗口、告警资产 | 无 | M2 | 待领取 |
+| T13 | [Pebble E2E Harness 与真实进程验证](./T13_PEBBLE_E2E_HARNESS.md) | compose 环境、三类 Challenge 真实签发/续签/吊销、真实 executor 重启演练、CI pebble/secret-scan job | 无（复用 `server::worker` 装配） | M1 | 部分实现；DNS-01 harness 与 CI gate 已就绪，未执行 Docker L4，HTTP-01/TLS-ALPN-01/续签/吊销/重启矩阵仍待补齐 |
+| T14 | [EAB 与账户生命周期收口](./T14_EAB_AND_ACCOUNT_LIFECYCLE.md) | EAB SecretResolver 接线、Account Key Rollover、JWS 栈收敛 | 无 | M2 | 代码已落地，待 focused/full gate 与 Pebble 覆盖 |
+| T15 | [证书验收报告与 CA 能力消费](./T15_CERTIFICATE_VERIFICATION_REPORT.md) | 完整 VerificationReport、`supports_identifier_type` 预检、OCSP 处置 | 无 | M2 | 代码已落地，待验收复核 |
+| T16 | [DNS 传播策略配置化](./T16_DNS_PROPAGATION_POLICY_CONFIG.md) | quorum/递归 resolver 配置 schema 与运行时接线 | 无 | M2 | 代码已落地，待验收复核 |
+| T17 | [API 契约与遗留面收口](./T17_API_CONTRACT_CLOSURE.md) | PATCH intents、授权/挑战状态 API、legacy `/api` 弃用计划、OpenAPI 校验门槛 | 无 | M2 | 代码已落地，待验收复核 |
+| T18 | [可观测性收尾](./T18_OBSERVABILITY_CLOSEOUT.md) | `repository_errors_total`、trace span 注入、webhook 重放窗口、告警资产 | 无 | M2 | 代码已落地，待验收复核 |
 | T19 | [Let's Encrypt Staging 与真实 CA 特性实测](./T19_LETSENCRYPT_STAGING_VALIDATION.md) | staging 冒烟、ARI replaces、profiles、IPv4/IPv6 证据 | T13、T14（硬）；T15、T16、T20（软） | M3 | 待领取 |
 | T20 | [生产基础设施实测与多实例证据](./T20_LIVE_INFRASTRUCTURE_AND_HA_EVIDENCE.md) | live DNS zone 契约、K8s/Vault/远端 agent、Redis live、双进程 fencing | 无硬依赖（建议在 T18 后） | M3 | 待领取 |
 | T21 | [发布工程与版本策略](./T21_RELEASE_ENGINEERING.md) | 发布路径决策、CHANGELOG、迁移文档、性能基线、版本 cut | T13-T20 | M4 | 待领取 |

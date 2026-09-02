@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use acmex::challenge::{ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge};
+use acmex::challenge::{
+    ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge, dns01_validation_value,
+};
 use acmex::dns::factory::{DefaultDnsProviderFactory, DnsProviderFactory};
 use acmex::dns::presenter::Dns01Presenter;
 use acmex::dns::propagation::{FakePropagationObserver, QueryOutcome, ResponseKind};
@@ -91,6 +93,14 @@ async fn contract_suite(provider: Arc<dyn DnsRecordProvider>) {
 #[tokio::test]
 async fn fake_provider_passes_contract() {
     contract_suite(Arc::new(FakeDnsRecordProvider::new("contract-fake"))).await;
+}
+
+#[test]
+fn dns01_validation_value_uses_rfc8555_digest() {
+    assert_eq!(
+        dns01_validation_value("token.thumbprint"),
+        "61rBZ_4knHblO0MNoxFsXZ_eTFUHum0B6IVRbhvUn5I"
+    );
 }
 
 #[tokio::test]
@@ -202,6 +212,7 @@ async fn dns01_presenter_end_to_end_with_fakes() {
     };
 
     // prepare: zone resolved, provider routed, lease returned
+    let expected_txt = dns01_validation_value("token.abc");
     let lease = presenter
         .prepare(PrepareChallenge {
             session,
@@ -218,7 +229,7 @@ async fn dns01_presenter_end_to_end_with_fakes() {
         } => {
             assert_eq!(zone, "example.com");
             assert_eq!(record_name, "_acme-challenge.example.com");
-            assert_eq!(*value_hash, txt_value_hash("token.abc"));
+            assert_eq!(*value_hash, txt_value_hash(&expected_txt));
         }
         other => panic!("dns locator expected, got {other:?}"),
     }

@@ -97,6 +97,27 @@ fn retryable_error(detail: impl Into<String>) -> StepResult {
     }
 }
 
+fn acme_backend_error(detail: impl Into<String>) -> StepResult {
+    let detail = detail.into();
+    let code = detail
+        .find('[')
+        .and_then(|start| detail[start + 1..].split_once(']'))
+        .map(|(code, _)| StableErrorCode::from_owned(code.to_string()))
+        .unwrap_or(error_codes::ACME_SERVER_ERROR);
+
+    if detail.contains("] terminal:") {
+        return terminal(code, detail);
+    }
+    if detail.contains("] operator-action-required:") {
+        return StepResult::Fail(ClassifiedError {
+            code,
+            class: ErrorClass::OperatorActionRequired,
+            detail: Some(detail),
+        });
+    }
+    retryable_error(detail)
+}
+
 fn read_payload<T: serde::de::DeserializeOwned>(
     record: &domain::OperationRecord,
     kind: WorkflowStepKind,
@@ -1212,7 +1233,7 @@ impl StepExecutor for SubmitRevocationStep {
         };
         match self.deps.backend.revoke(&account, &request).await {
             Ok(()) => StepResult::done(),
-            Err(err) => retryable_error(err.to_string()),
+            Err(err) => acme_backend_error(err.to_string()),
         }
     }
 }

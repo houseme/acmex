@@ -733,6 +733,140 @@ async fn renewal_spine_supersedes_old_version_after_file_deployment() {
     cleanup_dir(&deploy_root);
 }
 
+#[tokio::test]
+async fn revoke_spine_calls_backend_and_succeeds() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let (_leaf, _ca, chain_pem) = issued_chain("example.com");
+    let active_version = CertificateVersion {
+        id: VersionId::new("ver_revoke").unwrap(),
+        lineage_id: LineageId::new("lin_spine").unwrap(),
+        identifiers: identifiers.clone(),
+        certificate_chain_pem: chain_pem,
+        serial: "02".to_string(),
+        not_before: "2025-01-01T00:00:00Z".to_string(),
+        not_after: "2027-01-01T00:00:00Z".to_string(),
+        issued_by: "test-ca".to_string(),
+        profile: None,
+        key_ref: soft_key_ref(),
+        replaces: None,
+        superseded_by: None,
+        state: VersionState::Active,
+    };
+    let fixture = build_fixture(
+        &identifiers,
+        Vec::new(),
+        Some(active_version),
+        None,
+        directory(),
+    )
+    .await;
+    fixture.transport.push(
+        ScriptedResponse::json("revoke-cert", 200, serde_json::json!({})).with_headers(
+            Some("n-revoke".to_string()),
+            None,
+            None,
+        ),
+    );
+
+    let op_id = OperationId::new("op_spine_revoke").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(OperationRecord::new(
+            op_id.clone(),
+            OperationKind::Revoke,
+            OperationSubject {
+                intent_id: Some(IntentId::new("int_spine").unwrap()),
+                lineage_id: Some(LineageId::new("lin_spine").unwrap()),
+                version_id: Some(VersionId::new("ver_revoke").unwrap()),
+            },
+            Some("spine-revoke".to_string()),
+            None,
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}",
+        final_record.error
+    );
+    assert_eq!(fixture.transport.post_count("revoke-cert"), 1);
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+#[tokio::test]
+async fn revoke_spine_treats_ca_rejection_as_terminal() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let (_leaf, _ca, chain_pem) = issued_chain("example.com");
+    let active_version = CertificateVersion {
+        id: VersionId::new("ver_revoke_rejected").unwrap(),
+        lineage_id: LineageId::new("lin_spine").unwrap(),
+        identifiers: identifiers.clone(),
+        certificate_chain_pem: chain_pem,
+        serial: "03".to_string(),
+        not_before: "2025-01-01T00:00:00Z".to_string(),
+        not_after: "2027-01-01T00:00:00Z".to_string(),
+        issued_by: "test-ca".to_string(),
+        profile: None,
+        key_ref: soft_key_ref(),
+        replaces: None,
+        superseded_by: None,
+        state: VersionState::Active,
+    };
+    let fixture = build_fixture(
+        &identifiers,
+        Vec::new(),
+        Some(active_version),
+        None,
+        directory(),
+    )
+    .await;
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "revoke-cert",
+            400,
+            serde_json::json!({
+                "type": "urn:ietf:params:acme:error:malformed",
+                "detail": "certificate cannot be revoked by this account"
+            }),
+        )
+        .with_headers(Some("n-revoke-rejected".to_string()), None, None),
+    );
+
+    let op_id = OperationId::new("op_spine_revoke_rejected").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(OperationRecord::new(
+            op_id.clone(),
+            OperationKind::Revoke,
+            OperationSubject {
+                intent_id: Some(IntentId::new("int_spine").unwrap()),
+                lineage_id: Some(LineageId::new("lin_spine").unwrap()),
+                version_id: Some(VersionId::new("ver_revoke_rejected").unwrap()),
+            },
+            Some("spine-revoke-rejected".to_string()),
+            None,
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(final_record.status, acmex::domain::OperationStatus::Failed);
+    let error = final_record.error.expect("rejection carries an error");
+    assert_eq!(error.class, acmex::domain::ErrorClass::Terminal);
+    assert_eq!(error.code.as_str(), "ACME_HTTP_400_MALFORMED");
+    assert_eq!(fixture.transport.post_count("revoke-cert"), 1);
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
 /// An intent whose identifiers contain an IP is rejected at the order step
 /// when the CA does not advertise `ip` support (RFC 8738, T07) — before any
 /// order is created on the CA.

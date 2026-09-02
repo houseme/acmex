@@ -4,6 +4,8 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch:
+  schedule:
+    - cron: "30 2 * * 0"
 
 jobs:
   local-release-gates:
@@ -30,3 +32,34 @@ jobs:
         run: scripts/verify_docs_and_openapi.sh
       - name: Diff whitespace
         run: git diff --check
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: High-confidence secret scan
+        run: scripts/secret_scan.sh
+
+  pebble-e2e:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - name: Run Pebble L4 E2E
+        env:
+          RUN_PEBBLE_E2E: "1"
+          PEBBLE_E2E_ARTIFACT_DIR: target/pebble-e2e/ci
+        run: scripts/run_pebble_e2e.sh
+      - name: Secret scan Pebble evidence
+        if: always()
+        run: scripts/secret_scan.sh
+      - name: Upload Pebble evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: pebble-e2e-evidence
+          path: target/pebble-e2e

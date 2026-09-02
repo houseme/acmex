@@ -28,6 +28,7 @@ pub use http01_presenter::{Http01Presenter, TokenRegistry, http01_host_header, h
 pub use presenter::{
     ChallengePresenter, CleanupOutcome, LegacySolverPresenter, MemoryPresenter,
     MemoryPresenterBehavior, Observation, PrepareChallenge, PresenterRegistry,
+    dns01_validation_value,
 };
 pub use session::{ChallengeSession, ChallengeSessionState};
 pub use steps::{

@@ -35,6 +35,7 @@ use acmex::ca_backend::{
 };
 use acmex::challenge::{
     ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge, PresenterRegistry,
+    dns01_validation_value,
 };
 use acmex::domain::{
     CertificateIntent, ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState, IdentifierSet,
@@ -146,16 +147,17 @@ impl AcmeTransport for InsecurePebbleTransport {
 #[derive(Clone)]
 struct ChalltestsrvPresenter {
     admin: String,
-    /// lease id → key authorization (in-memory only; the lease itself
-    /// persists just the value hash, per the T05 no-token rule).
-    key_authorizations: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    /// record name + value hash → TXT value. This is an optimization for the
+    /// single-process E2E path; observe still falls back to the challtestsrv
+    /// dump so rebuilt presenters can verify by the persisted hash alone.
+    txt_values: Arc<tokio::sync::Mutex<HashMap<(String, String), String>>>,
 }
 
 impl ChalltestsrvPresenter {
     fn new(admin: String) -> Self {
         Self {
             admin,
-            key_authorizations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            txt_values: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -186,22 +188,23 @@ impl ChallengePresenter for ChalltestsrvPresenter {
     async fn prepare(&self, request: PrepareChallenge) -> acmex::error::Result<ChallengeLease> {
         use sha2::{Digest, Sha256};
         let record_name = format!("_acme-challenge.{}", request.session.identifier);
+        let txt_value = dns01_validation_value(&request.key_authorization);
         self.admin_post(
             "/set-txt",
             serde_json::json!({
                 "host": record_name,
-                "value": request.key_authorization,
+                "value": txt_value,
             }),
         )
         .await?;
 
         let mut hasher = Sha256::new();
-        hasher.update(request.key_authorization.as_bytes());
+        hasher.update(txt_value.as_bytes());
         let value_hash = hex::encode(hasher.finalize());
-        self.key_authorizations.lock().await.insert(
-            request.session.id.clone(),
-            request.key_authorization.clone(),
-        );
+        self.txt_values
+            .lock()
+            .await
+            .insert((record_name.clone(), value_hash.clone()), txt_value);
 
         let now = Timestamp::now();
         Ok(ChallengeLease {
@@ -234,19 +237,19 @@ impl ChallengePresenter for ChalltestsrvPresenter {
     }
 
     async fn observe(&self, lease: &ChallengeLease) -> acmex::error::Result<Observation> {
-        let expected = match &lease.locator {
-            ChallengeLeaseLocator::Dns { record_name, .. } => {
-                match self
-                    .key_authorizations
+        let (record_name, value_hash, cached_value) = match &lease.locator {
+            ChallengeLeaseLocator::Dns {
+                record_name,
+                value_hash,
+                ..
+            } => {
+                let cached = self
+                    .txt_values
                     .lock()
                     .await
-                    .get(&lease.id.to_string())
-                {
-                    // No stored value (process restarted): observe by hash
-                    // over everything the server reports for the host.
-                    Some(value) => value.clone(),
-                    None => record_name.clone(),
-                }
+                    .get(&(record_name.clone(), value_hash.clone()))
+                    .cloned();
+                (record_name.clone(), value_hash.clone(), cached)
             }
             _ => {
                 return Ok(Observation::NotYet {
@@ -260,7 +263,17 @@ impl ChallengePresenter for ChalltestsrvPresenter {
             .await
             .map_err(|e| acmex::error::AcmeError::transport(format!("dump-dns: {e}")))?;
         let body = dump.text().await.unwrap_or_default();
-        if body.contains(&expected) {
+        let expected_visible = cached_value
+            .as_deref()
+            .is_some_and(|value| body.contains(record_name.as_str()) && body.contains(value));
+        let expected_hash_visible = body
+            .split(|ch: char| {
+                ch == '"' || ch == '[' || ch == ']' || ch == ',' || ch.is_whitespace()
+            })
+            .any(|value| {
+                !value.is_empty() && acmex::dns::record::txt_value_hash(value) == value_hash
+            });
+        if expected_visible || expected_hash_visible {
             Ok(Observation::Propagated)
         } else {
             Ok(Observation::NotYet {
@@ -271,13 +284,17 @@ impl ChallengePresenter for ChalltestsrvPresenter {
 
     async fn cleanup(&self, lease: &ChallengeLease) -> acmex::error::Result<CleanupOutcome> {
         match &lease.locator {
-            ChallengeLeaseLocator::Dns { record_name, .. } => {
+            ChallengeLeaseLocator::Dns {
+                record_name,
+                value_hash,
+                ..
+            } => {
                 self.admin_post("/clear-txt", serde_json::json!({ "host": record_name }))
                     .await?;
-                self.key_authorizations
+                self.txt_values
                     .lock()
                     .await
-                    .remove(&lease.id.to_string());
+                    .remove(&(record_name.clone(), value_hash.clone()));
                 Ok(CleanupOutcome::Cleaned)
             }
             _ => Ok(CleanupOutcome::AlreadyAbsent),

@@ -58,3 +58,7 @@ finalize → download → strict verification → persisted active version. It h
 not yet been *executed* in a prepared environment (no docker in the dev
 sandbox) — an executed run is still required before L4 counts as passed.
 HTTP-01/TLS-ALPN-01 variants against Pebble remain to be added.
+
+Successful runs archive `environment.txt`, `cargo-test-live-pebble-e2e.log`,
+and `compose.log` under `target/pebble-e2e/<timestamp>/`; CI uploads the
+`target/pebble-e2e` tree as the `pebble-e2e-evidence` artifact.
