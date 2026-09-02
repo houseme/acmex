@@ -7,6 +7,19 @@
 
 ---
 
+## 0. 当前实现状态（2026-09-02）
+
+- 已建立 `CHANGELOG.md`、`docs/RELEASE_NOTES_v0.9.0.md`、
+  `docs/RELEASE_NOTES_v0.10.0.md`、`docs/MIGRATION_v0.9.0.md` 与
+  `docs/MIGRATION_v0.10.0.md`。
+- 发布路径决策记录在 `RELEASE_DECISION.md`：默认等待 T13/T19/T20 证据后
+  合并 cut v0.10.0；仅当 Pebble L4 明显先完成时再单独 cut v0.9.0。
+- legacy `/api` Sunset 日期正式采用
+  `Wed, 31 Mar 2027 23:59:59 GMT`，与实现常量和迁移文档一致。
+- `scripts/run_semver_check.sh` 与 CI `semver-check` job 已接入。
+- 未执行版本 bump/tag/publish，也未更新性能基线结果；这些动作仍依赖
+  T13/T19/T20 外部证据与发布前完整 gate。
+
 ## 1. 背景与当前问题
 
 1. **版本欠账**：`Cargo.toml` 版本仍为 `0.8.0`。v0.9.0 的代码（T01-T12 + 三轮优化批次）已全部合入 main，但因外部门槛未执行，0.9.0 从未发布。v0.10.0 完成外部门槛后，存在两条路径：
@@ -82,10 +95,10 @@ scripts/run_feature_matrix.sh && scripts/run_restart_matrix.sh && scripts/verify
 
 ## 7. 验收标准
 
-- [ ] 发布路径决策已记录；Sunset 日期与 T17 实现一致。
-- [ ] CHANGELOG 存在且覆盖本次发布；RELEASE_NOTES 含显式未验证项清单（若有残留）。
-- [ ] MIGRATION 文档覆盖 0.8→0.9→0.10 全路径，含 API、配置、CLI、存储模型。
+- [x] 发布路径决策已记录；Sunset 日期与 T17 实现一致。
+- [x] CHANGELOG 存在且覆盖本次发布；RELEASE_NOTES 含显式未验证项清单（若有残留）。
+- [x] MIGRATION 文档覆盖 0.8→0.9→0.10 全路径，含 API、配置、CLI、存储模型。
 - [ ] 性能基线在声明的参考平台复跑并记录日期与平台。
-- [ ] semver 检查在 CI 生效并建立基线。
+- [x] semver 检查在 CI 生效并建立基线。
 - [ ] 版本已发布（tag + 分发渠道）；v0.9.0 与 v0.10.0 路线图目录状态收口，README 与实际行为一致。
 - [ ] 最终发布前检查全绿。

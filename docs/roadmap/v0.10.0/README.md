@@ -1,7 +1,7 @@
 # AcmeX v0.10.0 验证与收口实施路线图
 
-**状态**：实施中；代码级收口已部分落地，L4/L5 外部证据仍待执行
-**基线**：`main@f38a460` + 2026-09-02 第三轮优化批次；当前 main 后续已追加 T13-T18 多项实现
+**状态**：实施中；代码级收口已部分落地，发布工程 baseline 已建立，L4/L5 外部证据仍待执行
+**基线**：`main@f38a460` + 2026-09-02 多轮优化批次；当前 main 后续已追加 T13-T18 与 T21 本地发布工程实现
 **目标**：把 v0.9.0 已合并的控制平面闭环，变成被可复现证据验证过的可发布产品
 **最后更新**：2026-09-02
 
@@ -87,15 +87,15 @@ v0.9.0 的主题是架构：可恢复、可扩展、可安全接入上下游的�
 
 | ID | 任务 | 主要产出 | 前置依赖 | 建议里程碑 | 当前状态 |
 |---|---|---|---|---|---|
-| T13 | [Pebble E2E Harness 与真实进程验证](./T13_PEBBLE_E2E_HARNESS.md) | compose 环境、三类 Challenge 真实签发/续签/吊销、真实 executor 重启演练、CI pebble/secret-scan job | 无（复用 `server::worker` 装配） | M1 | 部分实现；DNS-01 harness 与 CI gate 已就绪，未执行 Docker L4，HTTP-01/TLS-ALPN-01/续签/吊销/重启矩阵仍待补齐 |
+| T13 | [Pebble E2E Harness 与真实进程验证](./T13_PEBBLE_E2E_HARNESS.md) | compose 环境、三类 Challenge 真实签发/续签/吊销、真实 executor 重启演练、CI pebble/secret-scan job | 无（复用 `server::worker` 装配） | M1 | 部分实现；Pebble harness 与 CI gate 已就绪，未执行 Docker L4，HTTP-01/TLS-ALPN-01/续签/吊销/重启矩阵仍需真实证据 |
 | T14 | [EAB 与账户生命周期收口](./T14_EAB_AND_ACCOUNT_LIFECYCLE.md) | EAB SecretResolver 接线、Account Key Rollover、JWS 栈收敛 | 无 | M2 | 代码已落地，待 focused/full gate 与 Pebble 覆盖 |
 | T15 | [证书验收报告与 CA 能力消费](./T15_CERTIFICATE_VERIFICATION_REPORT.md) | 完整 VerificationReport、`supports_identifier_type` 预检、OCSP 处置 | 无 | M2 | 代码已落地，待验收复核 |
 | T16 | [DNS 传播策略配置化](./T16_DNS_PROPAGATION_POLICY_CONFIG.md) | quorum/递归 resolver 配置 schema 与运行时接线 | 无 | M2 | 代码已落地，待验收复核 |
 | T17 | [API 契约与遗留面收口](./T17_API_CONTRACT_CLOSURE.md) | PATCH intents、授权/挑战状态 API、legacy `/api` 弃用计划、OpenAPI 校验门槛 | 无 | M2 | 代码已落地，待验收复核 |
 | T18 | [可观测性收尾](./T18_OBSERVABILITY_CLOSEOUT.md) | `repository_errors_total`、trace span 注入、webhook 重放窗口、告警资产 | 无 | M2 | 代码已落地，待验收复核 |
-| T19 | [Let's Encrypt Staging 与真实 CA 特性实测](./T19_LETSENCRYPT_STAGING_VALIDATION.md) | staging 冒烟、ARI replaces、profiles、IPv4/IPv6 证据 | T13、T14（硬）；T15、T16、T20（软） | M3 | 待领取 |
-| T20 | [生产基础设施实测与多实例证据](./T20_LIVE_INFRASTRUCTURE_AND_HA_EVIDENCE.md) | live DNS zone 契约、K8s/Vault/远端 agent、Redis live、双进程 fencing | 无硬依赖（建议在 T18 后） | M3 | 待领取 |
-| T21 | [发布工程与版本策略](./T21_RELEASE_ENGINEERING.md) | 发布路径决策、CHANGELOG、迁移文档、性能基线、版本 cut | T13-T20 | M4 | 待领取 |
+| T19 | [Let's Encrypt Staging 与真实 CA 特性实测](./T19_LETSENCRYPT_STAGING_VALIDATION.md) | staging 冒烟、ARI replaces、profiles、IPv4/IPv6 证据 | T13、T14（硬）；T15、T16、T20（软） | M3 | 本地 gate/runbook 已就绪；未执行 live CA |
+| T20 | [生产基础设施实测与多实例证据](./T20_LIVE_INFRASTRUCTURE_AND_HA_EVIDENCE.md) | live DNS zone 契约、K8s/Vault/远端 agent、Redis live、双进程 fencing | 无硬依赖（建议在 T18 后） | M3 | 本地 gate/runbook 已就绪；未执行 live infra |
+| T21 | [发布工程与版本策略](./T21_RELEASE_ENGINEERING.md) | 发布路径决策、CHANGELOG、迁移文档、性能基线、版本 cut | T13-T20 | M4 | 部分实现；CHANGELOG/RELEASE_NOTES/MIGRATION/semver gate 已落地，性能基线重跑、版本 bump/tag/publish 被外部证据阻塞 |
 
 ---
 

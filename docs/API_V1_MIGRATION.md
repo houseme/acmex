@@ -7,8 +7,10 @@ now carries:
 - `Sunset: Wed, 31 Mar 2027 23:59:59 GMT`
 - `Link: </docs/API_V1_MIGRATION.md>; rel="deprecation"`
 
-The Sunset date is the v0.10.0 release-engineering placeholder and must be
-reconfirmed by T21 before release cut.
+The Sunset date is formalized by
+`docs/roadmap/v0.10.0/RELEASE_DECISION.md`. It remains subject to normal
+release-manager approval at tag time, but code and migration docs now share the
+same value.
 
 ## Route Map
 
