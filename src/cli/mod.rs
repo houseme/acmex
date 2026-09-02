@@ -65,11 +65,11 @@ pub async fn run() -> crate::error::Result<()> {
         Commands::Order(args) => match args.command {
             args::OrderCommands::List => {
                 tracing::info!("Listing ACME orders");
-                commands::handle_order_list().await?;
+                commands::handle_order_list(args.api_base, args.api_key).await?;
             }
             args::OrderCommands::Show { order_id } => {
                 tracing::info!("Showing details for order: {}", order_id);
-                commands::handle_order_show(order_id).await?;
+                commands::handle_order_show(order_id, args.api_base, args.api_key).await?;
             }
         },
         Commands::Cert(args) => match args.command {

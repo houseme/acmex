@@ -49,6 +49,14 @@ pub enum Commands {
 
 #[derive(Parser, Debug)]
 pub struct OrderArgs {
+    /// API v1 base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8080/api/v1")]
+    pub api_base: String,
+
+    /// Management API key. Defaults to ACMEX_API_KEY.
+    #[arg(long)]
+    pub api_key: Option<String>,
+
     #[command(subcommand)]
     pub command: OrderCommands,
 }
