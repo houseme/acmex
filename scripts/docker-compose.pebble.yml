@@ -5,9 +5,9 @@
 #
 # pebble:     ACME test CA  — https://localhost:14000/dir (invalid TLS by design)
 # challtestsrv: DNS/HTTP/TLS challenge test server — TXT records are
-#             programmed over the admin API on :8055 (set-txt / clear-txt /
-#             dump-dns) and served on the DNS port :8053, which pebble uses
-#             as its resolver so DNS-01 validation actually resolves.
+#             programmed over the admin API on :8055. DNS, HTTP-01 and
+#             TLS-ALPN-01 are served from one stable Docker-network address so
+#             Pebble's VA can reach the test server from inside the network.
 services:
   pebble:
     image: letsencrypt/pebble:latest
@@ -22,6 +22,9 @@ services:
     ports:
       - "14000:14000" # ACME directory (HTTPS)
       - "15000:15000" # admin API
+    networks:
+      pebble-net:
+        ipv4_address: 10.30.50.2
 
   challtestsrv:
     image: letsencrypt/pebble-challtestsrv:latest
@@ -36,7 +39,7 @@ services:
         "-tlsalpn01",
         ":8051",
         "-defaultIPv4",
-        "127.0.0.1",
+        "10.30.50.3",
       ]
     ports:
       - "8055:8055" # admin HTTP API (set-txt / clear-txt / dump-dns)
@@ -44,3 +47,13 @@ services:
       - "8053:8053/tcp"
       - "8052:8052" # HTTP-01 (unused by the DNS-01 flow, exposed for T07)
       - "8051:8051" # TLS-ALPN-01 (unused by the DNS-01 flow, exposed for T07)
+    networks:
+      pebble-net:
+        ipv4_address: 10.30.50.3
+
+networks:
+  pebble-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.30.50.0/24

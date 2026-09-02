@@ -8,7 +8,7 @@
 //! ```text
 //! intent → issue operation → WorkflowEngine (register_executors)
 //!   → AcmeCaBackend over real HTTPS (insecure verify, Pebble)
-//!   → DNS-01 TXT via challtestsrv admin API (set-txt / clear-txt)
+//!   → DNS-01 / HTTP-01 / TLS-ALPN-01 via challtestsrv admin API
 //!   → CSR by SoftwareKeyProvider (file secret store)
 //!   → finalize/download on Pebble
 //!   → strict verification (SAN/validity/chain/CSR-key)
@@ -38,13 +38,15 @@ use acmex::challenge::{
     dns01_validation_value,
 };
 use acmex::domain::{
-    CertificateIntent, ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState, IdentifierSet,
-    IntentId, LineageId, OperationId, OperationKind, OperationRecord, OperationSubject, TenantId,
+    CertificateIntent, ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState, ChallengeSet,
+    DeliveryTarget, DeliveryTargetKind, IdentifierSet, IntentId, LineageId, OperationId,
+    OperationKind, OperationRecord, OperationSubject, TenantId, ValidationPolicy, VersionId,
 };
 use acmex::key::SoftwareKeyProvider;
 use acmex::protocol::Jwk;
 use acmex::repository::{FileSecretStore, MemoryRepository};
 use acmex::server::worker::{WorkflowWorkerComponents, WorkflowWorkerSettings, register_executors};
+use acmex::types::ChallengeType;
 use acmex::workflow::WorkflowEngine;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -68,6 +70,15 @@ impl PebbleEnv {
             domain: env_or("PEBBLE_E2E_DOMAIN", "acmex-test.example.com"),
             trust_anchor_pem_file: std::env::var("PEBBLE_TRUST_ANCHOR_PEM_FILE").ok(),
         }
+    }
+}
+
+fn chall_host(name: impl AsRef<str>) -> String {
+    let name = name.as_ref();
+    if name.ends_with('.') {
+        name.to_string()
+    } else {
+        format!("{name}.")
     }
 }
 
@@ -160,23 +171,16 @@ impl AcmeTransport for InsecurePebbleTransport {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-struct ChalltestsrvPresenter {
+struct ChalltestsrvAdmin {
     admin: String,
-    /// record name + value hash → TXT value. This is an optimization for the
-    /// single-process E2E path; observe still falls back to the challtestsrv
-    /// dump so rebuilt presenters can verify by the persisted hash alone.
-    txt_values: Arc<tokio::sync::Mutex<HashMap<(String, String), String>>>,
 }
 
-impl ChalltestsrvPresenter {
+impl ChalltestsrvAdmin {
     fn new(admin: String) -> Self {
-        Self {
-            admin,
-            txt_values: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        }
+        Self { admin }
     }
 
-    async fn admin_post(&self, path: &str, body: serde_json::Value) -> acmex::error::Result<()> {
+    async fn post(&self, path: &str, body: serde_json::Value) -> acmex::error::Result<()> {
         let response = reqwest::Client::new()
             .post(format!("{}{path}", self.admin))
             .json(&body)
@@ -192,26 +196,54 @@ impl ChalltestsrvPresenter {
         }
         Ok(())
     }
+
+    async fn get_text(&self, path: &str) -> acmex::error::Result<String> {
+        let response = reqwest::Client::new()
+            .get(format!("{}{path}", self.admin))
+            .send()
+            .await
+            .map_err(|e| acmex::error::AcmeError::transport(format!("challtestsrv: {e}")))?;
+        Ok(response.text().await.unwrap_or_default())
+    }
+}
+
+#[derive(Clone)]
+struct ChalltestsrvDnsPresenter {
+    admin: ChalltestsrvAdmin,
+    /// record name + value hash → TXT value. This is an optimization for the
+    /// single-process E2E path; observe still falls back to the challtestsrv
+    /// dump so rebuilt presenters can verify by the persisted hash alone.
+    txt_values: Arc<tokio::sync::Mutex<HashMap<(String, String), String>>>,
+}
+
+impl ChalltestsrvDnsPresenter {
+    fn new(admin: String) -> Self {
+        Self {
+            admin: ChalltestsrvAdmin::new(admin),
+            txt_values: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 #[async_trait]
-impl ChallengePresenter for ChalltestsrvPresenter {
-    fn kind(&self) -> acmex::types::ChallengeType {
-        acmex::types::ChallengeType::Dns01
+impl ChallengePresenter for ChalltestsrvDnsPresenter {
+    fn kind(&self) -> ChallengeType {
+        ChallengeType::Dns01
     }
 
     async fn prepare(&self, request: PrepareChallenge) -> acmex::error::Result<ChallengeLease> {
         use sha2::{Digest, Sha256};
-        let record_name = format!("_acme-challenge.{}", request.session.identifier);
+        let record_name = chall_host(format!("_acme-challenge.{}", request.session.identifier));
         let txt_value = dns01_validation_value(&request.key_authorization);
-        self.admin_post(
-            "/set-txt",
-            serde_json::json!({
-                "host": record_name,
-                "value": txt_value,
-            }),
-        )
-        .await?;
+        self.admin
+            .post(
+                "/set-txt",
+                serde_json::json!({
+                    "host": record_name,
+                    "value": txt_value,
+                }),
+            )
+            .await?;
 
         let mut hasher = Sha256::new();
         hasher.update(txt_value.as_bytes());
@@ -226,7 +258,7 @@ impl ChallengePresenter for ChalltestsrvPresenter {
             id: acmex::domain::ChallengeLeaseId::generate(),
             operation_id: request.session.operation_id.clone(),
             identifier: request.session.identifier.clone(),
-            challenge_type: acmex::types::ChallengeType::Dns01,
+            challenge_type: ChallengeType::Dns01,
             locator: ChallengeLeaseLocator::Dns {
                 provider_id: "challtestsrv".to_string(),
                 zone: request
@@ -272,12 +304,7 @@ impl ChallengePresenter for ChalltestsrvPresenter {
                 });
             }
         };
-        let dump = reqwest::Client::new()
-            .get(format!("{}/dump-dns", self.admin))
-            .send()
-            .await
-            .map_err(|e| acmex::error::AcmeError::transport(format!("dump-dns: {e}")))?;
-        let body = dump.text().await.unwrap_or_default();
+        let body = self.admin.get_text("/dump-dns").await?;
         let expected_visible = cached_value
             .as_deref()
             .is_some_and(|value| body.contains(record_name.as_str()) && body.contains(value));
@@ -304,7 +331,8 @@ impl ChallengePresenter for ChalltestsrvPresenter {
                 value_hash,
                 ..
             } => {
-                self.admin_post("/clear-txt", serde_json::json!({ "host": record_name }))
+                self.admin
+                    .post("/clear-txt", serde_json::json!({ "host": record_name }))
                     .await?;
                 self.txt_values
                     .lock()
@@ -317,41 +345,194 @@ impl ChallengePresenter for ChalltestsrvPresenter {
     }
 }
 
+#[derive(Clone)]
+struct ChalltestsrvHttpPresenter {
+    admin: ChalltestsrvAdmin,
+}
+
+impl ChalltestsrvHttpPresenter {
+    fn new(admin: String) -> Self {
+        Self {
+            admin: ChalltestsrvAdmin::new(admin),
+        }
+    }
+}
+
+#[async_trait]
+impl ChallengePresenter for ChalltestsrvHttpPresenter {
+    fn kind(&self) -> ChallengeType {
+        ChallengeType::Http01
+    }
+
+    async fn prepare(&self, request: PrepareChallenge) -> acmex::error::Result<ChallengeLease> {
+        if request.session.identifier.is_wildcard() {
+            return Err(acmex::error::AcmeError::invalid_input(
+                "HTTP-01 cannot validate wildcard DNS identifiers",
+            ));
+        }
+        let token = request
+            .key_authorization
+            .split('.')
+            .next()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| {
+                acmex::error::AcmeError::invalid_input("key authorization is missing token")
+            })?
+            .to_string();
+        self.admin
+            .post(
+                "/add-http01",
+                serde_json::json!({
+                    "token": token,
+                    "content": request.key_authorization,
+                }),
+            )
+            .await?;
+
+        let now = Timestamp::now();
+        Ok(ChallengeLease {
+            id: acmex::domain::ChallengeLeaseId::generate(),
+            operation_id: request.session.operation_id.clone(),
+            identifier: request.session.identifier.clone(),
+            challenge_type: ChallengeType::Http01,
+            locator: ChallengeLeaseLocator::Http {
+                agent_id: "challtestsrv".to_string(),
+                route_id: request.session.id,
+                token_hash: acmex::challenge::ChallengeSession::hash_token(&token),
+                endpoint: format!(
+                    "http://{}/.well-known/acme-challenge/{token}",
+                    request.session.identifier
+                ),
+            },
+            created_at: now,
+            expires_at: now.checked_add(jiff::Span::new().hours(1)).unwrap_or(now),
+            state: ChallengeLeaseState::Active,
+            cleanup_attempts: 0,
+            last_cleanup_error: None,
+            cleaned_at: None,
+        })
+    }
+
+    async fn observe(&self, _lease: &ChallengeLease) -> acmex::error::Result<Observation> {
+        Ok(Observation::Propagated)
+    }
+
+    async fn cleanup(&self, lease: &ChallengeLease) -> acmex::error::Result<CleanupOutcome> {
+        let ChallengeLeaseLocator::Http { endpoint, .. } = &lease.locator else {
+            return Ok(CleanupOutcome::AlreadyAbsent);
+        };
+        let token = endpoint.rsplit('/').next().unwrap_or_default();
+        self.admin
+            .post("/del-http01", serde_json::json!({ "token": token }))
+            .await?;
+        Ok(CleanupOutcome::Cleaned)
+    }
+}
+
+#[derive(Clone)]
+struct ChalltestsrvTlsAlpnPresenter {
+    admin: ChalltestsrvAdmin,
+}
+
+impl ChalltestsrvTlsAlpnPresenter {
+    fn new(admin: String) -> Self {
+        Self {
+            admin: ChalltestsrvAdmin::new(admin),
+        }
+    }
+}
+
+#[async_trait]
+impl ChallengePresenter for ChalltestsrvTlsAlpnPresenter {
+    fn kind(&self) -> ChallengeType {
+        ChallengeType::TlsAlpn01
+    }
+
+    async fn prepare(&self, request: PrepareChallenge) -> acmex::error::Result<ChallengeLease> {
+        if request.session.identifier.is_wildcard() {
+            return Err(acmex::error::AcmeError::invalid_input(
+                "TLS-ALPN-01 cannot validate wildcard DNS identifiers",
+            ));
+        }
+        let host = chall_host(request.session.identifier.acme_value());
+        self.admin
+            .post(
+                "/add-tlsalpn01",
+                serde_json::json!({
+                    "host": host,
+                    "content": request.key_authorization,
+                }),
+            )
+            .await?;
+
+        let now = Timestamp::now();
+        Ok(ChallengeLease {
+            id: acmex::domain::ChallengeLeaseId::generate(),
+            operation_id: request.session.operation_id.clone(),
+            identifier: request.session.identifier.clone(),
+            challenge_type: ChallengeType::TlsAlpn01,
+            locator: ChallengeLeaseLocator::Tls {
+                agent_id: "challtestsrv".to_string(),
+                route_id: request.session.id,
+                sni: host,
+                fingerprint: acmex::dns::record::txt_value_hash(&request.key_authorization),
+            },
+            created_at: now,
+            expires_at: now.checked_add(jiff::Span::new().hours(1)).unwrap_or(now),
+            state: ChallengeLeaseState::Active,
+            cleanup_attempts: 0,
+            last_cleanup_error: None,
+            cleaned_at: None,
+        })
+    }
+
+    async fn observe(&self, _lease: &ChallengeLease) -> acmex::error::Result<Observation> {
+        Ok(Observation::Propagated)
+    }
+
+    async fn cleanup(&self, lease: &ChallengeLease) -> acmex::error::Result<CleanupOutcome> {
+        let ChallengeLeaseLocator::Tls { sni, .. } = &lease.locator else {
+            return Ok(CleanupOutcome::AlreadyAbsent);
+        };
+        self.admin
+            .post("/del-tlsalpn01", serde_json::json!({ "host": sni }))
+            .await?;
+        Ok(CleanupOutcome::Cleaned)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // the test
 // ---------------------------------------------------------------------------
 
-/// Full issuance against a real Pebble: intent → durable operation → DNS-01
-/// via challtestsrv → CSR → finalize → download → strict verification →
-/// persisted active version. `#[ignore]` + `RUN_PEBBLE_E2E=1` gating keeps
-/// CI green without the environment while `scripts/run_pebble_e2e.sh` runs
-/// it as the L4 release gate.
-#[tokio::test]
-#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
-async fn pebble_full_issuance_dns01() {
+async fn run_pebble_issue(
+    challenge_type: ChallengeType,
+    suffix: &str,
+    full_lifecycle: bool,
+) -> VersionId {
     if std::env::var("RUN_PEBBLE_E2E").as_deref() != Ok("1") {
         eprintln!(
             "SKIP: RUN_PEBBLE_E2E=1 not set — see scripts/run_pebble_e2e.sh; \
              a skipped run is not a release pass"
         );
-        return;
+        return VersionId::new("ver_skipped").unwrap();
     }
     let env = PebbleEnv::load();
     let trust_anchor_pem = match env.trust_anchor_pem_file.as_deref() {
         Some(path) => match read_trust_anchor_pem(path) {
             Some(pem) => pem,
-            None => return,
+            None => return VersionId::new("ver_skipped").unwrap(),
         },
         None => {
             eprintln!(
                 "SKIP: PEBBLE_TRUST_ANCHOR_PEM_FILE is required for strict certificate \
                  trust verification. A skipped Pebble run is not a release pass."
             );
-            return;
+            return VersionId::new("ver_skipped").unwrap();
         }
     };
     println!(
-        "🎯 Pebble E2E against {} ({})",
+        "🎯 Pebble E2E {challenge_type} against {} ({})",
         env.directory_url, env.domain
     );
 
@@ -380,23 +561,38 @@ async fn pebble_full_issuance_dns01() {
     // Durable state + intent/lineage fixtures.
     let repositories = MemoryRepository::new().into_set();
     let identifiers = IdentifierSet::parse([env.domain.as_str()]).unwrap();
+    let lineage_id = LineageId::new(format!("lin_pebble_{suffix}")).unwrap();
+    let deploy_root = std::env::temp_dir().join(format!(
+        "acmex-pebble-deploy-{}-{suffix}",
+        std::process::id()
+    ));
     let intent = CertificateIntent {
-        id: IntentId::new("int_pebble").unwrap(),
+        id: IntentId::new(format!("int_pebble_{suffix}")).unwrap(),
         tenant_id: TenantId::default_tenant(),
         identifiers: identifiers.clone(),
         ca_policy: Default::default(),
-        validation_policy: Default::default(),
+        validation_policy: ValidationPolicy {
+            allowed_challenges: ChallengeSet::new([challenge_type]),
+            ..Default::default()
+        },
         key_policy: Default::default(),
         renewal_policy: Default::default(),
-        delivery_targets: Vec::new(),
-        idempotency_key: "pebble-e2e-intent".to_string(),
+        delivery_targets: vec![
+            DeliveryTarget::new(
+                "file",
+                DeliveryTargetKind::File,
+                deploy_root.to_string_lossy().as_ref(),
+            )
+            .unwrap(),
+        ],
+        idempotency_key: format!("pebble-e2e-intent-{suffix}"),
         generation: 1,
     };
     repositories.intents.create(intent.clone()).await.unwrap();
     repositories
         .lineages
         .create(acmex::domain::CertificateLineage::new(
-            LineageId::new("lin_pebble").unwrap(),
+            lineage_id.clone(),
             TenantId::default_tenant(),
             intent.id.clone(),
             identifiers,
@@ -424,7 +620,13 @@ async fn pebble_full_issuance_dns01() {
     let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
 
     let mut presenters = PresenterRegistry::new();
-    presenters.register(Arc::new(ChalltestsrvPresenter::new(
+    presenters.register(Arc::new(ChalltestsrvDnsPresenter::new(
+        env.challtestsrv_admin.clone(),
+    )));
+    presenters.register(Arc::new(ChalltestsrvHttpPresenter::new(
+        env.challtestsrv_admin.clone(),
+    )));
+    presenters.register(Arc::new(ChalltestsrvTlsAlpnPresenter::new(
         env.challtestsrv_admin.clone(),
     )));
 
@@ -457,7 +659,7 @@ async fn pebble_full_issuance_dns01() {
     );
 
     // Submit + drive to terminal (real wall-clock: Pebble polls + Retry-After).
-    let op_id = OperationId::new("op_pebble_e2e").unwrap();
+    let op_id = OperationId::new(format!("op_pebble_e2e_{suffix}")).unwrap();
     repositories
         .operations
         .create(OperationRecord::new(
@@ -465,10 +667,10 @@ async fn pebble_full_issuance_dns01() {
             OperationKind::Issue,
             OperationSubject {
                 intent_id: Some(intent.id.clone()),
-                lineage_id: Some(LineageId::new("lin_pebble").unwrap()),
+                lineage_id: Some(lineage_id.clone()),
                 version_id: None,
             },
-            Some("pebble-e2e".to_string()),
+            Some(format!("pebble-e2e-{suffix}")),
             None,
             Timestamp::now(),
         ))
@@ -512,8 +714,9 @@ async fn pebble_full_issuance_dns01() {
         record.steps
     );
 
-    // The certificate was persisted and activated.
-    let version_id = acmex::domain::VersionId::new(format!("ver_{op_id}")).unwrap();
+    // The certificate was persisted, then the required File sink deploy
+    // operation must pass before activation.
+    let version_id = VersionId::new(format!("ver_{op_id}")).unwrap();
     let version = repositories
         .versions
         .get(&version_id)
@@ -521,18 +724,185 @@ async fn pebble_full_issuance_dns01() {
         .unwrap()
         .unwrap_or_else(|| panic!("version {version_id} not persisted"))
         .value;
-    assert_eq!(version.state, acmex::domain::VersionState::Active);
+    assert_eq!(version.state, acmex::domain::VersionState::Issued);
     assert!(version.certificate_chain_pem.contains("BEGIN CERTIFICATE"));
     assert!(!version.serial.is_empty());
+
+    let deploy_op = OperationId::new(format!("op_deploy_{version_id}_file")).unwrap();
+    let deploy_record = engine
+        .run_until_terminal(&deploy_op, Duration::from_secs(120))
+        .await
+        .unwrap();
+    assert_eq!(
+        deploy_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "deploy steps: {:#?}",
+        deploy_record.steps
+    );
+
+    let version = repositories
+        .versions
+        .get(&version_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .value;
+    assert_eq!(version.state, acmex::domain::VersionState::Active);
     let lineage = repositories
         .lineages
-        .get(&LineageId::new("lin_pebble").unwrap())
+        .get(&lineage_id)
         .await
         .unwrap()
         .unwrap()
         .value;
     assert_eq!(lineage.active_version_id.as_ref(), Some(&version_id));
 
+    if full_lifecycle {
+        let renew_op = OperationId::new(format!("op_pebble_renew_{suffix}")).unwrap();
+        repositories
+            .operations
+            .create(OperationRecord::new(
+                renew_op.clone(),
+                OperationKind::Renew,
+                OperationSubject {
+                    intent_id: Some(intent.id.clone()),
+                    lineage_id: Some(lineage_id.clone()),
+                    version_id: None,
+                },
+                Some(format!("pebble-renew-{suffix}")),
+                None,
+                Timestamp::now(),
+            ))
+            .await
+            .unwrap();
+
+        let renewed_record = engine
+            .run_until_terminal(&renew_op, Duration::from_secs(300))
+            .await
+            .unwrap();
+        assert_eq!(
+            renewed_record.status,
+            acmex::domain::OperationStatus::Succeeded,
+            "renew steps: {:#?}",
+            renewed_record.steps
+        );
+        let renewed_version_id = VersionId::new(format!("ver_{renew_op}")).unwrap();
+        let renewed = repositories
+            .versions
+            .get(&renewed_version_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(renewed.replaces.as_ref(), Some(&version_id));
+        assert_eq!(renewed.state, acmex::domain::VersionState::Issued);
+
+        let renew_deploy_op =
+            OperationId::new(format!("op_deploy_{renewed_version_id}_file")).unwrap();
+        let renew_deploy_record = engine
+            .run_until_terminal(&renew_deploy_op, Duration::from_secs(120))
+            .await
+            .unwrap();
+        assert_eq!(
+            renew_deploy_record.status,
+            acmex::domain::OperationStatus::Succeeded,
+            "renew deploy steps: {:#?}",
+            renew_deploy_record.steps
+        );
+
+        let old = repositories
+            .versions
+            .get(&version_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(old.state, acmex::domain::VersionState::Superseded);
+        assert_eq!(old.superseded_by.as_ref(), Some(&renewed_version_id));
+        let active_lineage = repositories
+            .lineages
+            .get(&lineage_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(
+            active_lineage.active_version_id.as_ref(),
+            Some(&renewed_version_id)
+        );
+
+        let revoke_op = OperationId::new(format!("op_pebble_revoke_{suffix}")).unwrap();
+        repositories
+            .operations
+            .create(OperationRecord::new(
+                revoke_op.clone(),
+                OperationKind::Revoke,
+                OperationSubject {
+                    intent_id: Some(intent.id.clone()),
+                    lineage_id: Some(lineage_id.clone()),
+                    version_id: Some(renewed_version_id.clone()),
+                },
+                Some(format!("pebble-revoke-{suffix}")),
+                None,
+                Timestamp::now(),
+            ))
+            .await
+            .unwrap();
+
+        let revoke_record = engine
+            .run_until_terminal(&revoke_op, Duration::from_secs(180))
+            .await
+            .unwrap();
+        assert_eq!(
+            revoke_record.status,
+            acmex::domain::OperationStatus::Succeeded,
+            "revoke steps: {:#?}",
+            revoke_record.steps
+        );
+        let revoked = repositories
+            .versions
+            .get(&renewed_version_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(revoked.state, acmex::domain::VersionState::Revoked);
+    }
+
     let _ = std::fs::remove_dir_all(&key_dir);
-    println!("✅ Pebble E2E succeeded: version {} active", version.id);
+    let _ = std::fs::remove_dir_all(&deploy_root);
+    println!(
+        "✅ Pebble E2E {challenge_type} succeeded: version {} active",
+        version.id
+    );
+    version_id
+}
+
+/// Full issuance against a real Pebble with DNS-01 via challtestsrv.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_full_issuance_dns01() {
+    let _ = run_pebble_issue(ChallengeType::Dns01, "dns01", false).await;
+}
+
+/// Full issuance against a real Pebble with HTTP-01 via challtestsrv.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_full_issuance_http01() {
+    let _ = run_pebble_issue(ChallengeType::Http01, "http01", false).await;
+}
+
+/// Full issuance against a real Pebble with TLS-ALPN-01 via challtestsrv.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_full_issuance_tls_alpn01() {
+    let _ = run_pebble_issue(ChallengeType::TlsAlpn01, "tlsalpn01", false).await;
+}
+
+/// Full DNS-01 lifecycle against Pebble: initial issue, File sink activation,
+/// renewal replacement, File sink activation, and real CA revocation.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_dns01_renewal_and_revocation() {
+    let _ = run_pebble_issue(ChallengeType::Dns01, "dns01_lifecycle", true).await;
 }

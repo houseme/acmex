@@ -6,8 +6,8 @@ tests into implied success.
 - Pebble: a real gated harness now exists (`tests/live_pebble_e2e.rs` +
   `scripts/docker-compose.pebble.yml`, driven by `scripts/run_pebble_e2e.sh`)
   but has NOT been executed in a prepared environment yet. Pebble validation
-  remains not-yet-passed until HTTP-01, DNS-01, TLS-ALPN-01, renewal,
-  revocation and restart evidence is produced by a green run.
+  remains not-yet-passed until the HTTP-01, DNS-01, TLS-ALPN-01, renewal,
+  revocation, restart and failure-rollback evidence is produced by a green run.
 - Let's Encrypt staging is not yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.

@@ -4,8 +4,9 @@
 #   RUN_PEBBLE_E2E=1 scripts/run_pebble_e2e.sh
 #
 # Starts pebble + challtestsrv via docker compose, runs
-# tests/live_pebble_e2e.rs (production executor set over real HTTPS, DNS-01
-# programmed through challtestsrv), and tears the environment down again.
+# tests/live_pebble_e2e.rs (production executor set over real HTTPS; DNS-01,
+# HTTP-01 and TLS-ALPN-01 programmed through challtestsrv), and tears the
+# environment down again.
 # A skipped run is not a release pass (exit 77).
 set -euo pipefail
 

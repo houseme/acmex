@@ -4,6 +4,8 @@
   "requireEAB": false,
   "certificate": "test/certs/localhost/cert.pem",
   "privateKey": "test/certs/localhost/key.pem",
+  "httpPort": 8052,
+  "tlsPort": 8051,
   "retryAfterAuth": { "low": 1, "high": 2 },
   "retryAfterOrderReady": { "low": 1, "high": 2 },
   "validations": { "none": 5 },

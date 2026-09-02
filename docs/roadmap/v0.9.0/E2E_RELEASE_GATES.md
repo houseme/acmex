@@ -52,12 +52,13 @@ brings up pebble + challtestsrv via `scripts/docker-compose.pebble.yml` (pebble
 resolves through challtestsrv's DNS) and runs
 `tests/live_pebble_e2e.rs` — the full production executor set
 (`server::worker::register_executors`) over real HTTPS (TLS verification
-disabled; Pebble's certificate is invalid by design), with DNS-01 programmed
-through the challtestsrv admin API, driving intent → order → challenge → CSR →
-finalize → download → strict verification → persisted active version. It has
-not yet been *executed* in a prepared environment (no docker in the dev
-sandbox) — an executed run is still required before L4 counts as passed.
-HTTP-01/TLS-ALPN-01 variants against Pebble remain to be added.
+disabled; Pebble's certificate is invalid by design), with DNS-01, HTTP-01
+and TLS-ALPN-01 programmed through the challtestsrv admin API, driving
+intent → order → challenge → CSR → finalize → download → strict verification
+→ File sink deploy → activation. The DNS-01 lifecycle scenario also covers
+renewal replacement and CA revocation. It has not yet been *executed* in a
+prepared environment (no docker in the dev sandbox) — an executed run is still
+required before L4 counts as passed.
 
 Successful runs archive `environment.txt`, `cargo-test-live-pebble-e2e.log`,
 and `compose.log` under `target/pebble-e2e/<timestamp>/`; CI uploads the
