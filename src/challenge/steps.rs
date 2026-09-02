@@ -29,7 +29,7 @@ use crate::ca_backend::{
     AccountHandle, AuthorizationRef, ChallengeRef, ExternalAccountBindingRef, OrderHandle,
     OrderRequest,
 };
-use crate::domain::challenge::ChallengeLeaseState;
+use crate::domain::challenge::{ChallengeLeaseLocator, ChallengeLeaseState};
 use crate::domain::{
     ClassifiedError, ErrorClass, OperationRecord, WorkflowStepKind, error_codes,
     validate_order_policy,
@@ -166,6 +166,45 @@ fn ca_challenge_error_summary(
         .unwrap_or_else(|| "authorization invalid".to_string())
 }
 
+fn record_ca_trace(ca_id: &str) {
+    tracing::Span::current().record("ca_id", tracing::field::display(ca_id));
+}
+
+fn identifier_trace_hash(identifier: &crate::domain::Identifier) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(identifier.acme_type().as_bytes());
+    hasher.update(b":");
+    hasher.update(identifier.acme_value().as_bytes());
+    format!("sha256:{}", &hex::encode(hasher.finalize())[..16])
+}
+
+fn locator_provider_id(locator: &ChallengeLeaseLocator) -> &str {
+    match locator {
+        ChallengeLeaseLocator::Dns { provider_id, .. } => provider_id,
+        ChallengeLeaseLocator::Http { agent_id, .. }
+        | ChallengeLeaseLocator::Tls { agent_id, .. } => agent_id,
+    }
+}
+
+fn record_challenge_trace(session: &ChallengeSession, locator: Option<&ChallengeLeaseLocator>) {
+    let span = tracing::Span::current();
+    span.record(
+        "challenge_type",
+        tracing::field::display(session.challenge_type.as_str()),
+    );
+    span.record(
+        "identifier_hash",
+        tracing::field::display(identifier_trace_hash(&session.identifier)),
+    );
+    if let Some(locator) = locator {
+        span.record(
+            "provider_id",
+            tracing::field::display(locator_provider_id(locator)),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EnsureAccount
 // ---------------------------------------------------------------------------
@@ -227,6 +266,7 @@ impl StepExecutor for EnsureAccountStep {
     }
 
     async fn execute(&self, _ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account_ref = self.account_ref();
         match self.deps.backend.ensure_account(&account_ref).await {
             Ok(handle) => {
@@ -350,6 +390,7 @@ impl StepExecutor for CreateOrderStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         // Idempotency: a persisted handle from a previous attempt wins.
         if let Ok(payload) =
             read_payload::<OrderPayload>(ctx.operation, WorkflowStepKind::CreateOrResumeOrder)
@@ -466,6 +507,7 @@ impl StepExecutor for LoadAuthorizationsStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account =
             match read_payload::<AccountPayload>(ctx.operation, WorkflowStepKind::EnsureAccount) {
                 Ok(payload) => payload.account,
@@ -549,6 +591,7 @@ impl StepExecutor for PrepareChallengesStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let payload = match read_payload::<AuthorizationsPayload>(
             ctx.operation,
             WorkflowStepKind::LoadAuthorizations,
@@ -694,6 +737,7 @@ impl StepExecutor for PrepareChallengesStep {
                 .await
             {
                 Ok(lease) => {
+                    record_challenge_trace(&session, Some(&lease.locator));
                     let _ = repositories.challenge_leases.create(lease.clone()).await;
                     let prepared = session
                         .transition(ChallengeSessionState::Prepared)
@@ -762,6 +806,7 @@ impl StepExecutor for WaitPropagationStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let repositories = ctx.repositories;
         let sessions = repositories
             .challenge_sessions
@@ -819,6 +864,7 @@ impl StepExecutor for WaitPropagationStep {
             else {
                 return retryable("session lease missing");
             };
+            record_challenge_trace(session, Some(&lease.locator));
             let Some(presenter) = self.deps.presenters.get(session.challenge_type) else {
                 return policy_error("no presenter for session");
             };
@@ -936,6 +982,7 @@ impl StepExecutor for AcknowledgeChallengesStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account =
             match read_payload::<AccountPayload>(ctx.operation, WorkflowStepKind::EnsureAccount) {
                 Ok(payload) => payload.account,
@@ -953,6 +1000,7 @@ impl StepExecutor for AcknowledgeChallengesStep {
             if session.state != ChallengeSessionState::Propagated {
                 continue; // already acknowledged or not yet propagated
             }
+            record_challenge_trace(&session, None);
             let result = self
                 .deps
                 .backend
@@ -1013,6 +1061,7 @@ impl StepExecutor for WaitAuthorizationsStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account =
             match read_payload::<AccountPayload>(ctx.operation, WorkflowStepKind::EnsureAccount) {
                 Ok(payload) => payload.account,
@@ -1032,6 +1081,7 @@ impl StepExecutor for WaitAuthorizationsStep {
             if session.state == ChallengeSessionState::Valid {
                 continue;
             }
+            record_challenge_trace(&session, None);
             let result = self
                 .deps
                 .backend
@@ -1201,6 +1251,7 @@ pub async fn cleanup_operation_leases(
         if lease.state == ChallengeLeaseState::Cleaned {
             continue;
         }
+        record_challenge_trace(&session, Some(&lease.locator));
         let Some(presenter) = presenters.get(lease.challenge_type) else {
             continue;
         };
@@ -1249,6 +1300,7 @@ impl StepExecutor for CleanupChallengesStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         match cleanup_operation_leases(&self.deps.presenters, ctx.repositories, ctx.operation).await
         {
             Ok(_) => StepResult::done(),

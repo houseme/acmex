@@ -454,23 +454,478 @@ pub struct RepositorySet {
     pub clock: Arc<dyn Clock>,
 }
 
-/// Coarse error-class label for repository failures (T11 metrics
-/// convention).
-///
-/// Mirrors the mapping of `renewal::acme_error_class_label`, with one
-/// addition: storage-native variants (`Storage`, `Io`, `Json`) map to
-/// `"storage"` instead of falling through to `"internal"`, because they
-/// dominate repository errors and deserve their own low-cardinality class.
-pub(crate) fn repository_error_class(err: &AcmeError) -> &'static str {
-    match err {
-        AcmeError::Storage(_) | AcmeError::Io(_) | AcmeError::Json(_) => "storage",
-        AcmeError::RateLimited(_) => "rate_limited",
-        AcmeError::Timeout(_) | AcmeError::Transport(_) => "retryable",
-        AcmeError::NotFound(_) => "not_found",
-        AcmeError::Conflict(_) => "conflict",
-        AcmeError::Configuration(_) => "configuration",
-        AcmeError::InvalidInput(_) => "invalid_input",
-        _ => "internal",
+impl RepositorySet {
+    /// Returns a repository set that records failed repository calls in
+    /// `acmex_repository_errors_total{backend,operation}`.
+    ///
+    /// The wrapper sits at the trait-object boundary, so all memory/file/redis
+    /// compatible backends and aggregate repositories share one observability
+    /// path instead of scattering metrics calls through workflow code.
+    pub fn observe_errors(self, metrics: crate::metrics::SharedMetrics) -> Self {
+        let backend = self.backend;
+        Self {
+            backend,
+            intents: Arc::new(ObservedRepository::new(
+                self.intents,
+                backend,
+                metrics.clone(),
+            )),
+            lineages: Arc::new(ObservedRepository::new(
+                self.lineages,
+                backend,
+                metrics.clone(),
+            )),
+            versions: Arc::new(ObservedRepository::new(
+                self.versions,
+                backend,
+                metrics.clone(),
+            )),
+            operations: Arc::new(ObservedRepository::new(
+                self.operations,
+                backend,
+                metrics.clone(),
+            )),
+            challenge_leases: Arc::new(ObservedRepository::new(
+                self.challenge_leases,
+                backend,
+                metrics.clone(),
+            )),
+            challenge_sessions: Arc::new(ObservedRepository::new(
+                self.challenge_sessions,
+                backend,
+                metrics.clone(),
+            )),
+            deployments: Arc::new(ObservedRepository::new(
+                self.deployments,
+                backend,
+                metrics.clone(),
+            )),
+            accounts: Arc::new(ObservedRepository::new(
+                self.accounts,
+                backend,
+                metrics.clone(),
+            )),
+            outbox: Arc::new(ObservedRepository::new(
+                self.outbox,
+                backend,
+                metrics.clone(),
+            )),
+            leases: Arc::new(ObservedRepository::new(
+                self.leases,
+                backend,
+                metrics.clone(),
+            )),
+            manifests: Arc::new(ObservedRepository::new(self.manifests, backend, metrics)),
+            clock: self.clock,
+        }
+    }
+}
+
+/// Closed operation categories for `acmex_repository_errors_total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryOperation {
+    /// Single-entity lookups and point reads.
+    Read,
+    /// Creates and ordinary writes.
+    Write,
+    /// Lists and filtered scans.
+    Scan,
+    /// Compare-and-set, lease and fencing mutations.
+    Cas,
+    /// Legacy migration manifest reads/writes.
+    Migrate,
+}
+
+impl RepositoryOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Scan => "scan",
+            Self::Cas => "cas",
+            Self::Migrate => "migrate",
+        }
+    }
+}
+
+struct ObservedRepository<T: ?Sized> {
+    inner: Arc<T>,
+    backend: &'static str,
+    metrics: crate::metrics::SharedMetrics,
+}
+
+impl<T: ?Sized> ObservedRepository<T> {
+    fn new(inner: Arc<T>, backend: &'static str, metrics: crate::metrics::SharedMetrics) -> Self {
+        Self {
+            inner,
+            backend,
+            metrics,
+        }
+    }
+
+    fn observe<R>(&self, operation: RepositoryOperation, result: Result<R>) -> Result<R> {
+        if result.is_err() {
+            self.metrics
+                .repository_errors_total
+                .with_label_values(&[self.backend, operation.as_str()])
+                .inc();
+        }
+        result
+    }
+}
+
+#[async_trait]
+impl IntentRepository for ObservedRepository<dyn IntentRepository> {
+    async fn create(&self, intent: CertificateIntent) -> Result<CreateOutcome> {
+        let result = self.inner.create(intent).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(
+        &self,
+        id: &crate::domain::IntentId,
+    ) -> Result<Option<Versioned<CertificateIntent>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        intent: CertificateIntent,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, intent).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list(&self) -> Result<Vec<Versioned<CertificateIntent>>> {
+        let result = self.inner.list().await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl LineageRepository for ObservedRepository<dyn LineageRepository> {
+    async fn create(&self, lineage: CertificateLineage) -> Result<CreateOutcome> {
+        let result = self.inner.create(lineage).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(
+        &self,
+        id: &crate::domain::LineageId,
+    ) -> Result<Option<Versioned<CertificateLineage>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        lineage: CertificateLineage,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, lineage).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list(&self) -> Result<Vec<Versioned<CertificateLineage>>> {
+        let result = self.inner.list().await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl VersionRepository for ObservedRepository<dyn VersionRepository> {
+    async fn create(&self, version: CertificateVersion) -> Result<CreateOutcome> {
+        let result = self.inner.create(version).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(
+        &self,
+        id: &crate::domain::VersionId,
+    ) -> Result<Option<Versioned<CertificateVersion>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        version: CertificateVersion,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, version).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list_by_lineage(
+        &self,
+        lineage_id: &crate::domain::LineageId,
+    ) -> Result<Vec<Versioned<CertificateVersion>>> {
+        let result = self.inner.list_by_lineage(lineage_id).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl OperationRepository for ObservedRepository<dyn OperationRepository> {
+    async fn create(&self, operation: OperationRecord) -> Result<CreateOutcome> {
+        let result = self.inner.create(operation).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(&self, id: &OperationId) -> Result<Option<Versioned<OperationRecord>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        operation: OperationRecord,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, operation).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list_ready(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<Versioned<OperationRecord>>> {
+        let result = self.inner.list_ready(now, limit).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+
+    async fn list_by_status(
+        &self,
+        status: OperationStatus,
+        limit: usize,
+    ) -> Result<Vec<Versioned<OperationRecord>>> {
+        let result = self.inner.list_by_status(status, limit).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+
+    async fn find_by_idempotency(
+        &self,
+        idempotency_key: &str,
+        request_hash: &str,
+    ) -> Result<Option<Versioned<OperationRecord>>> {
+        let result = self
+            .inner
+            .find_by_idempotency(idempotency_key, request_hash)
+            .await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Versioned<OperationRecord>>> {
+        let result = self.inner.find_by_idempotency_key(idempotency_key).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+}
+
+#[async_trait]
+impl ChallengeLeaseRepository for ObservedRepository<dyn ChallengeLeaseRepository> {
+    async fn create(&self, lease: ChallengeLease) -> Result<CreateOutcome> {
+        let result = self.inner.create(lease).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(
+        &self,
+        id: &crate::domain::ChallengeLeaseId,
+    ) -> Result<Option<Versioned<ChallengeLease>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        lease: ChallengeLease,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, lease).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list_needing_cleanup(&self) -> Result<Vec<Versioned<ChallengeLease>>> {
+        let result = self.inner.list_needing_cleanup().await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl ChallengeSessionRepository for ObservedRepository<dyn ChallengeSessionRepository> {
+    async fn create(&self, session: crate::challenge::ChallengeSession) -> Result<CreateOutcome> {
+        let result = self.inner.create(session).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<Versioned<crate::challenge::ChallengeSession>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        session: crate::challenge::ChallengeSession,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, session).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list_by_operation(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<Vec<Versioned<crate::challenge::ChallengeSession>>> {
+        let result = self.inner.list_by_operation(operation_id).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl DeploymentRepository for ObservedRepository<dyn DeploymentRepository> {
+    async fn create(&self, deployment: DeploymentRecord) -> Result<CreateOutcome> {
+        let result = self.inner.create(deployment).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(
+        &self,
+        id: &crate::domain::DeploymentId,
+    ) -> Result<Option<Versioned<DeploymentRecord>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn update(
+        &self,
+        expected_revision: Revision,
+        deployment: DeploymentRecord,
+    ) -> Result<CasOutcome> {
+        let result = self.inner.update(expected_revision, deployment).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn list_by_version(
+        &self,
+        version_id: &crate::domain::VersionId,
+    ) -> Result<Vec<Versioned<DeploymentRecord>>> {
+        let result = self.inner.list_by_version(version_id).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+
+    async fn list_by_lineage(
+        &self,
+        lineage_id: &crate::domain::LineageId,
+    ) -> Result<Vec<Versioned<DeploymentRecord>>> {
+        let result = self.inner.list_by_lineage(lineage_id).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl AccountRepository for ObservedRepository<dyn AccountRepository> {
+    async fn upsert(&self, account: AccountRecord) -> Result<()> {
+        let result = self.inner.upsert(account).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn get(&self, id: &str) -> Result<Option<Versioned<AccountRecord>>> {
+        let result = self.inner.get(id).await;
+        self.observe(RepositoryOperation::Read, result)
+    }
+
+    async fn list(&self) -> Result<Vec<Versioned<AccountRecord>>> {
+        let result = self.inner.list().await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+}
+
+#[async_trait]
+impl OutboxRepository for ObservedRepository<dyn OutboxRepository> {
+    async fn append(
+        &self,
+        event_type: &str,
+        payload: Value,
+        event_id: Option<String>,
+    ) -> Result<u64> {
+        let result = self.inner.append(event_type, payload, event_id).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn list_pending(&self, limit: usize) -> Result<Vec<OutboxEvent>> {
+        let result = self.inner.list_pending(limit).await;
+        self.observe(RepositoryOperation::Scan, result)
+    }
+
+    async fn mark_processed(&self, sequence: u64) -> Result<()> {
+        let result = self.inner.mark_processed(sequence).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn mark_failed(
+        &self,
+        sequence: u64,
+        error: &str,
+        next_attempt_at: Option<Timestamp>,
+    ) -> Result<()> {
+        let result = self
+            .inner
+            .mark_failed(sequence, error, next_attempt_at)
+            .await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn dead_letter(&self, sequence: u64, reason: &str) -> Result<()> {
+        let result = self.inner.dead_letter(sequence, reason).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+
+    async fn requeue(&self, sequence: u64) -> Result<()> {
+        let result = self.inner.requeue(sequence).await;
+        self.observe(RepositoryOperation::Write, result)
+    }
+}
+
+#[async_trait]
+impl LeaseManager for ObservedRepository<dyn LeaseManager> {
+    async fn acquire(&self, key: &str, owner: &str, ttl: Duration) -> Result<LeaseOutcome> {
+        let result = self.inner.acquire(key, owner, ttl).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn renew(
+        &self,
+        key: &str,
+        owner: &str,
+        fencing_token: FencingToken,
+        ttl: Duration,
+    ) -> Result<Option<LeaseGrant>> {
+        let result = self.inner.renew(key, owner, fencing_token, ttl).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+
+    async fn release(&self, key: &str, owner: &str, fencing_token: FencingToken) -> Result<()> {
+        let result = self.inner.release(key, owner, fencing_token).await;
+        self.observe(RepositoryOperation::Cas, result)
+    }
+}
+
+#[async_trait]
+impl MigrationManifestStore for ObservedRepository<dyn MigrationManifestStore> {
+    async fn save_entry(&self, entry: MigrationManifestEntry) -> Result<()> {
+        let result = self.inner.save_entry(entry).await;
+        self.observe(RepositoryOperation::Migrate, result)
+    }
+
+    async fn entries(&self) -> Result<Vec<MigrationManifestEntry>> {
+        let result = self.inner.entries().await;
+        self.observe(RepositoryOperation::Migrate, result)
     }
 }
 
@@ -936,31 +1391,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn repository_error_class_is_coarse_and_stable() {
-        assert_eq!(
-            repository_error_class(&AcmeError::Storage("io".to_string())),
-            "storage"
-        );
-        assert_eq!(
-            repository_error_class(&AcmeError::Io(std::io::Error::other("io"))),
-            "storage"
-        );
-        assert_eq!(
-            repository_error_class(&AcmeError::RateLimited(None)),
-            "rate_limited"
-        );
-        assert_eq!(
-            repository_error_class(&AcmeError::Timeout("slow".to_string())),
-            "retryable"
-        );
-        assert_eq!(
-            repository_error_class(&AcmeError::Conflict("cas".to_string())),
-            "conflict"
-        );
-        assert_eq!(
-            repository_error_class(&AcmeError::Protocol("bug".to_string())),
-            "internal"
-        );
+    fn repository_operation_labels_are_closed_and_stable() {
+        assert_eq!(RepositoryOperation::Read.as_str(), "read");
+        assert_eq!(RepositoryOperation::Write.as_str(), "write");
+        assert_eq!(RepositoryOperation::Scan.as_str(), "scan");
+        assert_eq!(RepositoryOperation::Cas.as_str(), "cas");
+        assert_eq!(RepositoryOperation::Migrate.as_str(), "migrate");
+        for operation in ["read", "write", "scan", "cas", "migrate"] {
+            assert!(crate::metrics::validate_metric_label(
+                "operation",
+                operation
+            ));
+        }
     }
 
     #[test]

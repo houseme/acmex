@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::Instrument;
 use x509_parser::prelude::FromDer;
 
 use crate::application::{ActorContext, CertificateApplication, RenewCertificate};
@@ -489,6 +490,7 @@ impl RenewalController {
     /// Attaches the shared metrics registry (T11): due renewals, failures
     /// and active-version expiry are recorded with low-cardinality labels.
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
         self
     }
@@ -607,8 +609,14 @@ impl RenewalController {
                 continue;
             };
 
+            let ca = ca_metric_label(&intent.value);
             let decision = self
                 .decision_for(&lineage, &version.value, &intent.value)
+                .instrument(tracing::debug_span!(
+                    "renewal.lineage",
+                    lineage_id = %lineage.id,
+                    ca_id = %ca
+                ))
                 .await?;
             self.record_decision_metrics(&intent.value, &version.value, &decision, &mut due_counts);
             let should_create = decision.should_create_operation();

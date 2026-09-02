@@ -218,8 +218,8 @@ fn temp_dir(label: &str) -> TempDir {
     TempDir { path }
 }
 
-/// Repository failures (not delivery failures) must surface as
-/// `acmex_repository_errors_total{backend="file",...}`.
+/// Repository failures (not delivery failures) must surface through the
+/// repository decorator as `acmex_repository_errors_total{backend,operation}`.
 ///
 /// The `outbox` aggregate directory is replaced by a regular file so
 /// `list_pending` fails before any delivery is attempted.
@@ -242,11 +242,14 @@ async fn outbox_consumer_counts_repository_errors_not_delivery_errors() {
     let text = metrics.gather_text();
     let line = text
         .lines()
-        .find(|l| l.starts_with(r#"acmex_repository_errors_total{backend="file""#))
+        .find(|l| {
+            l.starts_with(r#"acmex_repository_errors_total{backend="file""#)
+                && l.contains(r#"operation="scan""#)
+        })
         .unwrap_or_else(|| panic!("missing repository_errors_total series:\n{text}"));
     assert!(
-        line.contains(r#"error_class="storage""#),
-        "unexpected error class: {line}"
+        !line.contains("error_class"),
+        "repository error labels must be backend+operation only: {line}"
     );
     assert!(
         line.ends_with(" 1"),

@@ -25,7 +25,10 @@ use super::health::{HealthCheck, diagnostics_handler, health_handler, ready_hand
 use super::order::{create_order, get_order, list_orders, trigger_full_renewal};
 use super::webhook::{WebhookHandler, webhook_handler};
 use crate::AcmeClient;
-use crate::application::{ApplicationServiceBuilder, CertificateApplication, CertificateQuery};
+use crate::application::{
+    ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
+    RepositoryCertificateApplication,
+};
 use crate::config::Config;
 use crate::error::Result;
 use crate::notifications::WebhookManager;
@@ -121,16 +124,21 @@ pub async fn start_server(
     let webhook = Arc::new(WebhookHandler::new(webhook_manager));
     let tasks = Arc::new(RwLock::new(HashMap::new()));
 
-    let (application_service, repositories) = ApplicationServiceBuilder::from_config(&config)
+    let (_, repositories) = ApplicationServiceBuilder::from_config(&config)
         .await?
         .build()?;
-    let query: Arc<dyn CertificateQuery> = application_service.clone();
-    let application: Arc<dyn CertificateApplication> = application_service;
 
     // Shared metrics registry: observed by the ACME transport and exposed on
     // the dedicated scrape listener (see `metrics_endpoint`).
     let metrics: crate::metrics::SharedMetrics = Arc::new(crate::metrics::MetricsRegistry::new());
     super::metrics_endpoint::spawn_from_config(&config, metrics.clone());
+
+    let api_repositories = repositories.clone().observe_errors(metrics.clone());
+    let application_service = Arc::new(RepositoryCertificateApplication::new(
+        api_repositories.clone(),
+    ));
+    let query: Arc<dyn CertificateQuery> = application_service.clone();
+    let application: Arc<dyn CertificateApplication> = application_service;
 
     // The durable workflow worker: real executors (CA backend, challenge
     // presenters, key provider, deployment orchestration) advancing queued
@@ -221,7 +229,7 @@ pub async fn start_server(
         api_keys,
         authorizer: Arc::new(PermissionAuthorizer),
         scheduler,
-        repositories: Some(repositories),
+        repositories: Some(api_repositories),
         application: Some(application),
         query: Some(query),
     };

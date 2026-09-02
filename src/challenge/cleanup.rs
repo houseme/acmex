@@ -50,6 +50,7 @@ impl ChallengeCleanupScanner {
     /// Attaches the shared metrics registry: `acmex_cleanup_pending` reflects
     /// the pending-lease backlog per challenge type and provider/agent.
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
         self
     }

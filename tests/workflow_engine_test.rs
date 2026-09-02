@@ -694,8 +694,8 @@ async fn file_backend_two_workers_consistent() {
 // repository failure metrics (T11)
 // ---------------------------------------------------------------------------
 
-/// Repository failures on the file backend must surface as
-/// `acmex_repository_errors_total{backend="file",...}`.
+/// Repository failures on the file backend must surface through the
+/// repository decorator as `acmex_repository_errors_total{backend,operation}`.
 ///
 /// `FileRepository::new` creates its aggregate directories eagerly, so the
 /// failure is forced after construction: the `operations` aggregate
@@ -722,11 +722,14 @@ async fn file_backend_repository_failures_increment_repository_errors_total() {
     let text = metrics.gather_text();
     let line = text
         .lines()
-        .find(|l| l.starts_with(r#"acmex_repository_errors_total{backend="file""#))
+        .find(|l| {
+            l.starts_with(r#"acmex_repository_errors_total{backend="file""#)
+                && l.contains(r#"operation="scan""#)
+        })
         .unwrap_or_else(|| panic!("missing repository_errors_total series:\n{text}"));
     assert!(
-        line.contains(r#"error_class="storage""#),
-        "unexpected error class: {line}"
+        !line.contains("error_class"),
+        "repository error labels must be backend+operation only: {line}"
     );
     let value: u64 = line
         .rsplit(' ')
@@ -968,4 +971,17 @@ async fn engine_steps_emit_convention_trace_fields() {
     assert_eq!(field_value(&step, "kind"), Some("issue"));
     assert_eq!(field_value(&step, "intent_id"), Some(intent_id.as_str()));
     assert_eq!(field_value(&step, "lineage_id"), Some(lineage_id.as_str()));
+    for fields in [&operation, &step] {
+        assert!(field_value(fields, "identifier").is_none());
+        assert!(field_value(fields, "token").is_none());
+        assert!(field_value(fields, "key_authorization").is_none());
+        assert!(
+            fields.iter().all(|(_, value)| {
+                !value.contains("example.com")
+                    && !value.contains("-----BEGIN")
+                    && !value.to_ascii_lowercase().contains("token")
+            }),
+            "trace fields must not expose identifiers or secrets: {fields:?}"
+        );
+    }
 }

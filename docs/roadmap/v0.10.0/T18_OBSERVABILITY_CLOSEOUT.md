@@ -79,8 +79,10 @@ cargo check --all-features && cargo check --no-default-features
 
 ## 7. 验收标准
 
-- [ ] `acmex_repository_errors_total{backend,operation}` 有真实打点与行为测试；Prometheus 示例与实现同名同标签。
-- [ ] Trace Convention 全部字段在对应 span 可观测；脱敏断言（无明文 identifier/密钥/token）有测试。
-- [ ] webhook 窗口外时间戳被拒并有测试；消费者校验规范文档化。
-- [ ] Prometheus rules 与 Grafana dashboard 以资产文件形式随仓库发布，文档引用之。
-- [ ] `SECURITY_OBSERVABILITY_HA.md` 无 "not yet" 段落；v0.9.0 审计对应条目可标记关闭。
+实现状态（2026-09-02，`houseme/v010-t18-observability`）：
+
+- [x] `acmex_repository_errors_total{backend,operation}` 有真实打点与行为测试；Prometheus 示例与实现同名同标签。
+- [x] Trace Convention 全部字段在对应 span 可观测；脱敏断言（无明文 identifier/密钥/token）有测试。
+- [x] webhook 窗口外时间戳被拒并有测试；消费者校验规范文档化。
+- [x] Prometheus rules 与 Grafana dashboard 以资产文件形式随仓库发布，文档引用之。
+- [x] `SECURITY_OBSERVABILITY_HA.md` 无 "not yet" 段落；v0.9.0 审计对应条目可标记关闭。

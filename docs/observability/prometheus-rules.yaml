@@ -1,0 +1,34 @@
+groups:
+  - name: acmex-v010
+    rules:
+      - alert: AcmeXCertificateExpiresSoon
+        expr: acmex_certificate_seconds_to_expiry{state="active"} < 172800
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Active certificate expires within 48 hours
+
+      - alert: AcmeXOutboxBacklog
+        expr: sum(acmex_outbox_pending) > 100
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: AcmeX webhook outbox backlog is growing
+
+      - alert: AcmeXRenewalFailures
+        expr: increase(acmex_renewal_failures_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: AcmeX renewal failure observed
+
+      - alert: AcmeXRepositoryErrors
+        expr: increase(acmex_repository_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: ticket
+        annotations:
+          summary: AcmeX repository errors observed

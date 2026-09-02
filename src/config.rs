@@ -727,6 +727,8 @@ pub struct WebhookConfig {
     pub signing_secret: Option<SecretRef>,
     #[serde(default = "default_webhook_timeout")]
     pub timeout_secs: u64,
+    #[serde(default = "default_webhook_replay_window")]
+    pub replay_window_secs: u64,
 }
 
 /// Email notification configuration.
@@ -848,6 +850,10 @@ fn default_webhook_format() -> String {
 }
 fn default_webhook_timeout() -> u64 {
     30
+}
+
+fn default_webhook_replay_window() -> u64 {
+    300
 }
 fn default_smtp_port() -> u16 {
     587
@@ -1263,6 +1269,7 @@ api_token = "file:/run/secrets/cf-token"
 url = "https://hooks.example.test/acmex"
 auth_token = "env:WEBHOOK_TOKEN"
 signing_secret = "vault:secret:acmex/webhooks:signing"
+replay_window_secs = 300
 
 [[notifications.email]]
 smtp_host = "smtp.example.test"
@@ -1288,6 +1295,7 @@ password = "env:SMTP_PASSWORD"
             notifications.webhooks[0].signing_secret,
             Some(SecretRef::Vault { .. })
         ));
+        assert_eq!(notifications.webhooks[0].replay_window_secs, 300);
         assert!(matches!(
             notifications.email[0].password,
             Some(SecretRef::Env { .. })

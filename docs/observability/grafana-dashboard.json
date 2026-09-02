@@ -1,0 +1,246 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "sum by (kind, result) (rate(acmex_operations_total[5m]))",
+          "legendFormat": "{{kind}} {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Operation Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, workflow_step) (rate(acmex_operation_step_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{workflow_step}} p95",
+          "refId": "A"
+        }
+      ],
+      "title": "Workflow Step P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, ca) (rate(acmex_acme_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{ca}} p95",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (ca, error_class) (rate(acmex_acme_requests_total{result=\"error\"}[5m]))",
+          "legendFormat": "{{ca}} {{error_class}}",
+          "refId": "B"
+        }
+      ],
+      "title": "ACME Requests",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, challenge_type, provider_type) (rate(acmex_challenge_propagation_seconds_bucket[5m])))",
+          "legendFormat": "{{challenge_type}} {{provider_type}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (challenge_type, provider_type) (acmex_challenge_cleanup_pending)",
+          "legendFormat": "cleanup {{challenge_type}} {{provider_type}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Challenge Propagation And Cleanup",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum by (ca, priority) (acmex_renewal_due)",
+          "legendFormat": "due {{ca}} {{priority}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (ca, error_class) (increase(acmex_renewal_failures_total[15m]))",
+          "legendFormat": "fail {{ca}} {{error_class}}",
+          "refId": "B"
+        },
+        {
+          "expr": "min by (ca, state) (acmex_certificate_seconds_to_expiry)",
+          "legendFormat": "expiry {{ca}} {{state}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Renewal Safety",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum by (sink_type, result) (rate(acmex_deployment_total[5m]))",
+          "legendFormat": "{{sink_type}} {{result}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (event_type) (acmex_outbox_pending)",
+          "legendFormat": "outbox {{event_type}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (backend, operation) (increase(acmex_repository_errors_total[5m]))",
+          "legendFormat": "repo {{backend}} {{operation}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Deployment, Outbox And Repository Errors",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "acmex",
+    "certificates"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "Prometheus",
+          "value": "${DS_PROMETHEUS}"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "AcmeX Certificate Control Plane",
+  "uid": "acmex-cert-control-plane",
+  "version": 1,
+  "weekStart": ""
+}

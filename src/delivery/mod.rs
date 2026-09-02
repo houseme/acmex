@@ -262,6 +262,7 @@ impl DeploymentOrchestrator {
     /// Attaches the shared metrics registry (T11): deployment attempts are
     /// counted per sink type with coarse result/error labels.
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
         self
     }

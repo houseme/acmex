@@ -135,7 +135,7 @@ impl MetricsRegistry {
         .unwrap();
         let repository_errors_total = IntCounterVec::new(
             Opts::new("acmex_repository_errors_total", "Repository errors"),
-            &["backend", "error_class"],
+            &["backend", "operation"],
         )
         .unwrap();
 
@@ -224,6 +224,7 @@ pub fn validate_metric_label(label: &str, value: &str) -> bool {
         "state",
         "workflow_step",
         "kind",
+        "operation",
     ];
     !FORBIDDEN_LABELS.contains(&label)
         && ALLOWED_LABELS.contains(&label)

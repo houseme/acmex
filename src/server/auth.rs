@@ -11,6 +11,7 @@ use axum::{
 };
 use jiff::Timestamp;
 use sha2::{Digest, Sha256};
+use tracing::Instrument;
 
 const SHA256_LEN: usize = 32;
 
@@ -304,8 +305,16 @@ pub async fn api_key_auth(
                 );
                 return Err(StatusCode::FORBIDDEN);
             }
+            let span = tracing::debug_span!(
+                "http.request",
+                tenant_id = %actor.tenant_id,
+                request_id = tracing::field::Empty,
+            );
+            if let Some(request_id) = actor.request_id.as_deref() {
+                span.record("request_id", tracing::field::display(request_id));
+            }
             req.extensions_mut().insert(actor);
-            Ok(next.run(req).await)
+            Ok(next.run(req).instrument(span).await)
         }
         _ => {
             tracing::warn!("Unauthorized access attempt to API");

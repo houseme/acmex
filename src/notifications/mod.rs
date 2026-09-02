@@ -5,7 +5,7 @@
 
 use crate::dns::spec::{EnvFileSecretResolver, SecretRef, SecretResolver};
 use crate::error::{AcmeError, Result};
-use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet, repository_error_class};
+use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
@@ -459,21 +459,13 @@ where
     /// the batch backlog per event type (a lower bound of the true backlog,
     /// which a single `list_pending` batch cannot observe).
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
         self
     }
 
     pub async fn run_once(&self) -> Result<OutboxConsumerReport> {
-        // Every error escaping the pass below comes from a repository call:
-        // delivery failures are classified outcomes accounted through
-        // `mark_failed`/`dead_letter`, never propagated (T11).
-        match self.run_once_inner().await {
-            Ok(report) => Ok(report),
-            Err(err) => {
-                self.record_repository_error(&err);
-                Err(err)
-            }
-        }
+        self.run_once_inner().await
     }
 
     async fn run_once_inner(&self) -> Result<OutboxConsumerReport> {
@@ -565,19 +557,6 @@ where
             .retry_backoff_base
             .saturating_mul(2_u32.saturating_pow(shift))
             .min(self.config.retry_backoff_max)
-    }
-
-    /// Records `acmex_repository_errors_total` for a repository failure
-    /// observed by the consumer (T11); delivery failures are excluded —
-    /// they are already accounted via `mark_failed`/`dead_letter`.
-    fn record_repository_error(&self, err: &AcmeError) {
-        let Some(metrics) = &self.metrics else {
-            return;
-        };
-        metrics
-            .repository_errors_total
-            .with_label_values(&[self.repositories.backend, repository_error_class(err)])
-            .inc();
     }
 }
 

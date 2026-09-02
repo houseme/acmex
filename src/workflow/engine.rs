@@ -9,9 +9,7 @@ use crate::domain::{
     StepRecord, StepStatus, WorkflowStepKind, error_codes,
 };
 use crate::error::{AcmeError, Result};
-use crate::repository::{
-    CasOutcome, CreateOutcome, LeaseOutcome, RepositorySet, Revision, repository_error_class,
-};
+use crate::repository::{CasOutcome, CreateOutcome, LeaseOutcome, RepositorySet, Revision};
 use tracing::Instrument;
 
 use super::{CompensationResult, StepContext, StepExecutor, StepResult, compute_backoff};
@@ -77,6 +75,7 @@ impl WorkflowEngine {
     /// outcomes and per-step durations are recorded with low-cardinality
     /// labels.
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
+        self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
         self
     }
@@ -162,10 +161,7 @@ impl WorkflowEngine {
             .await
         {
             Ok(ready) => ready,
-            Err(err) => {
-                self.record_repository_error(&err);
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         };
         let mut advanced = 0;
         for stored in ready {
@@ -175,7 +171,6 @@ impl WorkflowEngine {
                 Err(err) => {
                     // Repository failure (step failures arrive as
                     // classified `StepResult`s, never as `Err`).
-                    self.record_repository_error(&err);
                     tracing::warn!(
                         operation = stored.value.id.as_str(),
                         error = %err,
@@ -193,19 +188,13 @@ impl WorkflowEngine {
     pub async fn run_step(&self, id: &OperationId) -> Result<bool> {
         let Some(stored) = (match self.repositories.operations.get(id).await {
             Ok(stored) => stored,
-            Err(err) => {
-                self.record_repository_error(&err);
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         }) else {
             return Ok(false);
         };
         match self.process_one(&stored.value, stored.revision).await {
             Ok(advanced) => Ok(advanced),
-            Err(err) => {
-                self.record_repository_error(&err);
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 
@@ -770,18 +759,6 @@ impl WorkflowEngine {
         Ok(true)
     }
 
-    /// Records `acmex_repository_errors_total` for a repository failure
-    /// observed while listing, loading or advancing operations (T11).
-    fn record_repository_error(&self, err: &AcmeError) {
-        let Some(metrics) = &self.metrics else {
-            return;
-        };
-        metrics
-            .repository_errors_total
-            .with_label_values(&[self.repositories.backend, repository_error_class(err)])
-            .inc();
-    }
-
     /// Records `acmex_operations_total` for terminal outcomes.
     fn record_operation_terminal(&self, record: &OperationRecord) {
         let Some(metrics) = &self.metrics else {
@@ -921,6 +898,11 @@ fn step_span(record: &OperationRecord, step: WorkflowStepKind) -> tracing::Span 
         operation_id = %record.id,
         kind = %record.kind.as_str(),
         workflow_step = %step.as_str(),
+        ca_id = tracing::field::Empty,
+        challenge_type = tracing::field::Empty,
+        provider_id = tracing::field::Empty,
+        sink_id = tracing::field::Empty,
+        identifier_hash = tracing::field::Empty,
         intent_id = tracing::field::Empty,
         lineage_id = tracing::field::Empty,
         version_id = tracing::field::Empty,

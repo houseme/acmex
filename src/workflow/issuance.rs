@@ -142,6 +142,14 @@ fn classified_acme_protocol_error(detail: &str) -> Option<(StableErrorCode, &'st
     Some((code, class))
 }
 
+fn record_ca_trace(ca_id: &str) {
+    tracing::Span::current().record("ca_id", tracing::field::display(ca_id));
+}
+
+fn record_sink_trace(sink_id: &crate::domain::TargetId) {
+    tracing::Span::current().record("sink_id", tracing::field::display(sink_id));
+}
+
 fn read_payload<T: serde::de::DeserializeOwned>(
     record: &domain::OperationRecord,
     kind: WorkflowStepKind,
@@ -428,6 +436,7 @@ impl StepExecutor for FinalizeOrderStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account = match self.deps.account(ctx.operation) {
             Ok(account) => account,
             Err(result) => return result,
@@ -477,6 +486,7 @@ impl StepExecutor for WaitOrderStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account = match self.deps.account(ctx.operation) {
             Ok(account) => account,
             Err(result) => return result,
@@ -523,6 +533,7 @@ impl StepExecutor for DownloadCertificateStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account = match self.deps.account(ctx.operation) {
             Ok(account) => account,
             Err(result) => return result,
@@ -618,6 +629,9 @@ impl StepExecutor for VerifyCertificateStep {
             Ok(intent) => intent,
             Err(err) => return policy_reject(err.to_string()),
         };
+        if let Some(ca_id) = intent.ca_policy.ca_id.as_deref() {
+            record_ca_trace(ca_id);
+        }
 
         // Build the report incrementally; every failed check fails the step
         // with the full report attached so operators see *all* problems.
@@ -983,6 +997,7 @@ impl StepExecutor for ScheduleDeploymentsStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let version =
             match read_payload::<VersionPayload>(ctx.operation, WorkflowStepKind::PersistVersion) {
                 Ok(version) => version.version_id,
@@ -1086,6 +1101,7 @@ async fn run_deployment_step(deps: &IssuanceStepDeps, ctx: StepContext<'_>) -> S
         Ok(deployment) => deployment,
         Err(result) => return result,
     };
+    record_sink_trace(&deployment.target_id);
     let version = match ctx.repositories.versions.get(&deployment.version_id).await {
         Ok(Some(version)) => version.value,
         Ok(None) => {
@@ -1270,6 +1286,7 @@ impl StepExecutor for SubmitRevocationStep {
     }
 
     async fn execute(&self, ctx: StepContext<'_>) -> StepResult {
+        record_ca_trace(self.deps.backend.ca_id());
         let account = match self.deps.account(ctx.operation) {
             Ok(account) => account,
             Err(result) => return result,

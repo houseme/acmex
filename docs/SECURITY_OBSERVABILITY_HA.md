@@ -42,6 +42,7 @@ Use these span fields when the value exists:
 - `provider_id`
 - `sink_id`
 - `request_id`
+- `identifier_hash`
 
 Do not record private key PEM, DNS/API tokens, EAB HMAC keys, key authorization
 values, complete JWS documents, webhook secrets or raw certificate private keys.
@@ -95,50 +96,24 @@ Instrumented sources (all labels low-cardinality, enforced by convention):
 - `acmex_acme_requests_total{ca,result,error_class}`,
   `acmex_acme_request_duration_seconds{ca,result,error_class}` and
   `acmex_bad_nonce_total{ca}` — recorded by the instrumented ACME transport.
+- `acmex_repository_errors_total{backend,operation}` — recorded by the
+  repository-set decorator on failed read/write/scan/cas/migrate calls.
 
-Not yet instrumented: `acmex_repository_errors_total`. The trace convention
-below is documented but span-field injection is not yet wired into the code.
+Trace fields are injected at the owning boundary: HTTP auth (`tenant_id`,
+`request_id`), workflow engine (`operation_id`, `workflow_step`,
+`intent_id`, `lineage_id`), CA/challenge steps (`ca_id`, `challenge_type`,
+`provider_id`, `identifier_hash`), deployment steps (`sink_id`) and renewal
+lineage scans (`ca_id`).
 
-## Prometheus Rule Example
+## Prometheus Rules And Dashboard
 
-```yaml
-groups:
-  - name: acmex-v090
-    rules:
-      - alert: AcmeXCertificateExpiresSoon
-        expr: acmex_certificate_seconds_to_expiry{state="active"} < 172800
-        for: 5m
-        labels:
-          severity: page
-        annotations:
-          summary: Active certificate expires within 48 hours
+Importable observability assets are stored under `docs/observability/`:
 
-      - alert: AcmeXOutboxBacklog
-        expr: sum(acmex_outbox_pending) > 100
-        for: 10m
-        labels:
-          severity: ticket
-        annotations:
-          summary: AcmeX webhook outbox backlog is growing
+- Prometheus rules: `docs/observability/prometheus-rules.yaml`
+- Grafana dashboard: `docs/observability/grafana-dashboard.json`
+- Webhook consumer signature guidance: `docs/observability/webhook-signatures.md`
 
-      - alert: AcmeXRenewalFailures
-        expr: increase(acmex_renewal_failures_total[15m]) > 0
-        for: 1m
-        labels:
-          severity: page
-        annotations:
-          summary: AcmeX renewal failure observed
-
-      - alert: AcmeXRepositoryErrors
-        expr: increase(acmex_repository_errors_total[5m]) > 0
-        for: 1m
-        labels:
-          severity: ticket
-        annotations:
-          summary: AcmeX repository errors observed
-```
-
-## Dashboard Fields
+The dashboard covers:
 
 - Operation throughput and result split from `acmex_operations_total`.
 - Step latency from `acmex_operation_step_duration_seconds`.
@@ -146,4 +121,5 @@ groups:
 - Challenge propagation latency and cleanup pending count.
 - Renewal due count, renewal failures and certificate seconds to expiry.
 - Deployment result split by sink type.
-- Outbox pending count by event type and repository errors by backend.
+- Outbox pending count by event type and repository errors by backend and
+  operation.
