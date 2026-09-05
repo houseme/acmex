@@ -3,6 +3,7 @@
 //! This module provides event-driven webhook notifications for certificate events.
 //! Supports multiple webhook endpoints, retry logic, and event filtering.
 
+use crate::config::OutboxSettings;
 use crate::dns::spec::{EnvFileSecretResolver, SecretRef, SecretResolver};
 use crate::error::{AcmeError, Result};
 use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet};
@@ -421,6 +422,18 @@ impl Default for OutboxConsumerConfig {
     }
 }
 
+impl From<&OutboxSettings> for OutboxConsumerConfig {
+    /// Maps the `[outbox]` configuration section onto the consumer config;
+    /// every tunable the section does not expose (owner, lease TTL, retry
+    /// backoff) keeps its [`OutboxConsumerConfig::default`].
+    fn from(settings: &OutboxSettings) -> Self {
+        OutboxConsumerConfig {
+            batch_size: settings.batch_size,
+            ..OutboxConsumerConfig::default()
+        }
+    }
+}
+
 /// Summary of one consumer pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OutboxConsumerReport {
@@ -466,6 +479,40 @@ where
 
     pub async fn run_once(&self) -> Result<OutboxConsumerReport> {
         self.run_once_inner().await
+    }
+
+    /// Drives [`OutboxConsumer::run_once`] in a loop until the surrounding
+    /// task is aborted.
+    ///
+    /// The first pass starts immediately (draining the startup backlog), then
+    /// one batch is attempted every `interval`. A failing pass is logged at
+    /// warn level and retried on the next tick instead of terminating the
+    /// loop — the same classify-and-continue policy the workflow worker
+    /// uses. The wait between passes is the tokio timer, so aborting the
+    /// spawned task exits promptly; there is no cleanup on the cancel path.
+    pub async fn run_forever(&self, interval: Duration) {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            // The first tick completes immediately, so the startup backlog
+            // drains without waiting out the interval.
+            ticker.tick().await;
+            match self.run_once().await {
+                Ok(report) => {
+                    if report.delivered + report.failed + report.dead_lettered > 0 {
+                        debug!(
+                            delivered = report.delivered,
+                            failed = report.failed,
+                            dead_lettered = report.dead_lettered,
+                            leased_elsewhere = report.leased_elsewhere,
+                            "outbox consumer pass"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!(error = %err, "outbox consumer pass failed; retrying next interval");
+                }
+            }
+        }
     }
 
     async fn run_once_inner(&self) -> Result<OutboxConsumerReport> {
@@ -899,5 +946,176 @@ mod tests {
             verify_webhook_signature(&headers, body, b"topsecret", TEST_SKEW),
             Err(WebhookVerificationError::BadSignature)
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // outbox consumer wiring (`[outbox]` config mapping and `run_forever`)
+    // -------------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Delivery stub that counts `deliver` calls and always succeeds.
+    struct CountingDelivery {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl OutboxDelivery for CountingDelivery {
+        async fn deliver(&self, _event: &OutboxEvent) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn outbox_settings_map_into_consumer_config() {
+        let settings = OutboxSettings {
+            enabled: true,
+            interval_secs: 7,
+            batch_size: 12,
+        };
+        let config = OutboxConsumerConfig::from(&settings);
+        assert_eq!(config.batch_size, 12);
+        // Tunables the section does not expose keep the consumer defaults.
+        let default = OutboxConsumerConfig::default();
+        assert_eq!(config.max_attempts, default.max_attempts);
+        assert_eq!(config.lease_ttl, default.lease_ttl);
+        assert_eq!(config.retry_backoff_base, default.retry_backoff_base);
+        assert!(!config.owner.is_empty());
+    }
+
+    /// A manager without endpoints delivers nothing (no network I/O) and
+    /// reports success, so a consumer wired this way drains the outbox as a
+    /// cheap no-op instead of failing every event.
+    #[tokio::test]
+    async fn webhook_manager_without_endpoints_is_a_cheap_noop() {
+        let manager = WebhookManager::new(Vec::new());
+        assert!(manager.is_empty());
+        let event = OutboxEvent {
+            sequence: 1,
+            event_id: "evt_noop".to_string(),
+            event_type: "operation.created".to_string(),
+            payload: serde_json::json!({"operation_id": "op_1"}),
+            created_at: jiff::Timestamp::now(),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: None,
+            processed: false,
+            dead_lettered: false,
+        };
+        manager.deliver(&event).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_forever_drains_backlog_and_aborts_cleanly() {
+        let set = crate::repository::MemoryRepository::new().into_set();
+        set.outbox
+            .append(
+                "operation.created",
+                serde_json::json!({"operation_id": "op_1"}),
+                None,
+            )
+            .await
+            .unwrap();
+        let delivery = Arc::new(CountingDelivery {
+            calls: AtomicUsize::new(0),
+        });
+        let consumer = OutboxConsumer::new(
+            set.clone(),
+            delivery.clone(),
+            OutboxConsumerConfig::default(),
+        );
+
+        let handle =
+            tokio::spawn(async move { consumer.run_forever(Duration::from_secs(60)).await });
+
+        // The first tick completes immediately, so the backlog drains without
+        // waiting out the interval.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while delivery.calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("run_forever should deliver the pending event");
+        assert!(set.outbox.list_pending(10).await.unwrap().is_empty());
+
+        // Aborting the loop must cancel it promptly instead of hanging.
+        handle.abort();
+        let err = handle.await.unwrap_err();
+        assert!(err.is_cancelled(), "abort must cancel the loop: {err}");
+    }
+
+    struct LoopTempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl Drop for LoopTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// Repository failures must not terminate the loop: after several failing
+    /// passes the task is still running and still retrying.
+    #[tokio::test]
+    async fn run_forever_survives_repeated_pass_errors() {
+        // The `outbox` aggregate directory is replaced by a regular file, so
+        // every pass fails in `list_pending` before any delivery is attempted.
+        let path = std::env::temp_dir().join(format!(
+            "acmex-outbox-loop-{}-{}",
+            std::process::id(),
+            jiff::Timestamp::now().as_millisecond()
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir");
+        let dir = LoopTempDir { path };
+        let set = crate::repository::FileRepository::new(&dir.path)
+            .await
+            .unwrap()
+            .into_set();
+        std::fs::remove_dir_all(dir.path.join("outbox")).expect("remove outbox dir");
+        std::fs::write(dir.path.join("outbox"), b"blocked").expect("block outbox dir");
+
+        let metrics = Arc::new(crate::metrics::MetricsRegistry::new());
+        let consumer = OutboxConsumer::new(
+            set,
+            Arc::new(CountingDelivery {
+                calls: AtomicUsize::new(0),
+            }),
+            OutboxConsumerConfig::default(),
+        )
+        .with_metrics(metrics.clone());
+
+        let handle =
+            tokio::spawn(async move { consumer.run_forever(Duration::from_millis(10)).await });
+
+        // Every failed scan increments the repository error counter, so the
+        // count doubling as a progress signal is deterministic.
+        let scan_errors = || {
+            metrics
+                .gather_text()
+                .lines()
+                .find(|line| {
+                    line.starts_with(r#"acmex_repository_errors_total{backend="file""#)
+                        && line.contains(r#"operation="scan""#)
+                })
+                .and_then(|line| line.rsplit(' ').next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while scan_errors() < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("passes should keep failing and counting");
+
+        assert!(
+            !handle.is_finished(),
+            "run_forever must keep running after failing passes"
+        );
+        handle.abort();
+        let _ = handle.await;
     }
 }
