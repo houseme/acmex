@@ -71,9 +71,10 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
     }
     let client = crate::client::AcmeClient::new(acme_config)?;
 
-    // Initialize webhook manager from `[notifications.webhooks]`: each entry
-    // becomes an outbound delivery endpoint for the durable outbox consumer
-    // (its `events` list filters by outbox event type; empty = everything).
+    // Initialize the notification manager from `[notifications.webhooks]`
+    // and `[notifications.email]`: each entry becomes an outbound delivery
+    // endpoint for the durable outbox consumer (the `events` list filters
+    // by outbox event type; empty = everything, per channel).
     let webhook_manager = Arc::new(WebhookManager::from_config(&config)?);
 
     // Start server

@@ -174,12 +174,14 @@ pub async fn start_server(
     }
 
     // The durable outbox consumer: drains operation/deployment/audit events
-    // from the repository outbox to the webhook delivery, so produced events
-    // do not accumulate without bound. `[outbox]` gates the loop for
-    // deployments that consume the outbox externally. Assembly is infallible
-    // (unlike the worker above there is no error path), and `with_metrics`
-    // attaches the repository error observer itself — the set passed to
-    // `new` must stay unobserved or every failure would count twice.
+    // from the repository outbox to the configured outbound notification
+    // delivery (`[notifications.webhooks]` and `[notifications.email]`), so
+    // produced events do not accumulate without bound. `[outbox]` gates the
+    // loop for deployments that consume the outbox externally. Assembly is
+    // infallible (unlike the worker above there is no error path), and
+    // `with_metrics` attaches the repository error observer itself — the
+    // set passed to `new` must stay unobserved or every failure would count
+    // twice.
     if config.outbox.enabled {
         let outbox_interval = std::time::Duration::from_secs(config.outbox.interval_secs.max(1));
         let consumer = OutboxConsumer::new(
