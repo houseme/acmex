@@ -115,11 +115,47 @@ pub struct AcmeSettings {
 ///
 /// New v0.10 settings live under `[ca]` so they are not confused with the
 /// legacy ACME endpoint selector in `[acme]`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaSettings {
     /// Optional External Account Binding configuration (`[ca.eab]`).
     #[serde(default)]
     pub eab: Option<ExternalAccountBinding>,
+
+    /// ACME account key type: `"ed25519"` (default), `"ecdsa_p256"`,
+    /// `"ecdsa_p384"`, `"ecdsa_p521"`, `"rsa2048"` or `"rsa4096"`.
+    ///
+    /// Only applied when a *new* account key is generated; an existing
+    /// stored PEM key keeps its own type. The default is unchanged from
+    /// previous releases.
+    #[serde(default = "default_account_key_type")]
+    pub account_key_type: String,
+}
+
+impl Default for CaSettings {
+    fn default() -> Self {
+        Self {
+            eab: None,
+            account_key_type: default_account_key_type(),
+        }
+    }
+}
+
+fn default_account_key_type() -> String {
+    "ed25519".to_string()
+}
+
+impl CaSettings {
+    /// Resolves `account_key_type` to the crypto [`KeyType`], rejecting
+    /// unknown values with an explicit configuration error.
+    pub fn resolve_account_key_type(&self) -> Result<crate::crypto::keypair::KeyType> {
+        crate::crypto::keypair::KeyType::from_config_str(&self.account_key_type).ok_or_else(|| {
+            AcmeError::configuration(format!(
+                "ca.account_key_type `{}` is not supported; expected one of \
+                 ed25519, ecdsa_p256, ecdsa_p384, ecdsa_p521, rsa2048, rsa4096",
+                self.account_key_type
+            ))
+        })
+    }
 }
 
 impl AcmeSettings {
@@ -1314,6 +1350,9 @@ impl Config {
         }
 
         self.external_account_binding_ref()?;
+        // Unknown account key types are configuration errors, caught at
+        // validation time instead of first key generation.
+        self.ca.resolve_account_key_type()?;
 
         Ok(())
     }
@@ -1862,6 +1901,59 @@ poll_interval_secs = 3
         assert!(
             err.contains("delivery.vault.endpoint cannot be empty"),
             "got: {err}"
+        );
+    }
+
+    /// The default account key type stays Ed25519 — the compatibility
+    /// baseline for the ECDSA/RSA account key feature.
+    #[test]
+    fn account_key_type_defaults_to_ed25519() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        assert_eq!(config.ca.account_key_type, "ed25519");
+        assert_eq!(
+            config.ca.resolve_account_key_type().unwrap(),
+            crate::crypto::keypair::KeyType::Ed25519
+        );
+        // Serializing and re-parsing keeps the default explicit.
+        let serialized = toml::to_string(&config.ca).unwrap();
+        assert!(
+            serialized.contains("account_key_type = \"ed25519\""),
+            "got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn account_key_type_parses_every_documented_value() {
+        use crate::crypto::keypair::KeyType;
+        let cases = [
+            ("ecdsa_p256", KeyType::EcdsaP256),
+            ("ecdsa_p384", KeyType::EcdsaP384),
+            ("ecdsa_p521", KeyType::EcdsaP521),
+            ("rsa2048", KeyType::Rsa2048),
+            ("rsa4096", KeyType::Rsa4096),
+        ];
+        for (value, expected) in cases {
+            let toml = format!("[ca]\naccount_key_type = \"{value}\"\n");
+            let config = Config::from_str(&toml).unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.ca.resolve_account_key_type().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn account_key_type_rejects_unknown_values_at_validation() {
+        let err = Config::from_str("[ca]\naccount_key_type = \"p256\"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ca.account_key_type"),
+            "error must name the setting: {err}"
+        );
+        assert!(
+            err.contains("ed25519"),
+            "error must list the accepted values: {err}"
         );
     }
 }

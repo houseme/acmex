@@ -4,8 +4,6 @@
 use crate::error::Result;
 use crate::protocol::{DirectoryManager, Jwk, JwsSigner, NonceManager};
 use crate::types::Contact;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -73,7 +71,9 @@ impl<'a> AccountManager<'a> {
     ) -> Result<Self> {
         tracing::debug!("Initializing AccountManager");
         let signer = JwsSigner::new(&key_pair.0);
-        let jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(key_pair.public_key_bytes()));
+        // The JWK (and every JWS `alg`) is derived from the actual account
+        // key — Ed25519, ECDSA or RSA — never hardcoded.
+        let jwk = Jwk::for_key_pair(&key_pair.0)?;
 
         Ok(Self {
             key_pair,
@@ -100,7 +100,7 @@ impl<'a> AccountManager<'a> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
         let header = json!({
-            "alg": "EdDSA",
+            "alg": self.signer.jwa_algorithm()?,
             "jwk": self.jwk.to_value(),
             "nonce": nonce,
             "url": directory.new_account,
@@ -141,7 +141,7 @@ impl<'a> AccountManager<'a> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
         let header = json!({
-            "alg": "EdDSA",
+            "alg": self.signer.jwa_algorithm()?,
             "jwk": self.jwk.to_value(),
             "nonce": nonce,
             "url": directory.new_account,
@@ -235,7 +235,7 @@ impl<'a> AccountManager<'a> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
         let header = json!({
-            "alg": "EdDSA",
+            "alg": self.signer.jwa_algorithm()?,
             "kid": account_id,
             "nonce": nonce,
             "url": account_id,
@@ -299,7 +299,7 @@ impl<'a> AccountManager<'a> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
         let header = json!({
-            "alg": "EdDSA",
+            "alg": self.signer.jwa_algorithm()?,
             "kid": account_id,
             "nonce": nonce,
             "url": account_id,
@@ -353,7 +353,7 @@ impl<'a> AccountManager<'a> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
         let header = json!({
-            "alg": "EdDSA",
+            "alg": self.signer.jwa_algorithm()?,
             "kid": account_id,
             "nonce": nonce,
             "url": account_id,

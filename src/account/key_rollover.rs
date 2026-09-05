@@ -58,7 +58,7 @@ impl<'a> KeyRollover<'a> {
         let nonce = self.account_manager.nonce_manager.get_nonce().await?;
 
         let outer_header = json!({
-            "alg": "EdDSA",
+            "alg": self.account_manager.get_signer().jwa_algorithm()?,
             "kid": account_url,
             "nonce": nonce,
             "url": key_change_url

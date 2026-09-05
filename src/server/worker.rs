@@ -55,8 +55,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-
 use crate::ca_backend::{AcmeCaBackend, InstrumentedAcmeTransport, ReqwestAcmeTransport};
 use crate::challenge::{
     AcknowledgeChallengesStep, ChallengePresenter, ChallengeStepDeps, CleanupChallengesStep,
@@ -232,17 +230,24 @@ pub fn register_executors(
 }
 
 /// Loads the persistent ACME account key (or creates it on first run).
+///
+/// `key_type` only governs *newly generated* keys: an already-stored PEM key
+/// carries its own type and is loaded unchanged, so existing deployments
+/// keep their account identity across upgrades.
 async fn load_or_create_account_key(
     store: &FileSecretStore,
     ca_label: &str,
+    key_type: crate::crypto::keypair::KeyType,
 ) -> crate::error::Result<crate::account::KeyPair> {
     let key_id = format!("account_key_{ca_label}");
     if let Some(pem) = store.get(&key_id).await? {
         return crate::account::KeyPair::from_pem(&String::from_utf8_lossy(&pem))
             .map_err(|err| crate::error::AcmeError::crypto(format!("stored account key: {err}")));
     }
-    let key_pair = crate::account::KeyPair::generate()
+    let generated = crate::crypto::KeyPairGenerator::new(key_type)
+        .generate()
         .map_err(|err| crate::error::AcmeError::crypto(format!("generate account key: {err}")))?;
+    let key_pair = crate::account::KeyPair(generated);
     store
         .put(&key_id, key_pair.serialize_pem().as_bytes())
         .await?;
@@ -555,10 +560,10 @@ pub async fn build_engine_from_config(
 
     let ca_label = super::api::sanitize_ca_label(&config.acme.ca);
     let secret_store = FileSecretStore::new(settings.secret_store_dir.clone());
-    let key_pair = Arc::new(load_or_create_account_key(&secret_store, &ca_label).await?);
-    let account_jwk = Jwk::new_ed25519(
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key_pair.public_key_bytes()),
-    );
+    let account_key_type = config.ca.resolve_account_key_type()?;
+    let key_pair =
+        Arc::new(load_or_create_account_key(&secret_store, &ca_label, account_key_type).await?);
+    let account_jwk = Jwk::for_key_pair(&key_pair.0)?;
 
     let transport = InstrumentedAcmeTransport::wrap(
         ca_label.clone(),
