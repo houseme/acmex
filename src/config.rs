@@ -1556,4 +1556,27 @@ poll_interval_secs = 3
         assert_eq!(policy.poll_interval, Duration::from_secs(3));
         assert_eq!(policy.max_wait, Duration::from_secs(300));
     }
+
+    #[test]
+    fn challenge_tls_alpn_section_is_optional_for_old_configs() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        assert!(config.challenge.tls_alpn.is_none());
+    }
+
+    #[test]
+    fn challenge_tls_alpn_parses_listen_addr_and_defaults() {
+        let config =
+            Config::from_str("[challenge.tls_alpn]\nlisten_addr = \"127.0.0.1:5001\"\n").unwrap();
+        let tls_alpn = config.challenge.tls_alpn.unwrap();
+        assert_eq!(tls_alpn.listen_addr, "127.0.0.1:5001");
+        assert!(tls_alpn.cert_path.is_none());
+        assert!(tls_alpn.key_path.is_none());
+
+        // An empty section still yields the documented default listen address.
+        let config = Config::from_str("[challenge.tls_alpn]\n").unwrap();
+        assert_eq!(
+            config.challenge.tls_alpn.unwrap().listen_addr,
+            "0.0.0.0:443"
+        );
+    }
 }
