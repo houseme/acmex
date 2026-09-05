@@ -11,7 +11,8 @@
 //!    fallback second) and due renewals become durable operations the
 //!    worker then executes;
 //! 3. the **durable outbox consumer** (`notifications::OutboxConsumer`)
-//!    drains operation/deployment/audit events to the webhook delivery.
+//!    drains operation/deployment/audit events to the configured outbound
+//!    notification endpoints (webhooks and SMTP email).
 //!
 //! All loops stop on SIGINT/SIGTERM. Legacy arguments (`--domains`,
 //! `--renew-before-days`) are accepted for compatibility but superseded by
@@ -65,7 +66,7 @@ pub async fn handle_daemon(
     let _ = storage_path;
     if let Some(email) = &notify_email {
         println!(
-            "ℹ️  notifications for {email} follow the configured webhooks ([notifications.webhook])"
+            "ℹ️  notifications for {email} follow the configured webhooks and email endpoints ([notifications.webhooks] / [notifications.email])"
         );
     }
 
@@ -129,10 +130,11 @@ pub async fn handle_daemon(
     });
     println!("✓ renewal controller scanning every {check_interval_secs}s");
 
-    // 3. Durable outbox consumer: drains operation/deployment/audit events to
-    //    the webhook endpoints from `[notifications.webhooks]` so they do not
-    //    accumulate without bound. Without configured endpoints the manager
-    //    delivers as a cheap no-op drain.
+    // 3. Durable outbox consumer: drains operation/deployment/audit events
+    //    to the outbound endpoints from `[notifications.webhooks]` and
+    //    `[notifications.email]` so they do not accumulate without bound.
+    //    Without configured endpoints the manager delivers as a cheap
+    //    no-op drain.
     let outbox_handle = if config.outbox.enabled {
         let outbox_interval = Duration::from_secs(config.outbox.interval_secs.max(1));
         let webhook_manager = WebhookManager::from_config(&config)?;

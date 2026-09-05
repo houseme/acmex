@@ -744,17 +744,6 @@ pub struct RenewalSettings {
     /// Concurrency level for renewals.
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
-    /// Renewal hooks.
-    #[serde(default)]
-    pub hooks: Option<RenewalHooks>,
-}
-
-/// Renewal hooks configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RenewalHooks {
-    pub before: Option<String>,
-    pub after: Option<String>,
-    pub on_error: Option<String>,
 }
 
 /// Metrics settings.
@@ -798,18 +787,53 @@ pub struct WebhookConfig {
     pub replay_window_secs: u64,
 }
 
-/// Email notification configuration.
+/// Email notification configuration (`[[notifications.email]]`).
+///
+/// Consumed by `notifications::email::EmailNotifier`, which delivers outbox
+/// events over SMTP. The plain `String` settings (`tls_mode`,
+/// `body_format`) are validated at notifier assembly time; unknown or
+/// unsafe values fail assembly instead of every delivery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailConfig {
+    /// Optional instance name used in logs and error messages; derived
+    /// from the endpoint address when omitted.
+    #[serde(default)]
+    pub name: Option<String>,
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
     pub from: String,
     pub to: Vec<String>,
+    /// Outbox event-type filter (for example `"operation.created"`); an
+    /// empty list delivers every outbox event, matching the webhook
+    /// `events` semantics.
     #[serde(default)]
     pub events: Vec<String>,
+    /// SMTP `AUTH PLAIN` user; must be configured together with `password`.
     pub username: Option<String>,
+    /// SMTP password SecretRef (`env:`/`file:`/`vault:`); resolved per
+    /// delivery and never logged.
     pub password: Option<SecretRef>,
+    /// Transport security: `starttls` (default), `implicit` (smtps/465) or
+    /// `none` (explicit plaintext opt-in for local relays).
+    #[serde(default = "default_smtp_tls_mode")]
+    pub tls_mode: String,
+    /// Prefix prepended to every message subject.
+    #[serde(default = "default_smtp_subject_prefix")]
+    pub subject_prefix: String,
+    /// Name presented in the SMTP `EHLO` greeting.
+    #[serde(default = "default_smtp_helo_name")]
+    pub helo_name: String,
+    /// Body MIME type: `text` (default) or `html`.
+    #[serde(default = "default_smtp_body_format")]
+    pub body_format: String,
+    /// Overall timeout for one SMTP delivery (connect + conversation).
+    #[serde(default = "default_smtp_timeout_secs")]
+    pub timeout_secs: u64,
+    /// PEM files with trust anchors for the TLS modes (required for them —
+    /// the SMTP client verifies certificates against exactly these).
+    #[serde(default)]
+    pub ca_pem_files: Vec<String>,
 }
 
 /// Key management settings (`[key]`).
@@ -1077,6 +1101,21 @@ fn default_outbox_batch_size() -> usize {
 fn default_smtp_port() -> u16 {
     587
 }
+fn default_smtp_tls_mode() -> String {
+    "starttls".to_string()
+}
+fn default_smtp_subject_prefix() -> String {
+    "[AcmeX] ".to_string()
+}
+fn default_smtp_helo_name() -> String {
+    "acmex.local".to_string()
+}
+fn default_smtp_body_format() -> String {
+    "text".to_string()
+}
+fn default_smtp_timeout_secs() -> u64 {
+    30
+}
 fn default_output_format() -> String {
     "text".to_string()
 }
@@ -1141,7 +1180,6 @@ impl Default for RenewalSettings {
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay(),
             concurrency: default_concurrency(),
-            hooks: None,
         }
     }
 }

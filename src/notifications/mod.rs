@@ -1,7 +1,13 @@
-//! Webhook notification system for AcmeX
+//! Webhook and email notification system for AcmeX
 //!
-//! This module provides event-driven webhook notifications for certificate events.
-//! Supports multiple webhook endpoints, retry logic, and event filtering.
+//! This module provides event-driven notifications for certificate events:
+//! multiple webhook endpoints with retry logic and event filtering, plus
+//! SMTP email delivery (`email`). The durable outbox consumer fans every
+//! event out to both channels; each channel reports errors independently.
+
+pub mod email;
+
+pub use email::{EmailBodyFormat, EmailNotifier, SmtpErrorClass, SmtpTlsMode};
 
 use crate::config::OutboxSettings;
 use crate::dns::spec::{EnvFileSecretResolver, SecretRef, SecretResolver};
@@ -365,20 +371,29 @@ impl WebhookClient {
     }
 }
 
-/// Webhook manager for multiple webhooks
+/// Outbound notification manager: every configured webhook endpoint plus
+/// every configured SMTP email target. Implements [`OutboxDelivery`] by
+/// fanning each event out to all channels and aggregating their errors —
+/// a failing channel never hides another channel's success, and a single
+/// failing channel's classified error is returned unmodified.
 pub struct WebhookManager {
     webhooks: Vec<WebhookClient>,
+    emails: Vec<EmailNotifier>,
 }
 
 impl WebhookManager {
-    /// Create a new webhook manager
+    /// Create a new webhook manager without email targets.
     pub fn new(configs: Vec<WebhookConfig>) -> Self {
         let webhooks = configs.into_iter().map(WebhookClient::new).collect();
 
-        Self { webhooks }
+        Self {
+            webhooks,
+            emails: Vec::new(),
+        }
     }
 
-    /// Builds the manager from `[notifications.webhooks]` settings.
+    /// Builds the manager from `[notifications.webhooks]` and
+    /// `[notifications.email]` settings.
     ///
     /// `events` entries filter the durable outbox delivery by event-type
     /// string (`operation.created`, `deployment.activated`, ...); an empty
@@ -386,21 +401,36 @@ impl WebhookManager {
     /// so each configured endpoint performs a single delivery attempt per
     /// consumer pass instead of its own backoff loop.
     pub fn from_config(config: &crate::config::Config) -> Result<Self> {
-        let settings = config
+        let (webhook_settings, email_settings) = config
             .notifications
             .as_ref()
-            .map(|notifications| notifications.webhooks.as_slice())
+            .map(|notifications| {
+                (
+                    notifications.webhooks.as_slice(),
+                    notifications.email.as_slice(),
+                )
+            })
             .unwrap_or_default();
-        let webhooks = settings
+        let webhooks = webhook_settings
             .iter()
             .enumerate()
             .map(|(index, entry)| webhook_config_from_settings(entry, index))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(WebhookClient::new)
+            .collect();
+        let emails = email_settings
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| email_notifier_from_settings(entry, index))
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self::new(webhooks))
+        Ok(Self { webhooks, emails })
     }
 
+    /// True when neither webhooks nor email targets are configured; the
+    /// consumer then drains the outbox as a cheap no-op.
     pub fn is_empty(&self) -> bool {
-        self.webhooks.is_empty()
+        self.webhooks.is_empty() && self.emails.is_empty()
     }
 
     /// Send event to all matching webhooks
@@ -423,12 +453,58 @@ impl WebhookManager {
 
 #[async_trait]
 impl OutboxDelivery for WebhookManager {
+    /// Fans the event out to every webhook and every email target.
+    ///
+    /// Channels are attempted independently: one channel's failure never
+    /// suppresses another channel's delivery attempt. With exactly one
+    /// failure the classified error is returned unmodified (so a terminal
+    /// SMTP 5xx stays `AcmeError::Protocol`); multiple failures are joined
+    /// into one aggregated transport error.
     async fn deliver(&self, event: &OutboxEvent) -> Result<()> {
+        let mut errors: Vec<AcmeError> = Vec::new();
+
         for webhook in &self.webhooks {
-            webhook.send_outbox(event).await?;
+            if let Err(err) = webhook.send_outbox(event).await {
+                warn!(webhook = %webhook.config.name, error = %err, "webhook delivery failed");
+                errors.push(err);
+            }
         }
-        Ok(())
+        for notifier in &self.emails {
+            if let Err(err) = notifier.deliver(event).await {
+                warn!(endpoint = %notifier.name(), error = %err, "email delivery failed");
+                errors.push(err);
+            }
+        }
+
+        let mut aggregated = errors.into_iter();
+        let Some(first) = aggregated.next() else {
+            return Ok(());
+        };
+        match aggregated.next() {
+            None => Err(first),
+            Some(second) => {
+                let mut joined = format!("{first}; {second}");
+                for rest in aggregated {
+                    joined.push_str("; ");
+                    joined.push_str(&rest.to_string());
+                }
+                Err(AcmeError::Transport(joined))
+            }
+        }
     }
+}
+
+/// Converts one `[notifications.email]` entry into an [`EmailNotifier`].
+/// Indexes the endpoint into its name when none was configured.
+fn email_notifier_from_settings(
+    value: &crate::config::EmailConfig,
+    index: usize,
+) -> Result<EmailNotifier> {
+    let mut settings = value.clone();
+    if settings.name.is_none() {
+        settings.name = Some(format!("email-{index}"));
+    }
+    EmailNotifier::new(settings)
 }
 
 /// Converts one `[notifications.webhooks]` entry into the delivery-side
@@ -686,6 +762,10 @@ fn stable_delivery_error(err: &AcmeError) -> String {
         AcmeError::Timeout(_) => "TIMEOUT".to_string(),
         AcmeError::Transport(_) => "WEBHOOK_TRANSPORT".to_string(),
         AcmeError::Configuration(_) => "WEBHOOK_CONFIGURATION".to_string(),
+        // On this path `Protocol` is produced exclusively by the SMTP email
+        // delivery for permanent failures (5xx, protocol violations); the
+        // outbox records it so dead-letter triage can skip retries.
+        AcmeError::Protocol(_) => "SMTP_TERMINAL".to_string(),
         _ => "WEBHOOK_DELIVERY_FAILED".to_string(),
     }
 }
@@ -900,6 +980,60 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("format `carrier-pigeon`"), "got: {err}");
+    }
+
+    /// `[notifications.email]` maps onto `EmailNotifier`s with the same
+    /// event-type filter semantics as webhooks; a broken section fails
+    /// assembly, and with no notifications at all the manager is empty.
+    #[test]
+    fn webhook_manager_from_config_maps_email_settings() {
+        let config: crate::config::Config = r#"
+[[notifications.email]]
+smtp_host = "relay.example.test"
+from = "acmex@example.test"
+to = ["ops@example.test"]
+events = ["operation.created"]
+
+[[notifications.email]]
+name = "ops-mail"
+smtp_host = "relay2.example.test"
+tls_mode = "implicit"
+ca_pem_files = ["/etc/ssl/relay.pem"]
+from = "AcmeX <acmex@example.test>"
+to = ["ops@example.test", "audit@example.test"]
+"#
+        .parse()
+        .unwrap();
+        let manager = WebhookManager::from_config(&config).unwrap();
+        assert!(!manager.is_empty());
+        assert_eq!(manager.emails.len(), 2);
+        assert_eq!(manager.emails[0].name(), "email-0");
+        assert_eq!(manager.emails[1].name(), "ops-mail");
+        assert!(manager.emails[0].should_deliver("operation.created"));
+        assert!(!manager.emails[0].should_deliver("audit.event"));
+        assert!(manager.emails[1].should_deliver("audit.event"));
+
+        // No notification sections at all: an empty, still-drainable manager.
+        let empty = WebhookManager::from_config(
+            &"[outbox]\nenabled = false\n"
+                .parse::<crate::config::Config>()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(empty.is_empty());
+
+        // A broken email section fails assembly instead of every delivery:
+        // username without a password reference is rejected at assembly.
+        let broken: crate::config::Config = r#"
+[[notifications.email]]
+smtp_host = "relay.example.test"
+from = "acmex@example.test"
+to = ["ops@example.test"]
+username = "user"
+"#
+        .parse()
+        .unwrap();
+        assert!(WebhookManager::from_config(&broken).is_err());
     }
 
     /// The outbox delivery path respects the configured event-type filter:
