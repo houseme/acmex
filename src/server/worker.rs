@@ -528,33 +528,44 @@ fn register_configured_sinks(
 
 /// Assembles the key provider configured under `[key]`.
 ///
-/// `backend = "kms-aws"` (with the `kms-aws` feature compiled in) routes
-/// managed-key generation and CSR signing through AWS KMS; private key
-/// material never leaves the service. Anything else — or a KMS assembly
-/// failure, which the caller logs — falls back to the local software
-/// provider backed by the file secret store.
+/// The default (`backend = "software"`) keeps keys in the local file secret
+/// store. `backend = "kms-aws"` (with the `kms-aws` feature compiled in)
+/// routes managed-key generation and CSR signing through AWS KMS so private
+/// key material never reaches the disk — because that is a security
+/// commitment, an explicit `kms-aws` configuration that cannot be assembled
+/// (bad region, credentials not ready, ...) fails startup instead of
+/// silently downgrading to local keys.
 async fn build_key_provider(
     config: &Config,
+    secret_store_dir: &std::path::Path,
 ) -> crate::error::Result<Arc<dyn crate::key::KeyProvider>> {
-    let settings = config.key.as_ref();
-    let backend = settings
+    let backend = config
+        .key
+        .as_ref()
         .map(|key| key.backend.as_str())
         .unwrap_or("software");
     if backend != "kms-aws" {
-        return Err(crate::error::AcmeError::configuration(format!(
-            "key backend `{backend}` is the software provider"
-        )));
+        return Ok(Arc::new(SoftwareKeyProvider::new(FileSecretStore::new(
+            secret_store_dir.to_path_buf(),
+        ))));
     }
-    #[cfg(feature = "kms-aws")]
-    {
-        let kms = settings.and_then(|key| key.kms.as_ref()).ok_or_else(|| {
+    let kms = config
+        .key
+        .as_ref()
+        .and_then(|key| key.kms.as_ref())
+        .ok_or_else(|| {
             crate::error::AcmeError::configuration(
                 "key.kms settings are required when key.backend = \"kms-aws\"",
             )
         })?;
+    #[cfg(feature = "kms-aws")]
+    {
         let provider_config = crate::key::kms::KmsKeyProviderConfig {
             region: kms.region.clone(),
             endpoint_url: kms.endpoint_url.clone(),
+            key_deletion_window_days: kms
+                .key_deletion_window_days
+                .unwrap_or(crate::key::kms::DEFAULT_KEY_DELETION_WINDOW_DAYS),
             ..Default::default()
         };
         let provider = crate::key::kms::KmsKeyProvider::new(provider_config).await?;
@@ -562,6 +573,7 @@ async fn build_key_provider(
     }
     #[cfg(not(feature = "kms-aws"))]
     {
+        let _ = kms;
         Err(crate::error::AcmeError::configuration(
             "key backend `kms-aws` requires the `kms-aws` feature",
         ))
@@ -620,18 +632,11 @@ pub async fn build_engine_from_config(
         repositories.clone(),
     ));
 
-    let key_provider: Arc<dyn crate::key::KeyProvider> = match build_key_provider(config).await {
-        Ok(provider) => provider,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "configured key provider assembly failed; falling back to the software provider"
-            );
-            Arc::new(SoftwareKeyProvider::new(FileSecretStore::new(
-                settings.secret_store_dir.clone(),
-            )))
-        }
-    };
+    // An explicit `kms-aws` backend that cannot be assembled fails startup:
+    // silently issuing with local keys would defeat the point of the
+    // setting. The software default is constructed directly.
+    let key_provider: Arc<dyn crate::key::KeyProvider> =
+        build_key_provider(config, &settings.secret_store_dir).await?;
 
     let presenters = build_presenters(config, &mut settings).await;
 

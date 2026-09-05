@@ -858,6 +858,9 @@ pub struct KmsKeySettings {
     /// KMS endpoint override (VPC endpoints, contract tests).
     #[serde(default)]
     pub endpoint_url: Option<String>,
+    /// Pending-deletion window for destroyed keys, in days (7-30).
+    #[serde(default)]
+    pub key_deletion_window_days: Option<i32>,
 }
 
 fn default_key_backend() -> String {
@@ -1395,13 +1398,18 @@ impl Config {
             ));
         }
 
-        if let Some(ref key) = self.key
-            && key.backend == "kms-aws"
-            && key.kms.is_none()
-        {
-            return Err(AcmeError::configuration(
-                "key.kms settings are required when key.backend = \"kms-aws\"",
-            ));
+        if let Some(ref key) = self.key {
+            if key.backend != "software" && key.backend != "kms-aws" {
+                return Err(AcmeError::configuration(format!(
+                    "key.backend `{}` is not one of software|kms-aws",
+                    key.backend
+                )));
+            }
+            if key.backend == "kms-aws" && key.kms.is_none() {
+                return Err(AcmeError::configuration(
+                    "key.kms settings are required when key.backend = \"kms-aws\"",
+                ));
+            }
         }
 
         if let Some(ref propagation) = self.dns.propagation {

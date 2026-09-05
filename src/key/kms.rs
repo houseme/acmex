@@ -337,6 +337,18 @@ impl SigningKey for KmsRemoteSigner<'_> {
         // with block_in_place, which requires a multi-threaded tokio runtime.
         // The SDK error is boxed so the bridge closure keeps a small return
         // type; classification unpacks it.
+        let multi_thread = matches!(
+            tokio::runtime::Handle::try_current(),
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        );
+        if !multi_thread {
+            // Fail with an operator-readable message instead of the panic
+            // block_in_place would raise on a current-thread runtime.
+            tracing::error!(
+                "AWS KMS CSR signing requires a multi-threaded tokio runtime (the AcmeX default)"
+            );
+            return Err(RcgenError::RemoteKeyError);
+        }
         let result: std::result::Result<_, Box<SdkError<aws_sdk_kms::operation::sign::SignError>>> =
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
