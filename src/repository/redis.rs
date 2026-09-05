@@ -14,6 +14,8 @@
 //! acmex:v1:outbox/<sequence>                → outbox event JSON (immutable)
 //! acmex:v1:outbox-state/<sequence>          → delivery-state hash (mutable)
 //! acmex:v1:migration/manifest-<seq>         → manifest entry JSON
+//! acmex:v1:manifest-dedup/<sha256-of-source-key>
+//!                                           → manifest idempotency marker
 //! acmex:v1:locks/<encoded-key>              → lease hash {owner, token, expiry}
 //! acmex:v1:lease-tokens/<encoded-key>       → per-key fencing-token counter
 //! acmex:v1:counters/outbox                  → outbox sequence counter
@@ -171,21 +173,23 @@ static LEASE_RELEASE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
 
 /// Lua outbox failure recording: increments the attempt counter, stores the
 /// error and sets (or clears) the retry time atomically. ARGV:
-/// `error, next_attempt_at_ms_or_empty`. Returns the new attempt count.
-static OUTBOX_MARK_FAILED_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-        local attempts = redis.call('HINCRBY', KEYS[1], 'attempts', 1)
-        redis.call('HSET', KEYS[1], 'last_error', ARGV[1])
-        if ARGV[2] == '' then
-            redis.call('HDEL', KEYS[1], 'next_attempt_at_ms')
-        else
-            redis.call('HSET', KEYS[1], 'next_attempt_at_ms', ARGV[2])
-        end
-        return attempts
-        "#,
-    )
-});
+/// `error, next_attempt_at_ms_or_empty` — an *empty* `ARGV[2]` clears the
+/// stored retry time (`HDEL`), so `None` must be passed as `''`, never as
+/// `"0"` (which would pin the event to the epoch). Returns the new attempt
+/// count. The source is kept as a constant so tests can pin this contract.
+const OUTBOX_MARK_FAILED_LUA: &str = r#"
+    local attempts = redis.call('HINCRBY', KEYS[1], 'attempts', 1)
+    redis.call('HSET', KEYS[1], 'last_error', ARGV[1])
+    if ARGV[2] == '' then
+        redis.call('HDEL', KEYS[1], 'next_attempt_at_ms')
+    else
+        redis.call('HSET', KEYS[1], 'next_attempt_at_ms', ARGV[2])
+    end
+    return attempts
+"#;
+
+static OUTBOX_MARK_FAILED_SCRIPT: LazyLock<redis::Script> =
+    LazyLock::new(|| redis::Script::new(OUTBOX_MARK_FAILED_LUA));
 
 /// Lua outbox dead-lettering: flags the event and clears its retry time.
 /// ARGV: `reason`. Returns 1.
@@ -201,16 +205,44 @@ static OUTBOX_DEAD_LETTER_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
 });
 
 /// Lua outbox requeue: clears the dead-letter and processed flags plus the
-/// recorded error, making the event deliverable again. Returns 1.
-static OUTBOX_REQUEUE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
-    redis::Script::new(
-        r#"
-        redis.call('HSET', KEYS[1], 'dead_lettered', 0, 'processed', 0)
-        redis.call('HDEL', KEYS[1], 'last_error', 'next_attempt_at_ms')
-        return 1
-        "#,
-    )
-});
+/// recorded error and retry time, and resets the attempt counter to 0,
+/// making the event deliverable again. Manual replay restarts the retry
+/// budget — a deliberate difference from the memory/file backends, which
+/// keep the old counter (unification tracked separately). Returns 1. The
+/// source is kept as a constant so tests can pin the reset contract.
+const OUTBOX_REQUEUE_LUA: &str = r#"
+    redis.call('HSET', KEYS[1], 'dead_lettered', 0, 'processed', 0, 'attempts', 0)
+    redis.call('HDEL', KEYS[1], 'last_error', 'next_attempt_at_ms')
+    return 1
+"#;
+
+static OUTBOX_REQUEUE_SCRIPT: LazyLock<redis::Script> =
+    LazyLock::new(|| redis::Script::new(OUTBOX_REQUEUE_LUA));
+
+/// Lua migration-manifest save: `SET NX` semantics on a dedup marker keyed
+/// by the SHA-256 of the entry's `source_key`, with the sequence allocation
+/// and manifest write folded into the same atomic script so a concurrent
+/// duplicate can never write a second entry for one source key. KEYS:
+/// `dedup_marker, sequence_counter`; ARGV: `entry_json, manifest_key_prefix`.
+/// Returns `0` (an entry for this source key already exists — the NX lost)
+/// or the freshly allocated sequence. The source is kept as a constant so
+/// tests can pin the check-and-write contract.
+const MANIFEST_SAVE_LUA: &str = r#"
+    if redis.call('EXISTS', KEYS[1]) == 1 then
+        return 0
+    end
+    local sequence = redis.call('INCR', KEYS[2])
+    redis.call('SET', ARGV[2] .. string.format('%06d', sequence), ARGV[1])
+    redis.call('SET', KEYS[1], tostring(sequence))
+    return sequence
+"#;
+
+static MANIFEST_SAVE_SCRIPT: LazyLock<redis::Script> =
+    LazyLock::new(|| redis::Script::new(MANIFEST_SAVE_LUA));
+
+/// Upper-case hex digits for percent-escape bytes (a `%XX` escape is two
+/// table lookups instead of a `format!` allocation per byte).
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 
 /// Encodes an arbitrary entity id into a safe Redis key component.
 ///
@@ -223,7 +255,11 @@ pub(crate) fn encode_key_component(id: &str) -> String {
     for byte in id.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => out.push(byte as char),
-            _ => out.push_str(&format!("%{byte:02X}")),
+            _ => {
+                out.push('%');
+                out.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
+                out.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
+            }
         }
     }
     if out.is_empty() {
@@ -283,9 +319,15 @@ fn outbox_event_key(sequence: u64) -> String {
     entity_key("outbox", &format!("{sequence:012}"))
 }
 
-/// The migration manifest key for a sequence.
-fn manifest_key(sequence: u64) -> String {
-    entity_key("migration", &format!("manifest-{sequence:06}"))
+/// Namespace prefix of every migration-manifest entry key. Shared with
+/// [`MANIFEST_SAVE_SCRIPT`] (passed as an argument, which appends the
+/// zero-padded sequence with Lua `string.format('%06d', …)`) so the script
+/// builds exactly the keys [`MigrationManifestStore::entries`] scans for.
+const MANIFEST_KEY_PREFIX: &str = "acmex:v1:migration:manifest-";
+
+/// The SCAN pattern matching every manifest entry key.
+fn entries_scan_pattern() -> String {
+    format!("{MANIFEST_KEY_PREFIX}*")
 }
 
 /// Fencing-token counter for one lease key.
@@ -368,6 +410,35 @@ fn interpret_acquire_reply(
     }
 }
 
+/// Interprets the [`LEASE_RENEW_SCRIPT`] reply. `Ok(None)` means the lease
+/// was lost (the script returned `0`: expired or taken over); the success
+/// shape is `{1, expires_at_ms}`. Anything else is a protocol error and must
+/// not be silently mistaken for a lost lease.
+fn interpret_renew_reply(
+    reply: &redis::Value,
+    key: &str,
+    owner: &str,
+    fencing_token: FencingToken,
+) -> Result<Option<LeaseGrant>> {
+    let malformed = || corrupt("unexpected lease renew reply");
+    match reply {
+        // Lua `return 0`: the lease was lost (expired or taken over).
+        redis::Value::Int(0) => Ok(None),
+        redis::Value::Array(elements) => match elements.as_slice() {
+            [redis::Value::Int(1), expires] => Ok(Some(LeaseGrant {
+                key: key.to_string(),
+                owner: owner.to_string(),
+                fencing_token,
+                expires_at: timestamp_from_ms(
+                    redis_value_u64(expires).ok_or_else(|| corrupt("bad renew reply"))?,
+                )?,
+            })),
+            _ => Err(malformed()),
+        },
+        _ => Err(malformed()),
+    }
+}
+
 fn timestamp_from_ms(ms: u64) -> Result<Timestamp> {
     Timestamp::from_millisecond(i64::try_from(ms).unwrap_or(i64::MAX))
         .map_err(|e| corrupt(format!("bad lock expiry: {e}")))
@@ -406,6 +477,64 @@ fn compose_outbox_event(mut event: OutboxEvent, state: &HashMap<String, String>)
         event.next_attempt_at = None;
     }
     event
+}
+
+/// Parses one outbox scan key into its sequence number; `None` marks a key
+/// that cannot be decoded (the caller logs and skips it instead of failing
+/// the whole `list_pending` scan).
+fn outbox_sequence_from_key(key: &str) -> Option<u64> {
+    id_from_key("outbox", key)
+        .ok()
+        .and_then(|id| id.parse::<u64>().ok())
+}
+
+/// Decodes one fetched outbox entry (event JSON plus delivery-state hash)
+/// for `list_pending`. Per-entry problems — the event vanished between SCAN
+/// and GET, or its JSON cannot be decoded — are logged (with the key name,
+/// never the value) and reported as `Ok(None)` so a single poisoned entry
+/// cannot hide every healthy event; only connection-level errors ever fail
+/// the call. The `Err` variant is reserved for such hard failures.
+fn decode_pending_entry(
+    sequence: u64,
+    raw: Option<&str>,
+    state: &HashMap<String, String>,
+) -> Result<Option<OutboxEvent>> {
+    let key = outbox_event_key(sequence);
+    let Some(json) = raw else {
+        tracing::debug!(key, "outbox event vanished between SCAN and GET; skipping");
+        return Ok(None);
+    };
+    let event: OutboxEvent = match serde_json::from_str(json) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(key, %error, "skipping outbox entry with undecodable JSON");
+            return Ok(None);
+        }
+    };
+    Ok(Some(compose_outbox_event(event, state)))
+}
+
+/// The manifest dedup-marker key for a manifest entry's source key: the
+/// SHA-256 of the source key (hex) under a dedicated namespace. This gives
+/// [`MANIFEST_SAVE_SCRIPT`]'s `SET NX` idempotency check a bounded,
+/// collision-free key even for hostile or very long source keys.
+fn manifest_dedup_key(source_key: &str) -> Result<String> {
+    let hash = crate::crypto::Sha256Hash::hash_hex(source_key.as_bytes())?;
+    Ok(format!("{KEY_PREFIX}manifest-dedup:{hash}"))
+}
+
+/// Interprets the [`MANIFEST_SAVE_SCRIPT`] reply. `0` means the dedup
+/// marker already existed — a manifest entry for this source key was saved
+/// before, i.e. the `SET NX` lost — which is idempotent success for
+/// `save_entry`; a non-negative integer is the (fresh) sequence. Anything
+/// else is a protocol error.
+fn interpret_manifest_save_reply(reply: &redis::Value, source_key: &str) -> Result<()> {
+    match reply {
+        redis::Value::Int(sequence) if *sequence >= 0 => Ok(()),
+        _ => Err(corrupt(format!(
+            "unexpected manifest save reply for source key {source_key:?}"
+        ))),
+    }
 }
 
 /// Redacts the password of a Redis URL for logging and `Debug` output.
@@ -545,8 +674,11 @@ impl EntityStore for RedisEntityStore {
 
         let mut out = Vec::with_capacity(keys.len());
         for (key, value) in keys.into_iter().zip(values) {
+            // A key may legitimately disappear between SCAN and GET (a
+            // concurrent delete); that is a race, not corruption — skip it.
             let Some(json) = value else {
-                return Err(corrupt(format!("entity key {key} vanished")));
+                tracing::debug!(key, "entity key vanished between SCAN and GET; skipping");
+                continue;
             };
             let parsed: Value = serde_json::from_str(&json)
                 .map_err(|e| corrupt(format!("corrupt entity key {key}: {e}")))?;
@@ -680,23 +812,25 @@ impl RedisRepository {
         u64::try_from(sequence)
             .map_err(|_| corrupt(format!("outbox sequence counter went negative: {sequence}")))
     }
-
-    async fn next_manifest_sequence(&self) -> Result<u64> {
-        let mut conn = self.conn.clone();
-        let sequence: i64 = conn
-            .incr(format!("{KEY_PREFIX}counters:manifest"), 1)
-            .await
-            .map_err(|e| redis_error("INCR manifest", e))?;
-        u64::try_from(sequence).map_err(|_| {
-            corrupt(format!(
-                "manifest sequence counter went negative: {sequence}"
-            ))
-        })
-    }
 }
 
 fn epoch_ms(timestamp: Timestamp) -> i64 {
     timestamp.as_millisecond()
+}
+
+/// Builds the retry-time argument for [`OUTBOX_MARK_FAILED_SCRIPT`]. `None`
+/// must map to the *empty string*: the script takes its `HDEL` branch for
+/// `''` and clears the stored retry time, while a `"0"` (the old
+/// `unwrap_or_default` behavior) would pin the event to the epoch and leave
+/// the clear branch dead.
+fn next_attempt_arg(next_attempt_at: Option<Timestamp>) -> String {
+    next_attempt_at.map_or_else(String::new, |ts| epoch_ms(ts).to_string())
+}
+
+/// Converts a lease TTL to whole milliseconds, saturating at `i64::MAX` so
+/// an effectively-infinite TTL cannot silently wrap into a negative value.
+fn ttl_ms(ttl: Duration) -> i64 {
+    i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX)
 }
 
 #[async_trait]
@@ -708,7 +842,7 @@ impl LeaseManager for RedisRepository {
             .key(lease_lock_key(key))
             .key(lease_token_counter_key(key))
             .arg(epoch_ms(now))
-            .arg(ttl.as_millis() as i64)
+            .arg(ttl_ms(ttl))
             .arg(owner)
             .invoke_async(&mut conn)
             .await
@@ -728,27 +862,13 @@ impl LeaseManager for RedisRepository {
         let reply: redis::Value = LEASE_RENEW_SCRIPT
             .key(lease_lock_key(key))
             .arg(epoch_ms(now))
-            .arg(ttl.as_millis() as i64)
+            .arg(ttl_ms(ttl))
             .arg(owner)
             .arg(fencing_token.to_string())
             .invoke_async(&mut conn)
             .await
             .map_err(|e| redis_error("EVAL lease renew", e))?;
-        match &reply {
-            redis::Value::Array(elements) => match elements.as_slice() {
-                [redis::Value::Int(1), expires] => Ok(Some(LeaseGrant {
-                    key: key.to_string(),
-                    owner: owner.to_string(),
-                    fencing_token,
-                    expires_at: timestamp_from_ms(
-                        redis_value_u64(expires).ok_or_else(|| corrupt("bad renew reply"))?,
-                    )?,
-                })),
-                _ => Err(corrupt("unexpected lease renew reply")),
-            },
-            // Lua `return 0`: the lease was lost (expired or taken over).
-            _ => Ok(None),
-        }
+        interpret_renew_reply(&reply, key, owner, fencing_token)
     }
 
     async fn release(&self, key: &str, owner: &str, fencing_token: FencingToken) -> Result<()> {
@@ -809,11 +929,15 @@ impl OutboxRepository for RedisRepository {
         let keys = scan_keys(&self.conn, &aggregate_pattern("outbox")).await?;
         let mut sequences = Vec::with_capacity(keys.len());
         for key in &keys {
-            let id = id_from_key("outbox", key)?;
-            let sequence = id
-                .parse::<u64>()
-                .map_err(|_| corrupt(format!("outbox key {key:?} has a non-numeric id")))?;
-            sequences.push(sequence);
+            match outbox_sequence_from_key(key) {
+                Some(sequence) => sequences.push(sequence),
+                None => {
+                    tracing::warn!(
+                        key,
+                        "skipping undecodable outbox key while listing pending events"
+                    );
+                }
+            }
         }
         sequences.sort_unstable();
 
@@ -831,12 +955,9 @@ impl OutboxRepository for RedisRepository {
         let now = self.clock.now();
         let mut events = Vec::new();
         for (sequence, (raw, state)) in sequences.into_iter().zip(pairs) {
-            let Some(json) = raw else {
-                return Err(corrupt(format!("outbox entry {sequence} missing")));
+            let Some(event) = decode_pending_entry(sequence, raw.as_deref(), &state)? else {
+                continue;
             };
-            let event: OutboxEvent = serde_json::from_str(&json)
-                .map_err(|e| corrupt(format!("outbox entry {sequence}: {e}")))?;
-            let event = compose_outbox_event(event, &state);
             if !event.processed
                 && !event.dead_lettered
                 && event.next_attempt_at.is_none_or(|retry_at| retry_at <= now)
@@ -867,12 +988,9 @@ impl OutboxRepository for RedisRepository {
         let _: i64 = OUTBOX_MARK_FAILED_SCRIPT
             .key(outbox_state_key(sequence))
             .arg(error)
-            .arg(
-                next_attempt_at
-                    .map(epoch_ms)
-                    .unwrap_or_default()
-                    .to_string(),
-            )
+            // `None` becomes the empty string so the script clears the
+            // stored retry time; "0" would pin it to the epoch instead.
+            .arg(next_attempt_arg(next_attempt_at))
             .invoke_async(&mut conn)
             .await
             .map_err(|e| redis_error("EVAL outbox mark_failed", e))?;
@@ -890,6 +1008,11 @@ impl OutboxRepository for RedisRepository {
         Ok(())
     }
 
+    /// Requeues an event for manual replay. Redis note: manual replay
+    /// restarts the retry budget — `attempts` is reset to 0 so the replayed
+    /// event gets a full retry allowance again. The memory and file backends
+    /// currently keep the old counter; that difference is tracked for
+    /// cross-backend unification (see the round-two fix record).
     async fn requeue(&self, sequence: u64) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: i64 = OUTBOX_REQUEUE_SCRIPT
@@ -903,26 +1026,30 @@ impl OutboxRepository for RedisRepository {
 
 #[async_trait]
 impl MigrationManifestStore for RedisRepository {
+    /// Idempotent per `source_key`: a single atomic script applies `SET NX`
+    /// semantics to a SHA-256-keyed dedup marker and, only when the marker
+    /// is fresh, allocates the sequence and writes the entry in the same
+    /// script. A losing concurrent writer — the NX failing — reports the
+    /// already-exists outcome as plain success, matching the file backend's
+    /// observable behavior (the previously raced full-scan-then-insert could
+    /// write two entries for one source key).
     async fn save_entry(&self, entry: MigrationManifestEntry) -> Result<()> {
-        // Idempotent per source_key: scan existing manifests first (same
-        // semantics as the file backend).
-        for existing in self.entries().await? {
-            if existing.source_key == entry.source_key {
-                return Ok(());
-            }
-        }
-        let sequence = self.next_manifest_sequence().await?;
+        let dedup_key = manifest_dedup_key(&entry.source_key)?;
         let json = serde_json::to_string_pretty(&entry)?;
         let mut conn = self.conn.clone();
-        let _: () = conn
-            .set(manifest_key(sequence), json)
+        let reply: redis::Value = MANIFEST_SAVE_SCRIPT
+            .key(dedup_key)
+            .key(format!("{KEY_PREFIX}counters:manifest"))
+            .arg(json)
+            .arg(MANIFEST_KEY_PREFIX)
+            .invoke_async(&mut conn)
             .await
-            .map_err(|e| redis_error("SET manifest", e))?;
-        Ok(())
+            .map_err(|e| redis_error("EVAL manifest save", e))?;
+        interpret_manifest_save_reply(&reply, &entry.source_key)
     }
 
     async fn entries(&self) -> Result<Vec<MigrationManifestEntry>> {
-        let keys = scan_keys(&self.conn, &format!("{KEY_PREFIX}migration:manifest-*")).await?;
+        let keys = scan_keys(&self.conn, &entries_scan_pattern()).await?;
         let mut conn = self.conn.clone();
         let mut pipe = redis::pipe();
         for key in &keys {
@@ -1015,6 +1142,9 @@ mod tests {
         }
         assert!(decode_key_component("a%2").is_none());
         assert!(decode_key_component("a%ZZ").is_none());
+        // Escapes are byte-wise with upper-case hex (lookup-table behavior).
+        assert_eq!(encode_key_component("é"), "%C3%A9");
+        assert_eq!(encode_key_component("\0"), "%00");
     }
 
     #[test]
@@ -1045,7 +1175,13 @@ mod tests {
         assert_eq!(state_key, "acmex:v1:outbox-state:000000000001");
         assert!(event_key.starts_with(pattern.trim_end_matches('*')));
         assert!(!state_key.starts_with(pattern.trim_end_matches('*')));
-        assert_eq!(manifest_key(7), "acmex:v1:migration:manifest-000007");
+        // Manifest entry keys (built by MANIFEST_SAVE_SCRIPT from the
+        // prefix plus a zero-padded sequence) are matched by the `entries`
+        // scan pattern.
+        let sequence = 7u64;
+        let manifest = format!("{MANIFEST_KEY_PREFIX}{sequence:06}");
+        assert_eq!(manifest, "acmex:v1:migration:manifest-000007");
+        assert_eq!(entries_scan_pattern(), "acmex:v1:migration:manifest-*");
         assert_eq!(lease_lock_key("op/1"), "acmex:v1:locks:op%2F1");
         assert_eq!(
             lease_token_counter_key("op/1"),
@@ -1274,5 +1410,212 @@ mod tests {
         // server, so the contract is pinned on the redaction helper; a
         // derived Debug (which would embed the raw URL) is deliberately
         // not implemented.
+    }
+
+    /// A minimal well-formed outbox event for decoding tests.
+    fn sample_event(sequence: u64, created: Timestamp) -> OutboxEvent {
+        OutboxEvent {
+            sequence,
+            event_id: format!("evt_{sequence:012}"),
+            event_type: "operation.succeeded".to_string(),
+            payload: serde_json::json!({ "id": 1 }),
+            created_at: created,
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: None,
+            processed: false,
+            dead_lettered: false,
+        }
+    }
+
+    #[test]
+    fn mark_failed_retry_arg_uses_empty_string_for_none() {
+        // `None` must serialize to the empty string so the mark-failed
+        // script takes its HDEL branch; the old `unwrap_or_default`
+        // produced "0", which stored a 1970 retry time instead of clearing
+        // it — `list_pending` then reported `Some(epoch)` rather than
+        // `None`, and the script's clear branch was dead code.
+        assert_eq!(next_attempt_arg(None), "");
+        let ts = Timestamp::from_str("2026-03-04T05:06:07Z").unwrap();
+        assert_eq!(next_attempt_arg(Some(ts)), ts.as_millisecond().to_string());
+
+        // The script contract the empty string relies on: '' clears.
+        assert!(OUTBOX_MARK_FAILED_LUA.contains("if ARGV[2] == '' then"));
+        assert!(OUTBOX_MARK_FAILED_LUA.contains("HDEL"));
+
+        // After the HDEL the state hash carries no retry time, and
+        // composition (what `list_pending` reports) yields `None`.
+        let state: HashMap<String, String> = [("attempts".to_string(), "1".to_string())]
+            .into_iter()
+            .collect();
+        let mut event = sample_event(1, ts);
+        event.next_attempt_at = Some(ts);
+        assert_eq!(compose_outbox_event(event, &state).next_attempt_at, None);
+    }
+
+    #[test]
+    fn pending_entry_decoding_skips_poisoned_keys_instead_of_failing() {
+        let created = Timestamp::from_str("2026-02-03T04:05:06Z").unwrap();
+        let json = serde_json::to_string(&sample_event(5, created)).unwrap();
+        let state = HashMap::new();
+
+        // A healthy entry decodes (with delivery state composed on top).
+        let decoded = decode_pending_entry(5, Some(&json), &state)
+            .unwrap()
+            .expect("healthy entry decodes");
+        assert_eq!(decoded.sequence, 5);
+
+        // Event deleted between SCAN and GET → skip.
+        assert!(decode_pending_entry(5, None, &state).unwrap().is_none());
+        // Undecodable JSON (truncated, wrong shape) → skip, not a
+        // whole-scan corrupt failure.
+        assert!(
+            decode_pending_entry(5, Some("{not json"), &state)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_pending_entry(5, Some("null"), &state)
+                .unwrap()
+                .is_none()
+        );
+
+        // An empty (partially written) delivery hash still composes to
+        // event defaults rather than erroring.
+        let decoded = decode_pending_entry(
+            5,
+            Some(&json),
+            &HashMap::from([("processed".to_string(), "1".to_string())]),
+        )
+        .unwrap()
+        .expect("entry with partial state decodes");
+        assert!(decoded.processed);
+    }
+
+    #[test]
+    fn outbox_scan_keys_with_bad_ids_are_skippable() {
+        assert_eq!(outbox_sequence_from_key(&outbox_event_key(42)), Some(42));
+        // Non-numeric id and non-outbox keys report `None` (logged and
+        // skipped by list_pending) instead of failing the whole scan.
+        assert_eq!(
+            outbox_sequence_from_key("acmex:v1:outbox:not-a-number"),
+            None
+        );
+        assert_eq!(outbox_sequence_from_key("acmex:v1:elsewhere:1"), None);
+    }
+
+    #[test]
+    fn renew_reply_interpretation_distinguishes_loss_from_protocol_errors() {
+        use redis::Value;
+        // Lua `return 0`: the lease was lost — a legitimate `None`.
+        assert!(
+            interpret_renew_reply(&Value::Int(0), "k", "o", 7)
+                .unwrap()
+                .is_none()
+        );
+        // Success shape `{1, expires_at_ms}`.
+        let renewed = interpret_renew_reply(
+            &Value::Array(vec![
+                Value::Int(1),
+                Value::BulkString(b"1767225600000".to_vec()),
+            ]),
+            "lineage/x",
+            "worker-a",
+            3,
+        )
+        .unwrap()
+        .expect("renew success");
+        assert_eq!(renewed.key, "lineage/x");
+        assert_eq!(renewed.owner, "worker-a");
+        assert_eq!(renewed.fencing_token, 3);
+        assert_eq!(renewed.expires_at.to_string(), "2026-01-01T00:00:00Z");
+        // Everything else is a protocol error and must not be silently
+        // reported as a lost lease (the old `_ => Ok(None)` fallback).
+        let garbage = [
+            Value::Array(vec![Value::Int(2)]),
+            Value::Array(vec![Value::Int(1)]),
+            Value::Array(vec![]),
+            Value::Array(vec![Value::Int(1), Value::Int(-5)]),
+            Value::Int(1),
+            Value::Nil,
+            Value::BulkString(b"0".to_vec()),
+        ];
+        for reply in garbage {
+            assert!(
+                interpret_renew_reply(&reply, "k", "o", 7).is_err(),
+                "expected corrupt for {reply:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_dedup_keys_are_stable_per_source_key() {
+        let key = manifest_dedup_key("cert:a.example.com").unwrap();
+        assert_eq!(
+            key,
+            manifest_dedup_key("cert:a.example.com").unwrap(),
+            "same source key must map to the same dedup marker"
+        );
+        assert_ne!(key, manifest_dedup_key("cert:b.example.com").unwrap());
+        assert!(key.starts_with("acmex:v1:manifest-dedup:"));
+        let hex = key.trim_start_matches("acmex:v1:manifest-dedup:");
+        assert_eq!(hex.len(), 64, "SHA-256 hex is 64 characters");
+        assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn manifest_save_reply_semantics_and_script_contract() {
+        use redis::Value;
+        // `0` = dedup marker already present (the SET NX lost) — idempotent
+        // success, exactly like re-saving the same source key.
+        assert!(interpret_manifest_save_reply(&Value::Int(0), "cert:x").is_ok());
+        assert!(interpret_manifest_save_reply(&Value::Int(9), "cert:x").is_ok());
+        // Anything else is a protocol error.
+        assert!(interpret_manifest_save_reply(&Value::Int(-1), "cert:x").is_err());
+        assert!(interpret_manifest_save_reply(&Value::Nil, "cert:x").is_err());
+        assert!(
+            interpret_manifest_save_reply(&Value::BulkString(b"3".to_vec()), "cert:x").is_err()
+        );
+        // The script checks the marker before writing (SET NX semantics)
+        // and folds the INCR + manifest write into the same atomic block.
+        assert!(MANIFEST_SAVE_LUA.contains("EXISTS"));
+        assert!(MANIFEST_SAVE_LUA.contains("'INCR'"));
+        assert!(MANIFEST_SAVE_LUA.contains("string.format('%06d'"));
+    }
+
+    #[test]
+    fn manifest_script_builds_the_same_keys_as_rust() {
+        // The script concatenates the passed prefix with `%06d` of the
+        // sequence; that must equal the keys the `entries` scan pattern
+        // (`{MANIFEST_KEY_PREFIX}*`) matches on the Rust side. `%06d` in
+        // Lua and `{_:06}` in Rust pad identically (wider numbers overflow
+        // the padding in both).
+        let rust_key = |sequence: u64| format!("{MANIFEST_KEY_PREFIX}{sequence:06}");
+        assert_eq!(rust_key(7), "acmex:v1:migration:manifest-000007");
+        assert_eq!(rust_key(123_456), "acmex:v1:migration:manifest-123456");
+        assert_eq!(
+            rust_key(99_999_999_999),
+            "acmex:v1:migration:manifest-99999999999"
+        );
+        assert!(MANIFEST_SAVE_LUA.contains("string.format('%06d'"));
+        assert!(MANIFEST_SAVE_LUA.contains("ARGV[2] .."));
+    }
+
+    #[test]
+    fn requeue_script_restarts_the_retry_budget() {
+        // Manual replay resets `attempts` (a deliberate divergence from the
+        // memory/file backends) and still clears error/retry/flags.
+        assert!(OUTBOX_REQUEUE_LUA.contains("'attempts', 0"));
+        assert!(OUTBOX_REQUEUE_LUA.contains("'dead_lettered', 0, 'processed', 0"));
+        assert!(OUTBOX_REQUEUE_LUA.contains("HDEL"));
+    }
+
+    #[test]
+    fn ttl_conversion_saturates_instead_of_wrapping() {
+        assert_eq!(ttl_ms(Duration::from_millis(0)), 0);
+        assert_eq!(ttl_ms(Duration::from_millis(10_000)), 10_000);
+        // An effectively-infinite TTL saturates instead of truncating
+        // (`as i64` would wrap to a negative value).
+        assert_eq!(ttl_ms(Duration::from_secs(u64::MAX)), i64::MAX);
     }
 }
