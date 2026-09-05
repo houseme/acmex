@@ -1,6 +1,8 @@
 //! Certificate material rendering and downstream delivery sinks.
 
 pub mod http_sink;
+pub mod k8s_sink;
+pub mod vault_sink;
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
