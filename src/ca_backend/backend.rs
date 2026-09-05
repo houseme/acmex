@@ -8,6 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
 use crate::account::KeyPair;
+use crate::crypto::keypair::KeyType;
 use crate::dns::spec::{EnvFileSecretResolver, SecretResolver};
 use crate::domain::{AccountRecord, AccountStatus, KeyAlgorithm, KeyId, KeyRef, TenantId};
 use crate::error::{AcmeError, Result};
@@ -253,8 +254,7 @@ impl AcmeCaBackend {
                 eab.hmac_key.describe()
             ))
         })?;
-        let account_jwk =
-            Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.current_key().await.public_key_bytes()));
+        let account_jwk = Jwk::for_key_pair(&self.current_key().await.0)?;
         eab_binding_jws(
             &account_jwk.to_value(),
             &eab.key_id,
@@ -356,6 +356,7 @@ impl CaBackend for AcmeCaBackend {
         // Persist immediately: a restart must reuse, not re-register.
         let key_id = account_key_id(&self.current_key().await.public_key_bytes());
         let now = self.repositories.clock.now();
+        let current_key = self.current_key().await;
         self.repositories
             .accounts
             .upsert(AccountRecord {
@@ -364,7 +365,10 @@ impl CaBackend for AcmeCaBackend {
                 ca_id: self.ca_id.clone(),
                 directory_url: self.directory_url.clone(),
                 account_url: Some(account_url.clone()),
-                key_ref: KeyRef::software(KeyId::new(key_id.clone())?, KeyAlgorithm::Ed25519),
+                key_ref: KeyRef::software(
+                    KeyId::new(key_id.clone())?,
+                    domain_key_algorithm(&current_key)?,
+                ),
                 contacts: account.contacts.clone(),
                 eab_bound: account.external_account_binding.is_some(),
                 status: AccountStatus::Active,
@@ -411,7 +415,7 @@ impl CaBackend for AcmeCaBackend {
         // Inner JWS (RFC 8555 §7.3.5): shared with the legacy facade so the
         // nested signature semantics have one implementation while the outer
         // request still goes through the session for nonce/error handling.
-        let old_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes()));
+        let old_jwk = Jwk::for_key_pair(&old_key.0)?;
         let inner_object =
             key_change_inner_jws(&account.account_url, &key_change_url, &old_jwk, &new_key)?;
 
@@ -431,7 +435,7 @@ impl CaBackend for AcmeCaBackend {
         let key_id = account_key_id(&new_key.public_key_bytes());
         let now = self.repositories.clock.now();
         let mut record = existing.value;
-        record.key_ref = KeyRef::software(KeyId::new(key_id)?, KeyAlgorithm::Ed25519);
+        record.key_ref = KeyRef::software(KeyId::new(key_id)?, domain_key_algorithm(&new_key)?);
         record.updated_at = now;
         self.repositories.accounts.upsert(record).await?;
 
@@ -630,6 +634,23 @@ pub fn account_key_id(public_key: &[u8]) -> String {
     format!("key_acct_{}", &hex::encode(hasher.finalize())[..16])
 }
 
+/// The domain key algorithm recorded for an account key in the persisted
+/// [`AccountRecord`]. The key id already derives from the public key bytes
+/// (type-agnostic); this mapping only fixes the informational algorithm
+/// label. The v0.9 `KeyAlgorithm` enum has no P-521 variant yet, so P-521
+/// keys record `EcP384` — metadata only, never a protocol input: JWS
+/// signing always derives the algorithm from the actual key.
+fn domain_key_algorithm(key: &KeyPair) -> Result<KeyAlgorithm> {
+    let key_type = KeyType::for_key_pair(&key.0)?;
+    Ok(match key_type {
+        KeyType::Ed25519 => KeyAlgorithm::Ed25519,
+        KeyType::EcdsaP256 => KeyAlgorithm::EcP256,
+        KeyType::EcdsaP384 | KeyType::EcdsaP521 => KeyAlgorithm::EcP384,
+        KeyType::Rsa2048 => KeyAlgorithm::Rsa2048,
+        KeyType::Rsa4096 => KeyAlgorithm::Rsa4096,
+    })
+}
+
 /// Builds the RFC 8555 §7.3.4 `externalAccountBinding` JWS: the protected
 /// header carries `HS256`, the CA-assigned EAB `kid` and the newAccount
 /// URL; the payload is the account key's JWK (the thumbprint input); the
@@ -660,16 +681,18 @@ fn eab_binding_jws(
 ///
 /// This is shared by the production `ca_backend` path and the legacy
 /// `AccountManager` facade, so the double-JWS core cannot drift between
-/// stacks while the old public API remains available.
+/// stacks while the old public API remains available. Both the inner JWK and
+/// the inner `alg` derive from the NEW key, whatever its type.
 pub(crate) fn key_change_inner_jws(
     account_url: &str,
     key_change_url: &str,
     old_jwk: &Jwk,
     new_key: &KeyPair,
 ) -> Result<serde_json::Value> {
-    let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
+    let new_jwk = Jwk::for_key_pair(&new_key.0)?;
+    let inner_alg = KeyType::for_key_pair(&new_key.0)?.jwa_algorithm();
     let inner_header = json!({
-        "alg": "EdDSA",
+        "alg": inner_alg,
         "jwk": new_jwk.to_value(),
         "url": key_change_url,
     });
