@@ -66,6 +66,7 @@ pub async fn create_order(
             key_policy: Default::default(),
             renewal_policy: Default::default(),
             delivery_targets: Vec::new(),
+            external_csr: None,
             idempotency_key: format!("legacy-order-intent-{request_key}"),
         })
         .await
@@ -85,6 +86,7 @@ pub async fn create_order(
         .issue(IssueCertificate {
             context: ActorContext::default(),
             intent_id: intent.id,
+            external_csr: None,
             idempotency_key: format!("legacy-order-issue-{request_key}"),
         })
         .await

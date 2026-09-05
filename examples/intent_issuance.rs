@@ -103,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DeliveryTargetKind::File,
                 deploy_dir.to_string_lossy().as_ref(),
             )?],
+            external_csr: None,
             idempotency_key: "intent-issuance-demo".to_string(),
         })
         .await?;
@@ -110,6 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .issue(IssueCertificate {
             context: ActorContext::default(),
             intent_id: intent.id.clone(),
+            external_csr: None,
             idempotency_key: "intent-issuance-demo-issue".to_string(),
         })
         .await?;

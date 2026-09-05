@@ -242,6 +242,7 @@ impl RepositoryCertificateApplication {
         subject: OperationSubject,
         idempotency_key: String,
         request_hash: String,
+        step_init: Option<(crate::domain::WorkflowStepKind, String)>,
     ) -> Result<OperationRef> {
         if let Some(existing) = self
             .existing_operation(&idempotency_key, &request_hash)
@@ -250,7 +251,7 @@ impl RepositoryCertificateApplication {
             return Ok(existing);
         }
         let now = self.repositories.clock.now();
-        let record = OperationRecord::new(
+        let mut record = OperationRecord::new(
             OperationId::generate(),
             kind,
             subject,
@@ -258,6 +259,14 @@ impl RepositoryCertificateApplication {
             Some(request_hash),
             now,
         );
+        // Initialization payload for a step (external CSR material): consumed
+        // and replaced by the owning step's own output on first success, so
+        // the material survives restarts without ever being duplicated.
+        if let Some((step_kind, payload)) = step_init
+            && let Some(step) = record.steps.iter_mut().find(|s| s.kind == step_kind)
+        {
+            step.output_ref = Some(payload);
+        }
         match self.repositories.operations.create(record.clone()).await? {
             CreateOutcome::Created => {
                 self.repositories
@@ -415,6 +424,12 @@ impl CertificateApplication for RepositoryCertificateApplication {
             &command.validation_policy,
         )
         .map_err(|e| AcmeError::invalid_input(e.to_string()))?;
+
+        validate_external_csr_mode(&command.key_policy, command.external_csr.as_deref())?;
+        command
+            .key_policy
+            .validate()
+            .map_err(|e| AcmeError::invalid_input(e.to_string()))?;
 
         let intent = CertificateIntent {
             id: IntentId::generate(),
@@ -582,8 +597,20 @@ impl CertificateApplication for RepositoryCertificateApplication {
                 AcmeError::not_found(format!("intent `{}` not found", command.intent_id))
             })?;
         ensure_tenant(&command.context.tenant_id, &intent.tenant_id, "intent")?;
+        // External-CSR material: mode exclusivity is validated here (HTTP 400
+        // semantics) and the PEM is forwarded verbatim as the CreateCsr
+        // step's initialization payload. Signature and identifier matching
+        // run in the workflow step where the KeyProvider lives. The material
+        // is part of the idempotency hash so replays with different CSRs are
+        // rejected instead of silently reusing the first operation.
+        let step_init = external_csr_init_payload(&intent, command.external_csr.as_deref())?
+            .map(|payload| (crate::domain::WorkflowStepKind::CreateCsr, payload));
         let lineage = self.lineage_for_intent(&intent).await?;
-        let request_hash = command_hash(&(OperationKind::Issue, &command.intent_id))?;
+        let request_hash = command_hash(&(
+            OperationKind::Issue,
+            &command.intent_id,
+            &command.external_csr,
+        ))?;
         self.submit_operation(
             &command.context,
             OperationKind::Issue,
@@ -594,6 +621,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             },
             idempotency_key,
             request_hash,
+            step_init,
         )
         .await
     }
@@ -617,6 +645,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             },
             idempotency_key,
             request_hash,
+            None,
         )
         .await
     }
@@ -637,6 +666,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             },
             idempotency_key,
             request_hash,
+            None,
         )
         .await
     }
@@ -660,6 +690,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             },
             idempotency_key,
             request_hash,
+            None,
         )
         .await
     }
@@ -776,6 +807,65 @@ fn ensure_tenant(
     } else {
         Err(AcmeError::not_found(format!("{resource} not found")))
     }
+}
+
+/// Validates external-CSR mode exclusivity for one command.
+///
+/// * `key_policy.mode = external_csr` requires CSR material (missing
+///   material would silently fall back to managed key generation — exactly
+///   the behavior this mode exists to prevent);
+/// * `key_policy.mode = managed` forbids CSR material (AcmeX would generate
+///   and hold the key, making the supplied CSR dead weight at best);
+/// * supplied material must parse as a PEM `CERTIFICATE REQUEST`.
+///
+/// Signature and SAN/identifier matching run later in the `CreateCsr`
+/// workflow step, where the KeyProvider lives.
+fn validate_external_csr_mode(
+    policy: &crate::domain::KeyPolicy,
+    external_csr: Option<&str>,
+) -> Result<()> {
+    use crate::domain::KeyManagementMode;
+    match (policy.mode, external_csr) {
+        (KeyManagementMode::ExternalCsr, Some(pem)) => {
+            crate::key::ExternalCsr::from_pem(pem)?;
+            Ok(())
+        }
+        (KeyManagementMode::ExternalCsr, None) => Err(AcmeError::invalid_input(
+            "key_policy.mode external_csr requires external_csr material (a PEM CSR); \
+             AcmeX must never generate the private key for this intent",
+        )),
+        (KeyManagementMode::Managed, Some(_)) => Err(AcmeError::invalid_input(
+            "external_csr material requires key_policy.mode external_csr; managed keys \
+             are generated by AcmeX",
+        )),
+        (KeyManagementMode::Managed, None) => Ok(()),
+    }
+}
+
+/// Builds the `CreateCsr` step initialization payload for an issue request.
+///
+/// Returns `Some(json)` only for external-CSR intents; the JSON field name
+/// is the contract shared with `workflow::issuance::ExternalCsrInitPayload`.
+fn external_csr_init_payload(
+    intent: &CertificateIntent,
+    external_csr: Option<&str>,
+) -> Result<Option<String>> {
+    if intent.key_policy.mode != crate::domain::KeyManagementMode::ExternalCsr {
+        // Same exclusivity rule as intent creation: material on a managed
+        // intent is a configuration error, not dead weight.
+        validate_external_csr_mode(&intent.key_policy, external_csr)?;
+        return Ok(None);
+    }
+    let pem = external_csr.ok_or_else(|| {
+        AcmeError::invalid_input(
+            "intent key_policy.mode is external_csr; the issue request must carry \
+             external_csr material (a PEM CSR)",
+        )
+    })?;
+    validate_external_csr_mode(&intent.key_policy, Some(pem))?;
+    Ok(Some(
+        serde_json::json!({ "external_csr_pem": pem }).to_string(),
+    ))
 }
 
 #[async_trait]
@@ -950,8 +1040,24 @@ mod tests {
             key_policy: Default::default(),
             renewal_policy: Default::default(),
             delivery_targets: Vec::new(),
+            external_csr: None,
             idempotency_key: key.to_string(),
         }
+    }
+
+    fn external_csr_command(key: &str, domain: &str) -> CreateCertificateIntent {
+        let mut command = create_command(key, vec![domain]);
+        command.key_policy.mode = crate::domain::KeyManagementMode::ExternalCsr;
+        command.external_csr = Some(test_csr_pem(domain));
+        command
+    }
+
+    /// A well-formed PEM CSR for `domain`, generated outside AcmeX exactly
+    /// like an external key holder would.
+    fn test_csr_pem(domain: &str) -> String {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let params = rcgen::CertificateParams::new(vec![domain.to_string()]).unwrap();
+        params.serialize_request(&key).unwrap().pem().unwrap()
     }
 
     async fn service() -> Arc<RepositoryCertificateApplication> {
@@ -998,6 +1104,7 @@ mod tests {
             .issue(IssueCertificate {
                 context: ActorContext::default(),
                 intent_id: intent.id.clone(),
+                external_csr: None,
                 idempotency_key: "issue-key".to_string(),
             })
             .await
@@ -1034,6 +1141,7 @@ mod tests {
             .issue(IssueCertificate {
                 context: ActorContext::default(),
                 intent_id: intent.id,
+                external_csr: None,
                 idempotency_key: "issue-cancel".to_string(),
             })
             .await
@@ -1046,6 +1154,142 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cancelled.status, "cancel_requested");
+    }
+
+    #[tokio::test]
+    async fn external_csr_intent_requires_csr_material() {
+        let service = service().await;
+        let mut command = create_command("extcsr-missing", vec!["example.com"]);
+        command.key_policy.mode = crate::domain::KeyManagementMode::ExternalCsr;
+        let err = service.create_intent(command).await.unwrap_err();
+        assert!(matches!(err, AcmeError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("requires external_csr material"),
+            "error must name the missing material: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_intent_rejects_external_csr_material() {
+        let service = service().await;
+        let mut command = create_command("extcsr-managed", vec!["example.com"]);
+        command.external_csr = Some(test_csr_pem("example.com"));
+        let err = service.create_intent(command).await.unwrap_err();
+        assert!(matches!(err, AcmeError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("requires key_policy.mode"),
+            "error must name the mode exclusivity: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_csr_intent_rejects_malformed_pem() {
+        let service = service().await;
+        let mut command = create_command("extcsr-bad-pem", vec!["example.com"]);
+        command.key_policy.mode = crate::domain::KeyManagementMode::ExternalCsr;
+        command.external_csr = Some("not a pem".to_string());
+        let err = service.create_intent(command).await.unwrap_err();
+        assert!(
+            matches!(err, AcmeError::Pem(_)),
+            "malformed CSR PEM must be a pem error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_csr_intent_is_accepted_and_replayed_idempotently() {
+        let service = service().await;
+        let intent = service
+            .create_intent(external_csr_command("extcsr-ok", "example.com"))
+            .await
+            .unwrap();
+        // Same key + same material replays to the same intent.
+        let replay = service
+            .create_intent(external_csr_command("extcsr-ok", "example.com"))
+            .await
+            .unwrap();
+        assert_eq!(intent.id, replay.id);
+    }
+
+    #[tokio::test]
+    async fn issue_requires_csr_material_for_external_csr_intent() {
+        let service = service().await;
+        let intent = service
+            .create_intent(external_csr_command("extcsr-issue", "example.com"))
+            .await
+            .unwrap();
+        let err = service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id,
+                external_csr: None,
+                idempotency_key: "issue-extcsr-missing".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcmeError::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("must carry external_csr"),
+            "error must demand the material: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_rejects_csr_material_for_managed_intent() {
+        let service = service().await;
+        let intent = service
+            .create_intent(create_command("managed-issue", vec!["example.com"]))
+            .await
+            .unwrap();
+        let err = service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id,
+                external_csr: Some(test_csr_pem("example.com")),
+                idempotency_key: "issue-managed-csr".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcmeError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn issue_seeds_external_csr_into_create_csr_step_payload() {
+        let service = service().await;
+        let intent = service
+            .create_intent(external_csr_command("extcsr-seed", "example.com"))
+            .await
+            .unwrap();
+        let op = service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id,
+                external_csr: Some(test_csr_pem("example.com")),
+                idempotency_key: "issue-extcsr-seed".to_string(),
+            })
+            .await
+            .unwrap();
+        let record = service
+            .repositories
+            .operations
+            .get(&op.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let step = record
+            .value
+            .steps
+            .iter()
+            .find(|s| s.kind == crate::domain::WorkflowStepKind::CreateCsr)
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(step.output_ref.as_deref().unwrap()).unwrap();
+        assert!(
+            payload["external_csr_pem"]
+                .as_str()
+                .unwrap()
+                .contains("BEGIN CERTIFICATE REQUEST"),
+            "the CreateCsr step must carry the external CSR init payload"
+        );
     }
 
     #[test]

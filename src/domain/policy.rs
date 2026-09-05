@@ -243,6 +243,41 @@ impl Default for KeyPolicy {
     }
 }
 
+impl KeyPolicy {
+    /// Validates the key-policy invariants that hold regardless of where the
+    /// policy is embedded (intent creation, renewal, imports).
+    ///
+    /// * external-CSR keys are never exportable (AcmeX does not hold them, so
+    ///   there is nothing to export);
+    /// * external-CSR intents cannot request per-renewal key rotation: AcmeX
+    ///   never holds the private key, so a fresh key always means a fresh
+    ///   intent with fresh CSR material.
+    ///
+    /// The `algorithm` field is informational under
+    /// [`KeyManagementMode::ExternalCsr`]: the real key is whatever the
+    /// supplied CSR carries, so it is never enforced against managed
+    /// generation.
+    pub fn validate(&self) -> Result<()> {
+        if self.mode != KeyManagementMode::ExternalCsr {
+            return Ok(());
+        }
+        if self.exportable {
+            return Err(AcmeError::InvalidInput(
+                "external-CSR keys are never exportable".to_string(),
+            ));
+        }
+        if self.rotation == KeyRotationPolicy::RotateEachRenewal {
+            return Err(AcmeError::InvalidInput(
+                "external-CSR intents cannot rotate keys per renewal; AcmeX never holds \
+                 the private key, so key rotation requires a new intent with fresh CSR \
+                 material"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Supported certificate key algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -473,6 +508,11 @@ fn challenge_preference() -> [ChallengeType; 3] {
 ///
 /// Returns a policy error naming the offending identifier otherwise; this
 /// check must run *before* any ACME order is created.
+///
+/// Key-management mode is deliberately out of scope here: challenge
+/// compatibility is independent of how the private key is held. External-CSR
+/// key policies are validated by [`KeyPolicy::validate`], which intent
+/// creation must run alongside this function.
 pub fn validate_order_policy(
     identifiers: &[Identifier],
     offered: &ChallengeSet,
@@ -822,5 +862,50 @@ mod tests {
         assert_eq!(key.algorithm, KeyAlgorithm::EcP256);
         assert_eq!(key.mode, KeyManagementMode::Managed);
         assert!(!key.exportable);
+    }
+
+    #[test]
+    fn external_csr_key_policy_rejects_export() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::ExternalCsr,
+            exportable: true,
+            ..KeyPolicy::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(err.to_string().contains("never exportable"), "{err}");
+    }
+
+    #[test]
+    fn external_csr_key_policy_rejects_per_renewal_rotation() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::ExternalCsr,
+            rotation: KeyRotationPolicy::RotateEachRenewal,
+            ..KeyPolicy::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("cannot rotate keys per renewal"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn external_csr_key_policy_accepts_defaults() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::ExternalCsr,
+            ..KeyPolicy::default()
+        };
+        policy.validate().unwrap();
+    }
+
+    #[test]
+    fn managed_key_policy_is_unaffected_by_external_csr_rules() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::Managed,
+            exportable: true,
+            rotation: KeyRotationPolicy::RotateEachRenewal,
+            ..KeyPolicy::default()
+        };
+        policy.validate().unwrap();
     }
 }

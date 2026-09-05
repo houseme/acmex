@@ -62,6 +62,24 @@ pub struct CreateIntentRequest {
     pub renewal_policy: crate::domain::RenewalPolicy,
     #[serde(default)]
     pub delivery_targets: Vec<crate::domain::DeliveryTarget>,
+    /// External CSR material (PEM `CERTIFICATE REQUEST`) for
+    /// `key_policy.mode = external_csr` intents. Required in that mode and
+    /// forbidden under `Managed` — both violations are rejected with 400.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_csr: Option<String>,
+}
+
+/// Optional body of `POST /certificate-intents/{id}/issue`.
+///
+/// Only used for external-CSR intents, whose private key never reaches
+/// AcmeX: every issuance must be proven by CSR material supplied here (and
+/// at intent creation). Omitted (or an empty body) keeps the historical
+/// behavior for managed intents; supplying `external_csr` for a managed
+/// intent is a 400.
+#[derive(Debug, Default, Deserialize)]
+pub struct IssueIntentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_csr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +305,7 @@ pub async fn create_intent(
                 key_policy: payload.key_policy,
                 renewal_policy: payload.renewal_policy,
                 delivery_targets: payload.delivery_targets,
+                external_csr: payload.external_csr,
                 idempotency_key: idempotency_key(&headers)?,
             })
             .await?;
@@ -386,18 +405,34 @@ pub async fn update_intent(
     }
 }
 
+/// Parses the optional issue-request body.
+///
+/// Historical clients `POST` the issue route without a body, so an empty
+/// body means [`IssueIntentRequest::default`]; anything else must be valid
+/// JSON for that shape.
+fn parse_issue_body(body: axum::body::Bytes) -> Result<IssueIntentRequest> {
+    if body.is_empty() {
+        return Ok(IssueIntentRequest::default());
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| AcmeError::invalid_input(format!("invalid issue request body: {e}")))
+}
+
 pub async fn issue_intent(
     State(state): State<AppState>,
     actor: Option<Extension<ActorContext>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Response {
     let result = async {
         let intent_id = IntentId::new(id)?;
+        let request = parse_issue_body(body)?;
         let op = application(&state)?
             .issue(IssueCertificate {
                 context: actor_context(actor),
                 intent_id,
+                external_csr: request.external_csr,
                 idempotency_key: idempotency_key(&headers)?,
             })
             .await?;

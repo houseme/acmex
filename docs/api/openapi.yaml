@@ -135,6 +135,16 @@ paths:
       parameters:
         - $ref: '#/components/parameters/IntentId'
         - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        description: >
+          Optional; required `external_csr` material when the intent's
+          key_policy.mode is external_csr (AcmeX never holds that private
+          key). An empty body keeps the managed-key behavior.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueIntentRequest'
       responses:
         '202':
           $ref: '#/components/responses/OperationAccepted'
@@ -355,6 +365,26 @@ components:
           type: array
           items:
             type: object
+        external_csr:
+          type: string
+          description: >
+            PEM-encoded PKCS#10 CSR (`CERTIFICATE REQUEST`) held by the
+            caller. Required when `key_policy.mode` is `external_csr` and
+            forbidden when it is `managed` (violations are rejected with
+            400). AcmeX never derives or stores the private key; the CSR is
+            validated (signature + exact SAN match) and forwarded to the CA
+            at finalize.
+    IssueIntentRequest:
+      type: object
+      description: >
+        Optional body of POST /certificate-intents/{id}/issue. Omit it (or
+        send an empty body) for managed intents; external-CSR intents
+        require `external_csr` on every issuance because AcmeX never holds
+        the private key.
+      properties:
+        external_csr:
+          type: string
+          description: PEM-encoded PKCS#10 CSR (`CERTIFICATE REQUEST`).
     PatchIntentRequest:
       type: object
       description: >

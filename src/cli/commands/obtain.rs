@@ -121,6 +121,7 @@ pub async fn handle_obtain(args: ObtainCommand) -> Result<()> {
             key_policy: Default::default(),
             renewal_policy: Default::default(),
             delivery_targets: Vec::new(),
+            external_csr: None,
             idempotency_key: format!("cli-obtain-intent-{idempotency_seed}"),
         })
         .await?;
@@ -128,6 +129,7 @@ pub async fn handle_obtain(args: ObtainCommand) -> Result<()> {
         .issue(IssueCertificate {
             context: ActorContext::default(),
             intent_id: intent.id.clone(),
+            external_csr: None,
             idempotency_key: format!("cli-obtain-issue-{}", intent.id),
         })
         .await?;

@@ -295,6 +295,7 @@ async fn webhook_renew_certificate_creates_durable_operation() {
             key_policy: Default::default(),
             renewal_policy: Default::default(),
             delivery_targets: Vec::new(),
+            external_csr: None,
             idempotency_key: "webhook-create-intent".to_string(),
         })
         .await
@@ -303,6 +304,7 @@ async fn webhook_renew_certificate_creates_durable_operation() {
         .issue(IssueCertificate {
             context: ActorContext::default(),
             intent_id: intent.id,
+            external_csr: None,
             idempotency_key: "webhook-create-lineage".to_string(),
         })
         .await
@@ -505,6 +507,7 @@ async fn patch_fixture() -> (axum::Router, acmex::application::IntentView, Repos
             key_policy: Default::default(),
             renewal_policy: Default::default(),
             delivery_targets: Vec::new(),
+            external_csr: None,
             idempotency_key: "patch-create-key".to_string(),
         })
         .await
@@ -776,6 +779,7 @@ async fn api_v1_challenge_sessions_and_cleanup_retry() {
             key_policy: Default::default(),
             renewal_policy: Default::default(),
             delivery_targets: Vec::new(),
+            external_csr: None,
             idempotency_key: "challenge-intent-key".to_string(),
         })
         .await
@@ -784,6 +788,7 @@ async fn api_v1_challenge_sessions_and_cleanup_retry() {
         .issue(IssueCertificate {
             context: ActorContext::default(),
             intent_id: intent.id,
+            external_csr: None,
             idempotency_key: "challenge-issue-key".to_string(),
         })
         .await
