@@ -107,9 +107,21 @@ impl fmt::Debug for ExternalCsr {
 
 impl ExternalCsr {
     /// Parses a PEM encoded external CSR.
+    ///
+    /// Strict single-document parsing: `pem::parse` alone would skip leading
+    /// garbage and silently pick the first block out of a multi-document
+    /// paste, which makes "certificate chain pasted instead of CSR"
+    /// indistinguishable from a valid submission.
     pub fn from_pem(pem: &str) -> Result<Self> {
-        let block = ::pem::parse(pem.as_bytes())
+        let blocks = ::pem::parse_many(pem.as_bytes())
             .map_err(|err| AcmeError::pem(format!("parse CSR PEM: {err}")))?;
+        if blocks.len() != 1 {
+            return Err(AcmeError::pem(format!(
+                "expected exactly one PEM block, found {}",
+                blocks.len()
+            )));
+        }
+        let block = &blocks[0];
         if block.tag() != "CERTIFICATE REQUEST" {
             return Err(AcmeError::pem(format!(
                 "expected CERTIFICATE REQUEST PEM, found {}",

@@ -40,6 +40,10 @@ use crate::repository::OutboxEvent;
 /// ([`EmailConfig::timeout_secs`]) still applies on top of this.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Upper bound for one SMTP reply line; RFC 5321 recommends at least 512
+/// octets and real replies are far below this.
+const MAX_REPLY_LINE_BYTES: usize = 4096;
+
 /// Retry semantics of a failed SMTP delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmtpErrorClass {
@@ -225,6 +229,14 @@ async fn read_reply<S: AsyncRead + Unpin>(
             return Err(SmtpFailure::retryable(
                 "connection closed by the SMTP server before a complete reply",
             ));
+        }
+        // Real SMTP replies stay far below this; anything larger is treated
+        // as a protocol violation. Worst-case unbounded memory is already
+        // bounded by the overall delivery timeout on this read.
+        if raw.len() > MAX_REPLY_LINE_BYTES {
+            return Err(SmtpFailure::terminal(format!(
+                "SMTP reply line exceeds {MAX_REPLY_LINE_BYTES} bytes"
+            )));
         }
         let text = String::from_utf8_lossy(&raw);
         let text = text.trim_end_matches(['\r', '\n']);
@@ -780,7 +792,11 @@ fn prepare_message(
     }
 
     let subject = encode_subject(&format!("{}{}", settings.subject_prefix, event.event_type));
-    let payload = serde_json::to_string_pretty(&event.payload).unwrap_or_else(|_| "{}".to_string());
+    // serde_json pretty-prints with bare `\n`; RFC 5321 §2.3.8 requires the
+    // DATA payload to use CRLF line endings, so normalize before assembly.
+    let payload = serde_json::to_string_pretty(&event.payload)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('\n', "\r\n");
     let body = match body_format {
         EmailBodyFormat::Text => format!(
             "AcmeX event: {}\r\n\r\nevent_id: {}\r\nsequence: {}\r\ncreated_at: {}\r\n\r\npayload:\r\n{}",

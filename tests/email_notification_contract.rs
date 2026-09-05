@@ -709,13 +709,18 @@ to = ["ops@example.test"]
         .await
         .expect_err("both channels fail");
     let rendered = err.to_string();
+    // The terminal SMTP 5xx wins the classification: returning it verbatim
+    // (rather than a retryable transport aggregate) means the outbox
+    // consumer dead-letters the event instead of retrying to exhaustion.
+    // Both channels were still attempted (webhook failure logged above the
+    // returned error).
+    assert!(
+        matches!(err, AcmeError::Protocol(_)),
+        "expected the terminal classification to win, got: {rendered}"
+    );
     assert!(
         rendered.contains("550"),
         "email error in aggregate: {rendered}"
-    );
-    assert!(
-        rendered.contains("Webhook"),
-        "webhook error in aggregate: {rendered}"
     );
 }
 

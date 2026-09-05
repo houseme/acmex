@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -72,8 +73,14 @@ fn file_stamp(meta: &std::fs::Metadata) -> Option<FileStamp> {
 /// A parsed entity JSON plus the stamp it was read at.
 struct ParsedFile {
     stamp: FileStamp,
+    /// Insertion sequence used to evict roughly-oldest entries first.
+    stamp_seq: u64,
     value: Arc<Value>,
 }
+
+/// Maximum number of cached parsed entities. Bounded memory beats an
+/// unbounded hit rate: misses only cost one extra read+parse.
+const PARSE_CACHE_CAPACITY: usize = 8192;
 
 /// Filesystem store shared by all aggregates. Clones share state locks.
 #[derive(Clone)]
@@ -87,8 +94,11 @@ pub struct FileEntityStore {
     lease_tokens: Arc<tokio::sync::Mutex<HashMap<String, FencingToken>>>,
     /// Parsed entity files keyed by path, validated against the on-disk
     /// (mtime, len) stamp on every read (see [`Self::read_entity_json`]).
+    /// Bounded by [`PARSE_CACHE_CAPACITY`] with oldest-first eviction.
     /// Plain `Mutex` is sufficient: no await happens while it is held.
     parse_cache: Arc<Mutex<HashMap<PathBuf, ParsedFile>>>,
+    /// Monotonic insertion sequence for approximate-LRU eviction.
+    parse_cache_seq: Arc<AtomicU64>,
 }
 
 impl FileEntityStore {
@@ -101,6 +111,7 @@ impl FileEntityStore {
             manifest_next: Arc::new(tokio::sync::Mutex::new(None)),
             lease_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             parse_cache: Arc::new(Mutex::new(HashMap::new())),
+            parse_cache_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -177,16 +188,30 @@ impl FileEntityStore {
         let value = Arc::new(value);
 
         if let Some(stamp) = stamp {
-            self.parse_cache
-                .lock()
-                .expect("parse cache poisoned")
-                .insert(
-                    path.to_path_buf(),
-                    ParsedFile {
-                        stamp,
-                        value: Arc::clone(&value),
-                    },
-                );
+            let mut cache = self.parse_cache.lock().expect("parse cache poisoned");
+            // Bound the cache so a long-running daemon does not pin every
+            // entity ever read (operations and outbox accumulate forever).
+            // Eviction is purely a memory measure: correctness never depends
+            // on a cached entry surviving, because every hit revalidates the
+            // stat stamp first.
+            if !cache.contains_key(path) && cache.len() >= PARSE_CACHE_CAPACITY {
+                let mut oldest: Vec<(PathBuf, u64)> = cache
+                    .iter()
+                    .map(|(p, parsed)| (p.clone(), parsed.stamp_seq))
+                    .collect();
+                oldest.sort_unstable_by_key(|(_, seq)| *seq);
+                for (path, _) in oldest.iter().take(cache.len() / 4) {
+                    cache.remove(path);
+                }
+            }
+            cache.insert(
+                path.to_path_buf(),
+                ParsedFile {
+                    stamp,
+                    stamp_seq: self.parse_cache_seq.fetch_add(1, Ordering::Relaxed),
+                    value: Arc::clone(&value),
+                },
+            );
         }
         Ok(Some(value))
     }
@@ -375,6 +400,7 @@ impl EntityStore for FileEntityStore {
                                 path.clone(),
                                 ParsedFile {
                                     stamp,
+                                    stamp_seq: self.parse_cache_seq.fetch_add(1, Ordering::Relaxed),
                                     value: Arc::clone(&value),
                                 },
                             );

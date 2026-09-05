@@ -514,21 +514,32 @@ impl OutboxDelivery for WebhookManager {
             }
         }
 
+        // Preserve the most permanent classification when joining: a
+        // terminal SMTP 5xx must not be masked as retryable transport, or
+        // the consumer would retry until the attempt budget runs out. The
+        // individual failures were already logged above, so returning the
+        // terminal error verbatim keeps its stable delivery code.
+        let retryable = |err: &AcmeError| {
+            matches!(
+                err,
+                AcmeError::Transport(_) | AcmeError::Timeout(_) | AcmeError::RateLimited(_)
+            )
+        };
+        if let Some(idx) = errors.iter().position(|err| !retryable(err)) {
+            return Err(errors.swap_remove(idx));
+        }
         let mut aggregated = errors.into_iter();
         let Some(first) = aggregated.next() else {
             return Ok(());
         };
-        match aggregated.next() {
-            None => Err(first),
-            Some(second) => {
-                let mut joined = format!("{first}; {second}");
-                for rest in aggregated {
-                    joined.push_str("; ");
-                    joined.push_str(&rest.to_string());
-                }
-                Err(AcmeError::Transport(joined))
-            }
-        }
+        let joined = format!(
+            "{first}; {}",
+            aggregated
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        Err(AcmeError::Transport(joined))
     }
 }
 
