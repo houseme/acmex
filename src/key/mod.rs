@@ -165,6 +165,17 @@ pub enum DestroyOutcome {
     Refused,
 }
 
+/// Explicit authorization required before destroying key material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DestroyAuthorization {
+    /// Actor that requested destruction.
+    pub actor: String,
+    /// Whether the actor explicitly confirmed the irreversible destruction.
+    pub confirmed: bool,
+    /// Human-readable audit reason.
+    pub reason: String,
+}
+
 /// Source of certificate keys and CSRs.
 #[async_trait]
 pub trait KeyProvider: Send + Sync {
@@ -180,8 +191,23 @@ pub trait KeyProvider: Send + Sync {
         key: &KeyRef,
         authorization: ExportAuthorization,
     ) -> Result<Option<SecretBytes>>;
-    /// Destroys an unused key when the provider can prove it is safe.
+    /// Conservative destroy probe kept for compatibility: reports whether a
+    /// key can be destroyed but never removes material. Real destruction
+    /// goes through [`KeyProvider::destroy_confirmed`].
     async fn destroy(&self, key: &KeyRef) -> Result<DestroyOutcome>;
+    /// Destroys key material after an explicit, auditable confirmation.
+    ///
+    /// The default preserves the conservative [`KeyProvider::destroy`]
+    /// semantics so implementations that have not opted into confirmed
+    /// destruction keep refusing.
+    async fn destroy_confirmed(
+        &self,
+        key: &KeyRef,
+        authorization: DestroyAuthorization,
+    ) -> Result<DestroyOutcome> {
+        let _ = authorization;
+        self.destroy(key).await
+    }
 }
 
 /// Software key provider backed by [`FileSecretStore`].
@@ -342,6 +368,36 @@ impl KeyProvider for SoftwareKeyProvider {
             Ok(DestroyOutcome::NotFound)
         }
     }
+
+    async fn destroy_confirmed(
+        &self,
+        key: &KeyRef,
+        authorization: DestroyAuthorization,
+    ) -> Result<DestroyOutcome> {
+        self.ensure_own_key(key)?;
+        if !authorization.confirmed {
+            tracing::warn!(
+                key_id = %key.key_id,
+                actor = %authorization.actor,
+                "key destroy refused: missing explicit confirmation"
+            );
+            return Ok(DestroyOutcome::Refused);
+        }
+        if !self.store.contains(key.key_id.as_str()).await? {
+            return Ok(DestroyOutcome::NotFound);
+        }
+        if self.store.remove(key.key_id.as_str()).await? {
+            tracing::info!(
+                key_id = %key.key_id,
+                actor = %authorization.actor,
+                reason = %authorization.reason,
+                "key material destroyed"
+            );
+            Ok(DestroyOutcome::Destroyed)
+        } else {
+            Ok(DestroyOutcome::NotFound)
+        }
+    }
 }
 
 fn validate_external_csr(request: CreateCsr, external: ExternalCsr) -> Result<CsrArtifact> {
@@ -460,4 +516,147 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn confirmed(actor: &str) -> DestroyAuthorization {
+        DestroyAuthorization {
+            actor: actor.to_string(),
+            confirmed: true,
+            reason: "rotation cleanup".to_string(),
+        }
+    }
+
+    fn unconfirmed() -> DestroyAuthorization {
+        DestroyAuthorization {
+            actor: "test".to_string(),
+            confirmed: false,
+            reason: "confirmation missing".to_string(),
+        }
+    }
+
+    fn export_authorization() -> ExportAuthorization {
+        ExportAuthorization {
+            actor: "test".to_string(),
+            key_export_granted: true,
+            reason: "key lifecycle test".to_string(),
+        }
+    }
+
+    struct TempDirGuard(PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // A tiny temp-dir helper so tests do not need a `tempfile` dependency.
+    fn temp_store_dir(tag: &str) -> TempDirGuard {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "acmex-key-test-{tag}-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir create");
+        TempDirGuard(path)
+    }
+
+    fn exportable_policy() -> KeyPolicy {
+        KeyPolicy {
+            exportable: true,
+            ..KeyPolicy::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_confirmed_removes_key_material() {
+        let dir = temp_store_dir("destroy");
+        let provider = SoftwareKeyProvider::new(FileSecretStore::new(dir.0.join("secrets")));
+        let key = provider
+            .create_key(CreateKey {
+                policy: exportable_policy(),
+                key_id: None,
+            })
+            .await
+            .unwrap();
+
+        // Unconfirmed requests are refused and keep the key intact.
+        let refused = provider
+            .destroy_confirmed(&key, unconfirmed())
+            .await
+            .unwrap();
+        assert_eq!(refused, DestroyOutcome::Refused);
+        assert!(
+            provider
+                .export(&key, export_authorization())
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // Confirmed destruction removes the material.
+        let destroyed = provider
+            .destroy_confirmed(&key, confirmed("security-team"))
+            .await
+            .unwrap();
+        assert_eq!(destroyed, DestroyOutcome::Destroyed);
+
+        // The key is gone: export yields nothing and public key lookup is
+        // a classified NotFound, never silent success.
+        assert!(
+            provider
+                .export(&key, export_authorization())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let public = provider.public_key(&key).await;
+        assert!(matches!(public, Err(AcmeError::NotFound(_))));
+
+        // Destroying again reports NotFound instead of pretending.
+        let again = provider
+            .destroy_confirmed(&key, confirmed("security-team"))
+            .await
+            .unwrap();
+        assert_eq!(again, DestroyOutcome::NotFound);
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_destroy_is_refused_without_touching_the_key() {
+        let dir = temp_store_dir("unconfirmed");
+        let provider = SoftwareKeyProvider::new(FileSecretStore::new(dir.0.join("secrets")));
+        let key = provider
+            .create_key(CreateKey {
+                policy: exportable_policy(),
+                key_id: None,
+            })
+            .await
+            .unwrap();
+
+        let outcome = provider
+            .destroy_confirmed(&key, unconfirmed())
+            .await
+            .unwrap();
+        assert_eq!(outcome, DestroyOutcome::Refused);
+        // The key pair still produces CSRs after the refused destroy.
+        let identifiers = IdentifierSet::parse(["destroy.example.com"]).unwrap();
+        let csr = provider
+            .create_csr(CreateCsr {
+                identifiers,
+                policy: exportable_policy(),
+                key_ref: Some(key.clone()),
+                external_csr: None,
+            })
+            .await
+            .unwrap();
+        assert!(!csr.csr_der.is_empty());
+    }
 }
