@@ -12,10 +12,11 @@
 //! * **Outbox** — events are appended atomically with state changes and
 //!   consumed at-least-once.
 //!
-//! Two backends are provided: [`memory::MemoryRepository`] (reference
-//! implementation) and [`file::FileRepository`] (atomic JSON files). A
-//! Redis implementation follows the same traits (roadmap T02 follow-up);
-//! the trait surface is frozen for v0.9.0.
+//! Three backends are provided: [`memory::MemoryRepository`] (reference
+//! implementation), [`file::FileRepository`] (atomic JSON files) and — behind
+//! the `redis` feature — [`redis::RedisRepository`] (shared Redis server with
+//! Lua-script atomic CAS/leases/outbox). The trait surface is frozen for
+//! v0.9.0.
 //!
 //! Business code never concatenates storage keys (`cert:<domains>`) — it
 //! talks to aggregates by typed IDs.
@@ -24,6 +25,8 @@ pub mod clock;
 pub mod file;
 pub mod memory;
 pub mod migration;
+#[cfg(feature = "redis")]
+pub mod redis;
 pub mod secret_store;
 
 use std::sync::Arc;
@@ -49,6 +52,8 @@ pub use migration::{
     LegacyBundleMigrator, MigrationMode, MigrationOutcome, MigrationPlanEntry, MigrationReport,
     MigrationStatus,
 };
+#[cfg(feature = "redis")]
+pub use redis::RedisRepository;
 pub use secret_store::FileSecretStore;
 
 /// Optimistic-concurrency revision of a stored entity.
@@ -455,6 +460,14 @@ pub struct RepositorySet {
 }
 
 impl RepositorySet {
+    /// Opens a Redis-backed repository set at `url`
+    /// (e.g. `redis://127.0.0.1:6379/0`; credentials in the URL are
+    /// redacted in `Debug` output). Requires the `redis` feature.
+    #[cfg(feature = "redis")]
+    pub async fn redis(url: &str) -> Result<Self> {
+        Ok(redis::RedisRepository::connect(url).await?.into_set())
+    }
+
     /// Returns a repository set that records failed repository calls in
     /// `acmex_repository_errors_total{backend,operation}`.
     ///
