@@ -31,7 +31,7 @@ use crate::application::{
 };
 use crate::config::Config;
 use crate::error::Result;
-use crate::notifications::WebhookManager;
+use crate::notifications::{OutboxConsumer, OutboxConsumerConfig, WebhookManager};
 use crate::orchestrator::OrchestrationStatus;
 use crate::renewal::{ControllerRenewalScheduler, RenewalController, RenewalControllerConfig};
 use crate::repository::RepositorySet;
@@ -121,7 +121,8 @@ pub async fn start_server(
     tracing::info!("Initializing AcmeX API server on {}", addr);
 
     let health = Arc::new(HealthCheck::new());
-    let webhook = Arc::new(WebhookHandler::new(webhook_manager));
+    // Cloned so the original stays available for the outbox consumer below.
+    let webhook = Arc::new(WebhookHandler::new(webhook_manager.clone()));
     let tasks = Arc::new(RwLock::new(HashMap::new()));
 
     let (_, repositories) = ApplicationServiceBuilder::from_config(&config)
@@ -170,6 +171,33 @@ pub async fn start_server(
         Err(err) => {
             tracing::error!(error = %err, "workflow worker not started");
         }
+    }
+
+    // The durable outbox consumer: drains operation/deployment/audit events
+    // from the repository outbox to the webhook delivery, so produced events
+    // do not accumulate without bound. `[outbox]` gates the loop for
+    // deployments that consume the outbox externally. Assembly is infallible
+    // (unlike the worker above there is no error path), and `with_metrics`
+    // attaches the repository error observer itself — the set passed to
+    // `new` must stay unobserved or every failure would count twice.
+    if config.outbox.enabled {
+        let outbox_interval = std::time::Duration::from_secs(config.outbox.interval_secs.max(1));
+        let consumer = OutboxConsumer::new(
+            repositories.clone(),
+            webhook_manager.clone(),
+            OutboxConsumerConfig::from(&config.outbox),
+        )
+        .with_metrics(metrics.clone());
+        tokio::spawn(async move {
+            consumer.run_forever(outbox_interval).await;
+        });
+        tracing::info!(
+            interval_secs = outbox_interval.as_secs(),
+            batch_size = config.outbox.batch_size,
+            "outbox consumer started"
+        );
+    } else {
+        tracing::info!("outbox consumer disabled by configuration");
     }
 
     let scheduler = scheduler.or_else(|| {

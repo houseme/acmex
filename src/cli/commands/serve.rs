@@ -3,7 +3,7 @@ use crate::RedisStorage;
 use crate::config::Config;
 /// Serve command implementation
 use crate::error::Result;
-use crate::notifications::{WebhookConfig, WebhookFormat, WebhookManager};
+use crate::notifications::WebhookManager;
 use crate::server::start_server;
 use crate::storage::{FileStorage, MemoryStorage, StorageBackend};
 use std::net::SocketAddr;
@@ -71,19 +71,12 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
     }
     let client = crate::client::AcmeClient::new(acme_config)?;
 
-    // Initialize webhook manager
-    let webhook_config = WebhookConfig {
-        name: "default".to_string(),
-        url: "http://localhost:8080/webhook".to_string(), // Default or from config
-        events: vec![],
-        format: WebhookFormat::Json,
-        auth_token: None,
-        signing_secret: None,
-        timeout_secs: 10,
-        max_retries: 3,
-    };
-
-    let webhook_manager = Arc::new(WebhookManager::new(vec![webhook_config]));
+    // Initialize webhook manager. `[notifications.webhooks]` has no mapping
+    // to the outbound delivery client yet, so serve runs with no endpoints:
+    // the outbox consumer treats that as a cheap no-op drain. (The previous
+    // hardcoded `localhost:8080` placeholder would now receive every outbox
+    // event — delivery ignores event filtering — and fail each one.)
+    let webhook_manager = Arc::new(WebhookManager::new(Vec::new()));
 
     // Start server
     start_server(

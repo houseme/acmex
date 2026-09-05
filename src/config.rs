@@ -50,6 +50,10 @@ pub struct Config {
     #[serde(default)]
     pub notifications: Option<NotificationSettings>,
 
+    /// Durable outbox consumer settings.
+    #[serde(default)]
+    pub outbox: OutboxSettings,
+
     /// CLI-specific settings.
     #[serde(default)]
     pub cli: Option<CliSettings>,
@@ -745,6 +749,34 @@ pub struct EmailConfig {
     pub password: Option<SecretRef>,
 }
 
+/// Durable outbox consumer settings (`[outbox]`).
+///
+/// The consumer drains `operation.*`/`deployment.*`/`audit.*` events from the
+/// repository outbox to the webhook delivery; without it the outbox grows
+/// without bound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxSettings {
+    /// Whether the runtime spawns the outbox consumer loop.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Seconds between consumer passes.
+    #[serde(default = "default_outbox_interval_secs")]
+    pub interval_secs: u64,
+    /// Maximum events claimed per pass (maps to the consumer batch size).
+    #[serde(default = "default_outbox_batch_size")]
+    pub batch_size: usize,
+}
+
+impl Default for OutboxSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            interval_secs: default_outbox_interval_secs(),
+            batch_size: default_outbox_batch_size(),
+        }
+    }
+}
+
 /// CLI settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliSettings {
@@ -854,6 +886,13 @@ fn default_webhook_timeout() -> u64 {
 
 fn default_webhook_replay_window() -> u64 {
     300
+}
+fn default_outbox_interval_secs() -> u64 {
+    5
+}
+/// Matches `OutboxConsumerConfig::default().batch_size`.
+fn default_outbox_batch_size() -> usize {
+    32
 }
 fn default_smtp_port() -> u16 {
     587
@@ -1120,6 +1159,17 @@ impl Config {
         for provider_id in self.dns.providers.keys() {
             self.dns_propagation_settings_for(Some(provider_id))?
                 .validate(&format!("dns.providers.{provider_id}.propagation"))?;
+        }
+
+        if self.outbox.interval_secs == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.interval_secs must be at least 1 second",
+            ));
+        }
+        if self.outbox.batch_size == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.batch_size must be at least 1",
+            ));
         }
 
         self.external_account_binding_ref()?;
@@ -1555,5 +1605,58 @@ poll_interval_secs = 3
         assert!(policy.recursive_resolvers.is_empty());
         assert_eq!(policy.poll_interval, Duration::from_secs(3));
         assert_eq!(policy.max_wait, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn outbox_settings_default_to_enabled_consuming() {
+        let settings = OutboxSettings::default();
+        assert!(settings.enabled);
+        assert_eq!(settings.interval_secs, 5);
+        assert_eq!(settings.batch_size, 32);
+    }
+
+    /// Config files written before the `[outbox]` section existed must keep
+    /// parsing unchanged and pick up the consuming defaults.
+    #[test]
+    fn config_without_outbox_section_keeps_defaults() {
+        let config = Config::from_str(
+            "[acme]\nca = \"letsencrypt\"\nca_environment = \"staging\"\n\n[[notifications.webhooks]]\nurl = \"https://hooks.example.test/acmex\"\n",
+        )
+        .unwrap();
+        assert!(config.outbox.enabled);
+        assert_eq!(config.outbox.interval_secs, 5);
+        assert_eq!(config.outbox.batch_size, 32);
+    }
+
+    #[test]
+    fn outbox_section_overrides_defaults() {
+        let toml = "\n[outbox]\nenabled = false\ninterval_secs = 15\nbatch_size = 8\n";
+        let config = Config::from_str(toml).unwrap();
+        assert!(!config.outbox.enabled);
+        assert_eq!(config.outbox.interval_secs, 15);
+        assert_eq!(config.outbox.batch_size, 8);
+    }
+
+    #[test]
+    fn outbox_validation_rejects_zero_interval_and_batch() {
+        let err = Config::from_str("[outbox]\ninterval_secs = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.interval_secs must be at least 1 second"),
+            "got: {err}"
+        );
+
+        let err = Config::from_str("[outbox]\nbatch_size = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.batch_size must be at least 1"),
+            "got: {err}"
+        );
     }
 }
