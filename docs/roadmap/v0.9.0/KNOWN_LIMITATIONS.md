@@ -11,7 +11,8 @@ tests into implied success.
 - Let's Encrypt staging is not yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.
-- File Sink and fake agent sink have local contract tests on current main, but
+- The Kubernetes Secret and Vault KV sinks, the Redis aggregate repository,
+  and the HTTP agent sink have local contract tests on current main, but
   Redis, Kubernetes, Vault, and remote agent live environments are not yet
   validated as L4/L5 release evidence.
 - The current restart matrix uses fake idempotent external effects; it is not a

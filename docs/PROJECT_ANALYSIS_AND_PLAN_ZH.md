@@ -5,6 +5,8 @@
 **代码规模**：`src/` 139 个文件约 42,400 行；`tests/` 约 11,500 行（测试/源码比约 27%）
 **事实来源**：本文档基于源码逐模块核查 + `docs/roadmap/v0.9.0/`、`docs/roadmap/v0.10.0/` 路线图交叉验证，取代散落在 `docs/` 下的 80+ 份历史完成度报告。
 
+> **实施更新（2026-09-06）**：第 5 节缺口清单中的 P0-2（Outbox 接线）、P1-4（TLS-ALPN 生产 presenter）、P1-5（K8s/Vault Sink）、P1-6（Redis 聚合仓储）、P1-7（legacy account 假数据）、P1-8（回滚重试闭环）、P2-12（key destroy）与 P2-4 部分（Route53 verify_record）已在本轮实现落地，状态见 `CHANGELOG.md` Unreleased 节。P0-1（外部环境证据）与 P0-3（LE staging 真实签发）仍为发布阻塞项，未变。
+
 ---
 
 ## 1. 执行摘要

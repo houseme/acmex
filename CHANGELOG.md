@@ -12,11 +12,43 @@ must call out any unverified external evidence.
   migration guides, release decision record, and a semver compatibility gate.
 - CLI `order list` and `order show` now query durable `/api/v1/operations`
   instead of returning placeholders.
+- Durable outbox consumer is now wired into every production runtime
+  (`serve`, `daemon`, the embedded API server) behind an `[outbox]` config
+  section; `[notifications.webhooks]` entries are mapped onto the outbound
+  delivery with an optional outbox event-type filter (`events`).
+- Redis aggregate repository (behind the existing `redis` feature): all nine
+  aggregates with Lua-script atomic CAS, cross-process leases with fencing
+  tokens, and outbox retry/dead-letter semantics. Selectable via
+  `repository.backend = "redis"` with `[repository.redis] url`.
+- Kubernetes Secret and Vault KV v2 certificate sinks, registered from
+  `[delivery.kubernetes]` / `[delivery.vault]` settings; credentials are
+  SecretRef-only and tokens are resolved per request.
+- Local multi-route TLS-ALPN-01 edge listener (SNI routing, RFC 8737 ALPN
+  enforcement) assembled into the production worker from
+  `[challenge.tls_alpn].listen_addr`; the previous single-authorization
+  limitation and the rustls critical-extension rejection of validation
+  certificates are fixed.
+- Explicitly confirmed key destruction (`KeyProvider::destroy_confirmed`);
+  the conservative `destroy` remains as the safe default.
+- `[[example]] intent_issuance` demonstrates the durable workflow offline,
+  and `renewal_controller` replaces the deprecated scheduler example.
+
+### Changed
+
+- The legacy account API now serves real account records: create passes
+  contacts into the ACME registration, and read/update/deactivate round-trip
+  to the CA and persist `AccountRecord`s instead of returning hardcoded
+  values.
 
 ### Fixed
 
 - Issuance spine test fixtures now include the optional verification report
   field introduced by the v0.10 certificate verification model.
+- Deployment rollback failures now retry with backoff before becoming
+  terminal, and cleanup failures retry in place; neither silently reports
+  success.
+- Route53 `verify_record` queries the hosted zone (quoted-string and
+  split-char TXT values handled) instead of always reporting verified.
 
 ## 0.10.0 - pending external evidence
 
