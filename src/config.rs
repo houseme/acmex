@@ -196,13 +196,19 @@ impl ExternalAccountBinding {
 /// the legacy `storage` KV settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositorySettings {
-    /// Repository backend: "memory" or "file".
+    /// Repository backend: "memory", "file" or (with the `redis` feature)
+    /// "redis".
     #[serde(default = "default_repository_backend")]
     pub backend: String,
 
     /// File backend configuration (required when backend = "file").
     #[serde(default)]
     pub file: Option<FileRepositoryConfig>,
+
+    /// Redis backend configuration (required when backend = "redis" and the
+    /// `redis` feature is compiled in).
+    #[serde(default)]
+    pub redis: Option<RedisRepositoryConfig>,
 
     /// Optional namespace prefix (reserved for multi-tenant deployments).
     #[serde(default)]
@@ -218,6 +224,7 @@ impl Default for RepositorySettings {
         Self {
             backend: default_repository_backend(),
             file: None,
+            redis: None,
             namespace: None,
             migration: MigrationSettings::default(),
         }
@@ -233,6 +240,15 @@ fn default_repository_backend() -> String {
 pub struct FileRepositoryConfig {
     /// Root directory for all repository aggregates.
     pub path: String,
+}
+
+/// Redis repository configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisRepositoryConfig {
+    /// Redis connection URL, e.g. `redis://127.0.0.1:6379/0`. Credentials
+    /// embedded in the URL must use SecretRef-style injection in deployment
+    /// tooling; the value is never logged (the repository redacts it).
+    pub url: String,
 }
 
 /// Legacy migration settings.
@@ -1148,6 +1164,15 @@ impl Config {
             _ => {}
         }
 
+        if self.repository.backend == "redis"
+            && let Some(ref redis) = self.repository.redis
+            && redis.url.is_empty()
+        {
+            return Err(AcmeError::configuration(
+                "repository.redis.url cannot be empty",
+            ));
+        }
+
         if let Some(ref propagation) = self.dns.propagation {
             propagation.validate("dns.propagation")?;
         }
@@ -1656,6 +1681,35 @@ poll_interval_secs = 3
             .to_string();
         assert!(
             err.contains("outbox.batch_size must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    /// The redis repository backend parses from config and keeps the older
+    /// sections untouched; an empty URL is rejected by validation.
+    #[test]
+    fn repository_redis_backend_parses_and_validates() {
+        let config = Config::from_str(
+            "[repository]\nbackend = \"redis\"\n\n[repository.redis]\nurl = \"redis://127.0.0.1:6379/0\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.repository.backend, "redis");
+        assert_eq!(
+            config.repository.redis.as_ref().unwrap().url,
+            "redis://127.0.0.1:6379/0"
+        );
+        // Legacy sections keep their defaults.
+        assert!(config.outbox.enabled);
+
+        let err = Config::from_str(
+            "[repository]\nbackend = \"redis\"\n\n[repository.redis]\nurl = \"\"\n",
+        )
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("repository.redis.url cannot be empty"),
             "got: {err}"
         );
     }

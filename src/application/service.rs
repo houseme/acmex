@@ -62,6 +62,24 @@ impl ApplicationServiceBuilder {
                 };
                 FileRepository::new(&file.path).await?.into_set()
             }
+            #[cfg(feature = "redis")]
+            "redis" => {
+                let Some(redis) = &config.repository.redis else {
+                    return Err(AcmeError::configuration(
+                        "repository.redis.url is required when repository.backend = \"redis\"",
+                    ));
+                };
+                crate::repository::RedisRepository::connect(&redis.url)
+                    .await?
+                    .into_set()
+            }
+            #[cfg(not(feature = "redis"))]
+            "redis" => {
+                let _ = &config.repository.redis;
+                return Err(AcmeError::configuration(
+                    "repository backend `redis` requires the `redis` feature",
+                ));
+            }
             other => {
                 return Err(AcmeError::configuration(format!(
                     "unsupported repository backend `{other}`"
