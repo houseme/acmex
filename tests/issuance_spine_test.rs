@@ -14,12 +14,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acmex::account::KeyPair;
+use acmex::application::{
+    ActorContext, ApplicationServiceBuilder, CertificateApplication, CreateCertificateIntent,
+    IssueCertificate,
+};
 use acmex::ca_backend::{AcmeCaBackend, FakeAcmeTransport, ScriptedResponse};
 use acmex::challenge::{MemoryPresenter, MemoryPresenterBehavior};
 use acmex::domain::{
     CertificateIntent, CertificateLineage, CertificateVersion, DeliveryTarget, DeliveryTargetKind,
-    IdentifierSet, IntentId, KeyAlgorithm, KeyId, KeyRef, LineageId, OperationId, OperationKind,
-    OperationRecord, OperationSubject, VersionId, VersionState,
+    IdentifierSet, IntentId, KeyAlgorithm, KeyId, KeyManagementMode, KeyRef, LineageId,
+    OperationId, OperationKind, OperationRecord, OperationSubject, VersionId, VersionState,
 };
 use acmex::key::SoftwareKeyProvider;
 use acmex::protocol::Jwk;
@@ -1560,4 +1564,291 @@ async fn advertised_profile_flows_through_issuance() {
     assert_eq!(report.profile.as_deref(), Some("shortlived"));
 
     cleanup_dir(&fixture.key_store_dir);
+}
+
+/// Generates an external key pair and the matching PEM CSR, exactly like an
+/// upstream key holder would: the private key never enters AcmeX.
+fn external_key_and_csr(domain: &str) -> (rcgen::KeyPair, String) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let params = rcgen::CertificateParams::new(vec![domain.to_string()]).unwrap();
+    let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+    (key, csr)
+}
+
+/// Counts files below `dir` (0 when absent). The external-CSR path must
+/// never add a private key entry to the secret store.
+fn count_secret_entries(dir: &std::path::Path) -> usize {
+    if !dir.exists() {
+        return 0;
+    }
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            if entry.file_type().unwrap().is_dir() {
+                count_secret_entries(&entry.path())
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+/// External-CSR intent issued end to end through the application service:
+/// the CreateCsr step validates the supplied CSR (signature + exact SAN
+/// match), the chain built for the external key passes strict verification,
+/// the version records a non-exportable `external` KeyRef and the secret
+/// store gains no private key entry at all.
+#[tokio::test]
+async fn external_csr_spine_issues_without_storing_private_keys() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
+    assert_eq!(
+        count_secret_entries(&fixture.key_store_dir),
+        0,
+        "fixture must start without secret store entries"
+    );
+
+    // The external key holder generates its key and CSR outside AcmeX.
+    let (external_key, csr_pem) = external_key_and_csr("example.com");
+    // The fake CA issues with the CSR's subject public key, like a real CA.
+    fixture.serve_certificate(&chain_for_key("example.com", &external_key, &ca));
+
+    let (service, _) = ApplicationServiceBuilder::new()
+        .with_repositories(fixture.repositories.clone())
+        .build()
+        .unwrap();
+    let intent = service
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: vec!["example.com".to_string()],
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: acmex::domain::KeyPolicy {
+                mode: KeyManagementMode::ExternalCsr,
+                ..Default::default()
+            },
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            external_csr: Some(csr_pem.clone()),
+            idempotency_key: "extcsr-intent".to_string(),
+        })
+        .await
+        .unwrap();
+    let operation = service
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id,
+            external_csr: Some(csr_pem),
+            idempotency_key: "extcsr-issue".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let final_record = fixture.drive_to_terminal(&operation.id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}",
+        final_record.error
+    );
+
+    let version_id = VersionId::new(format!("ver_{}", operation.id)).unwrap();
+    let version = fixture
+        .repositories
+        .versions
+        .get(&version_id)
+        .await
+        .unwrap()
+        .expect("version persisted");
+    let key_ref = &version.value.key_ref;
+    assert_eq!(key_ref.provider, "external", "external KeyRef semantics");
+    assert!(!key_ref.exportable, "external keys are never exportable");
+    assert!(
+        key_ref.key_id.as_str().starts_with("ext_csr_"),
+        "external key id derives from the CSR fingerprint: {}",
+        key_ref.key_id
+    );
+    assert_eq!(version.value.state, VersionState::Active);
+    assert!(
+        !serde_json::to_string(&version.value)
+            .unwrap()
+            .contains("PRIVATE KEY")
+    );
+
+    // The private key never passed through AcmeX: the secret store is
+    // unchanged after a successful issuance.
+    assert_eq!(
+        count_secret_entries(&fixture.key_store_dir),
+        0,
+        "external CSR issuance must not persist private key material"
+    );
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// A CSR whose SAN set does not exactly match the intent identifiers is
+/// rejected at the CreateCsr step with a stable OperatorActionRequired
+/// error: only the external key holder can fix the material. Nothing is
+/// persisted and no private key appears anywhere.
+#[tokio::test]
+async fn external_csr_san_mismatch_fails_as_operator_action() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let fixture = build_fixture(&identifiers, Vec::new(), None, None, directory()).await;
+    assert_eq!(
+        count_secret_entries(&fixture.key_store_dir),
+        0,
+        "fixture must start without secret store entries"
+    );
+
+    let (_foreign_key, csr_pem) = external_key_and_csr("other.example.com");
+
+    let (service, _) = ApplicationServiceBuilder::new()
+        .with_repositories(fixture.repositories.clone())
+        .build()
+        .unwrap();
+    let intent = service
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: vec!["example.com".to_string()],
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: acmex::domain::KeyPolicy {
+                mode: KeyManagementMode::ExternalCsr,
+                ..Default::default()
+            },
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            external_csr: Some(csr_pem.clone()),
+            idempotency_key: "extcsr-mismatch-intent".to_string(),
+        })
+        .await
+        .unwrap();
+    let operation = service
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id,
+            external_csr: Some(csr_pem),
+            idempotency_key: "extcsr-mismatch-issue".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let final_record = fixture.drive_to_terminal(&operation.id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Failed,
+        "expected SAN mismatch to fail, got: {:?}",
+        final_record.error
+    );
+    let error = final_record.error.expect("failure carries an error");
+    assert_eq!(
+        error.class,
+        acmex::domain::ErrorClass::OperatorActionRequired,
+        "the CSR owner must fix the material"
+    );
+    assert_eq!(
+        error.code.as_str(),
+        "VALIDATION_CHALLENGE_INCOMPATIBLE",
+        "stable error code for external CSR rejection"
+    );
+    assert!(
+        error
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("SAN mismatch"),
+        "error should name the SAN mismatch: {:?}",
+        error.detail
+    );
+
+    // An invalid CSR persists nothing and stores no key material.
+    assert!(
+        fixture
+            .repositories
+            .versions
+            .get(&VersionId::new(format!("ver_{}", operation.id)).unwrap())
+            .await
+            .unwrap()
+            .is_none(),
+        "rejected CSR must not produce a version"
+    );
+    assert_eq!(
+        count_secret_entries(&fixture.key_store_dir),
+        0,
+        "rejected external CSR must not persist private key material"
+    );
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// A managed intent that declares external CSR material is a 400-class
+/// configuration error — at intent creation and at issue time — because
+/// AcmeX would generate and hold the key, defeating the declared mode.
+#[tokio::test]
+async fn managed_intent_rejects_external_csr_material() {
+    let (service, _) = ApplicationServiceBuilder::new().build().unwrap();
+    let (_unused_key, csr_pem) = external_key_and_csr("example.com");
+
+    // Managed intent + external_csr at creation → 400 semantics.
+    let mut command = external_csr_intent("managed-with-csr", &csr_pem);
+    command.key_policy.mode = KeyManagementMode::Managed;
+    let err = service.create_intent(command).await.unwrap_err();
+    assert!(
+        matches!(err, acmex::error::AcmeError::InvalidInput(_)),
+        "expected invalid input, got: {err:?}"
+    );
+
+    // Valid managed intent, then external_csr at issue time → 400 semantics.
+    let intent = service
+        .create_intent(external_csr_intent("managed-issue-no-csr", ""))
+        .await
+        .unwrap();
+    let err = service
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id,
+            external_csr: Some(csr_pem),
+            idempotency_key: "managed-issue-with-csr".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, acmex::error::AcmeError::InvalidInput(_)),
+        "expected invalid input, got: {err:?}"
+    );
+}
+
+/// A create-intent command for a managed intent (empty material is dropped).
+fn external_csr_intent(key: &str, external_csr: &str) -> CreateCertificateIntent {
+    CreateCertificateIntent {
+        context: ActorContext::default(),
+        identifiers: vec!["example.com".to_string()],
+        ca_policy: Default::default(),
+        validation_policy: Default::default(),
+        key_policy: acmex::domain::KeyPolicy {
+            mode: KeyManagementMode::Managed,
+            ..Default::default()
+        },
+        renewal_policy: Default::default(),
+        delivery_targets: Vec::new(),
+        external_csr: if external_csr.is_empty() {
+            None
+        } else {
+            Some(external_csr.to_string())
+        },
+        idempotency_key: key.to_string(),
+    }
 }
