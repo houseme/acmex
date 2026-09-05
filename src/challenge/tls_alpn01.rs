@@ -1,20 +1,25 @@
 //! TLS-ALPN-01 challenge implementation.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use rcgen::{CertificateParams, CustomExtension, KeyPair, SanType};
 use rustls::ServerConfig;
+use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 use super::ChallengeSolver;
-use super::edge::{TlsChallengeEdge, TlsChallengeRoute, TlsRouteLease};
+use super::edge::{TlsChallengeEdge, TlsChallengeRoute, TlsRouteLease, TlsRouteState};
 use super::presenter::{CleanupOutcome, Observation, PrepareChallenge};
 use super::{ChallengePresenter, ChallengeSession};
 use crate::domain::challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
@@ -125,6 +130,48 @@ pub fn build_tls_alpn_validation_cert(
         private_key_der,
         acme_identifier_sha256: hex::encode(acme_identifier),
     })
+}
+
+/// Converts DER validation material into rustls certificate chain and key.
+///
+/// Shared by the legacy solver and the local multi-route listener so both
+/// parse and serve byte-identical validation certificates.
+fn rustls_validation_material(
+    certificate_der: &[u8],
+    private_key_der: &[u8],
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    let key = PrivateKeyDer::try_from(private_key_der.to_vec())
+        .map_err(|_| AcmeError::crypto("failed to parse TLS-ALPN-01 private key".to_string()))?;
+    Ok((vec![CertificateDer::from(certificate_der.to_vec())], key))
+}
+
+/// Returns the process-default rustls crypto provider.
+///
+/// Every TLS assembly in this module calls `ServerConfig::builder()` first,
+/// which lazily installs the process default, so this only fails if that
+/// never happened.
+fn active_crypto_provider() -> Result<&'static CryptoProvider> {
+    CryptoProvider::get_default()
+        .map(|provider| provider.as_ref())
+        .ok_or_else(|| AcmeError::crypto("no rustls CryptoProvider for TLS-ALPN-01 keys"))
+}
+
+/// Builds rustls signing material for DER validation certificate parts.
+///
+/// `CertifiedKey::from_der` is deliberately avoided: its consistency check
+/// parses the end-entity certificate and rejects the critical acmeIdentifier
+/// extension that RFC 8737 §5 requires validation certificates to carry.
+fn validation_certified_key(
+    certificate_der: &[u8],
+    private_key_der: &[u8],
+) -> Result<Arc<CertifiedKey>> {
+    let provider = active_crypto_provider()?;
+    let (certs, key) = rustls_validation_material(certificate_der, private_key_der)?;
+    let signing_key = provider
+        .key_provider
+        .load_private_key(key)
+        .map_err(|err| AcmeError::crypto(format!("invalid TLS-ALPN-01 validation key: {err}")))?;
+    Ok(Arc::new(CertifiedKey::new(certs, signing_key)))
 }
 
 /// TLS-ALPN-01 presenter backed by an edge agent.
@@ -240,6 +287,261 @@ impl ChallengePresenter for TlsAlpn01Presenter {
     }
 }
 
+/// One installed SNI route: rustls-ready validation material plus the lease
+/// metadata needed for idempotent install/inspect/remove.
+struct InstalledRoute {
+    sni: String,
+    fingerprint: String,
+    certified_key: Arc<CertifiedKey>,
+}
+
+/// Route table shared between the edge adapter and the rustls cert resolver.
+///
+/// The resolver runs inside the TLS handshake (a synchronous callback), so
+/// the table uses a short-lived `std` lock that is never held across `.await`.
+#[derive(Default)]
+struct TlsRouteTable {
+    /// Route id (the challenge session id) → route.
+    by_id: HashMap<String, Arc<InstalledRoute>>,
+    /// Lowercased SNI → route. The latest install for an SNI wins.
+    by_sni: HashMap<String, Arc<InstalledRoute>>,
+}
+
+/// RFC 8737 certificate resolver: selects the validation certificate by SNI
+/// and aborts the handshake when the client does not offer `acme-tls/1` or
+/// the SNI name has no route.
+struct SniCertResolver {
+    table: Arc<StdRwLock<TlsRouteTable>>,
+}
+
+impl std::fmt::Debug for SniCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately opaque: route entries hold private key material.
+        f.debug_struct("SniCertResolver").finish_non_exhaustive()
+    }
+}
+
+impl ResolvesServerCert for SniCertResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        // RFC 8737 §3: the validation connection MUST use the acme-tls/1
+        // ALPN protocol; offering nothing else or nothing at all must fail
+        // the handshake instead of leaking a validation certificate.
+        let offers_acme = client_hello.alpn().is_some_and(|mut protocols| {
+            protocols.any(|protocol| protocol == ACME_TLS_ALPN_PROTOCOL)
+        });
+        if !offers_acme {
+            return None;
+        }
+        let server_name = client_hello.server_name()?.to_ascii_lowercase();
+        let table = self.table.read().ok()?;
+        table
+            .by_sni
+            .get(&server_name)
+            .map(|route| Arc::clone(&route.certified_key))
+    }
+}
+
+/// Local multi-route TLS-ALPN-01 listener and edge adapter.
+///
+/// Binds one real TLS endpoint (rustls + tokio-rustls) and serves one
+/// RFC 8737 validation certificate per SNI, so several TLS-ALPN-01
+/// challenges can be prepared concurrently — the single key-authorization
+/// limitation of [`TlsAlpn01Solver`] does not apply here. Handshakes without
+/// the `acme-tls/1` ALPN or with an unrouted SNI name fail, per RFC 8737.
+///
+/// Dropping the listener stops the accept loop and releases the port;
+/// [`LocalTlsListener::shutdown`] does the same and awaits the loop.
+pub struct LocalTlsListener {
+    local_addr: SocketAddr,
+    routes: Arc<StdRwLock<TlsRouteTable>>,
+    shutdown: watch::Sender<()>,
+    accept_loop: tokio::task::JoinHandle<()>,
+}
+
+impl std::fmt::Debug for LocalTlsListener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately coarse: route entries hold private key material.
+        let routes = self
+            .routes
+            .read()
+            .map(|table| table.by_id.len())
+            .unwrap_or(0);
+        f.debug_struct("LocalTlsListener")
+            .field("local_addr", &self.local_addr)
+            .field("routes", &routes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LocalTlsListener {
+    /// Binds the listener. Bind failures mirror the HTTP-01 listener's
+    /// error style: the worker logs them as warnings and degrades, so the
+    /// message must carry the operator hint.
+    pub async fn bind(listen_addr: SocketAddr) -> Result<Self> {
+        let listener = TcpListener::bind(listen_addr).await.map_err(|err| {
+            AcmeError::transport(format!(
+                "[OPERATOR_ACTION_REQUIRED] cannot bind TLS-ALPN-01 listener at {listen_addr}: {err}; \
+                 configure a TLS edge agent, ingress route or port permission"
+            ))
+        })?;
+        let local_addr = listener.local_addr().map_err(|err| {
+            AcmeError::transport(format!("read TLS-ALPN-01 local address: {err}"))
+        })?;
+
+        // `ServerConfig::builder` lazily installs the process default crypto
+        // provider, which `validation_certified_key` reads back afterwards.
+        let table = Arc::new(StdRwLock::new(TlsRouteTable::default()));
+        let mut config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(SniCertResolver {
+                table: Arc::clone(&table),
+            }));
+        config.alpn_protocols = vec![ACME_TLS_ALPN_PROTOCOL.to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+
+        let (shutdown, shutdown_rx) = watch::channel(());
+        let accept_loop = tokio::spawn(accept_loop(listener, acceptor, shutdown_rx));
+        Ok(Self {
+            local_addr,
+            routes: table,
+            shutdown,
+            accept_loop,
+        })
+    }
+
+    /// The bound local address (ephemeral when configured with port 0).
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Number of currently installed routes.
+    pub fn route_count(&self) -> usize {
+        self.read_table().by_id.len()
+    }
+
+    /// Stops the accept loop and waits for it to exit. Dropping the listener
+    /// has the same effect without awaiting.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown.send(());
+        let _ = self.accept_loop.await;
+    }
+
+    fn read_table(&self) -> RwLockReadGuard<'_, TlsRouteTable> {
+        self.routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn write_table(&self) -> RwLockWriteGuard<'_, TlsRouteTable> {
+        self.routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+async fn accept_loop(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    mut shutdown: watch::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            // `changed()` resolves on the shutdown send and on a dropped
+            // sender (Err); spurious wakes are filtered inside `changed()`.
+            _ = shutdown.changed() => break,
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer_addr)) => {
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        // RFC 8737: only the handshake matters — the validation
+                        // client inspects the certificate and closes, so no
+                        // application data is served.
+                        match acceptor.accept(stream).await {
+                            Ok(mut tls) => {
+                                use tokio::io::AsyncWriteExt;
+                                let _ = tls.shutdown().await;
+                            }
+                            Err(err) => {
+                                // Expected for ALPN violations and unrouted
+                                // SNI probes; anything else shows up here too.
+                                tracing::debug!(error = %err, %peer_addr, "TLS-ALPN-01 handshake rejected");
+                            }
+                        }
+                    });
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "TLS-ALPN-01 accept failed");
+                }
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl TlsChallengeEdge for LocalTlsListener {
+    fn agent_id(&self) -> &str {
+        "local-tls-listener"
+    }
+
+    async fn install(&self, route: TlsChallengeRoute) -> Result<TlsRouteLease> {
+        let sni = route.sni.to_ascii_lowercase();
+        let certified_key =
+            validation_certified_key(&route.certificate_der, &route.private_key_der)?;
+        let installed = Arc::new(InstalledRoute {
+            fingerprint: route.fingerprint.clone(),
+            certified_key,
+            sni: sni.clone(),
+        });
+        let route_id = route.idempotency_key.clone();
+        let mut table = self.write_table();
+        // Reinstalling the same session id replaces its route in place, so
+        // prepare retries stay idempotent at the route-id level.
+        table.by_id.insert(route_id.clone(), Arc::clone(&installed));
+        table.by_sni.insert(sni.clone(), installed);
+        drop(table);
+        tracing::debug!(route_id, sni, "TLS-ALPN-01 route installed");
+        Ok(TlsRouteLease {
+            agent_id: self.agent_id().to_string(),
+            route_id,
+            sni,
+            fingerprint: route.fingerprint,
+        })
+    }
+
+    async fn inspect(&self, lease: &TlsRouteLease) -> Result<TlsRouteState> {
+        let table = self.read_table();
+        let serving = table.by_id.get(&lease.route_id).is_some_and(|route| {
+            route.sni == lease.sni.to_ascii_lowercase() && route.fingerprint == lease.fingerprint
+        });
+        Ok(TlsRouteState {
+            serving,
+            ttl_secs: None,
+        })
+    }
+
+    async fn remove(&self, lease: &TlsRouteLease) -> Result<CleanupOutcome> {
+        let mut table = self.write_table();
+        let removed = table.by_id.remove(&lease.route_id);
+        match removed {
+            Some(route) => {
+                // Drop the SNI pointer only while this route still owns it.
+                let sni = lease.sni.to_ascii_lowercase();
+                if table
+                    .by_sni
+                    .get(&sni)
+                    .is_some_and(|current| Arc::ptr_eq(current, &route))
+                {
+                    table.by_sni.remove(&sni);
+                }
+                drop(table);
+                tracing::debug!(route_id = lease.route_id, sni, "TLS-ALPN-01 route removed");
+                Ok(CleanupOutcome::Cleaned)
+            }
+            None => Ok(CleanupOutcome::AlreadyAbsent),
+        }
+    }
+}
+
 /// TLS-ALPN-01 legacy single-listener challenge solver.
 pub struct TlsAlpn01Solver {
     /// Server listening address.
@@ -266,24 +568,16 @@ impl TlsAlpn01Solver {
         }
     }
 
-    /// Generates rustls-ready validation material for compatibility callers.
-    fn generate_cert(
-        identifier: &Identifier,
-        key_authorization: &str,
-    ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-        let validation = build_tls_alpn_validation_cert(identifier, key_authorization)?;
-        let key = PrivateKeyDer::try_from(validation.private_key_der).map_err(|_| {
-            AcmeError::crypto("failed to parse TLS-ALPN-01 private key".to_string())
-        })?;
-        Ok((vec![CertificateDer::from(validation.certificate_der)], key))
-    }
-
     async fn start_server(&self, identifier: Identifier, key_authorization: String) -> Result<()> {
-        let (certs, key) = Self::generate_cert(&identifier, &key_authorization)?;
-        let mut config = ServerConfig::builder()
+        let validation = build_tls_alpn_validation_cert(&identifier, &key_authorization)?;
+        // `ServerConfig::builder` lazily installs the process default crypto
+        // provider, which `validation_certified_key` reads back afterwards.
+        let builder = ServerConfig::builder();
+        let certified_key =
+            validation_certified_key(&validation.certificate_der, &validation.private_key_der)?;
+        let mut config = builder
             .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|err| AcmeError::transport(format!("create TLS-ALPN-01 config: {err}")))?;
+            .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
         config.alpn_protocols = vec![ACME_TLS_ALPN_PROTOCOL.to_vec()];
 
         let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -372,6 +666,8 @@ mod tests {
     use super::*;
     use crate::challenge::ChallengeSessionState;
     use crate::domain::OperationId;
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
+    use rustls::pki_types::{ServerName, UnixTime};
     use x509_parser::prelude::*;
 
     fn session(identifier: Identifier) -> ChallengeSession {
@@ -476,5 +772,211 @@ mod tests {
             presenter.cleanup(&lease).await.unwrap(),
             CleanupOutcome::Cleaned
         );
+    }
+
+    fn tls_route(idempotency_key: &str, validation: &ValidationCertificate) -> TlsChallengeRoute {
+        TlsChallengeRoute {
+            idempotency_key: idempotency_key.to_string(),
+            sni: validation.sni.clone(),
+            certificate_der: validation.certificate_der.clone(),
+            private_key_der: validation.private_key_der.clone(),
+            fingerprint: validation.fingerprint.clone(),
+            ttl_secs: 30,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_listener_routes_concurrent_idents_and_unroutes_idempotently() {
+        let edge = LocalTlsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let dns =
+            build_tls_alpn_validation_cert(&Identifier::try_dns("example.com").unwrap(), "ka-dns")
+                .unwrap();
+        let ip = build_tls_alpn_validation_cert(&Identifier::try_ip("192.0.2.1").unwrap(), "ka-ip")
+            .unwrap();
+
+        let lease_dns = edge.install(tls_route("session-dns", &dns)).await.unwrap();
+        assert_eq!(lease_dns.sni, "example.com");
+        // Reinstall with the same idempotency key keeps the same lease.
+        assert_eq!(
+            edge.install(tls_route("session-dns", &dns)).await.unwrap(),
+            lease_dns
+        );
+        let lease_ip = edge.install(tls_route("session-ip", &ip)).await.unwrap();
+        assert_eq!(lease_ip.sni, "1.2.0.192.in-addr.arpa");
+        assert_eq!(edge.route_count(), 2);
+
+        assert!(edge.inspect(&lease_dns).await.unwrap().serving);
+        assert!(edge.inspect(&lease_ip).await.unwrap().serving);
+
+        assert_eq!(
+            edge.remove(&lease_dns).await.unwrap(),
+            CleanupOutcome::Cleaned
+        );
+        assert_eq!(
+            edge.remove(&lease_dns).await.unwrap(),
+            CleanupOutcome::AlreadyAbsent
+        );
+        assert!(!edge.inspect(&lease_dns).await.unwrap().serving);
+        // The untouched route keeps serving.
+        assert!(edge.inspect(&lease_ip).await.unwrap().serving);
+        assert_eq!(edge.route_count(), 1);
+        edge.shutdown().await;
+    }
+
+    /// A test TLS client that trusts any server certificate (the validation
+    /// certificate is self-signed by design).
+    #[derive(Debug)]
+    struct AcceptAnyServerCert;
+
+    impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ED25519,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            ]
+        }
+    }
+
+    fn test_connector(alpn_protocols: Vec<Vec<u8>>) -> tokio_rustls::TlsConnector {
+        let mut config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+            .with_no_client_auth();
+        config.alpn_protocols = alpn_protocols;
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+    }
+
+    async fn connect(
+        connector: &tokio_rustls::TlsConnector,
+        addr: SocketAddr,
+        server_name: &str,
+    ) -> std::result::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, std::io::Error>
+    {
+        let server_name = ServerName::try_from(server_name.to_string()).map_err(|err| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
+        })?;
+        let tcp = tokio::net::TcpStream::connect(addr).await?;
+        let handshake = connector.connect(server_name, tcp);
+        tokio::time::timeout(Duration::from_secs(5), handshake)
+            .await
+            .expect("TLS handshake timed out")
+    }
+
+    #[tokio::test]
+    async fn local_listener_serves_validation_cert_for_acme_tls_alpn() {
+        let edge = LocalTlsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let validation = build_tls_alpn_validation_cert(
+            &Identifier::try_dns("example.com").unwrap(),
+            "token.thumbprint",
+        )
+        .unwrap();
+        let lease = edge
+            .install(tls_route("session-live", &validation))
+            .await
+            .unwrap();
+        let addr = edge.local_addr();
+
+        // The validation client negotiates acme-tls/1 and must see exactly
+        // the self-signed validation certificate for the routed SNI.
+        let connector = test_connector(vec![ACME_TLS_ALPN_PROTOCOL.to_vec()]);
+        let tls = connect(&connector, addr, "example.com").await.unwrap();
+        let (_, connection) = tls.get_ref();
+        assert_eq!(connection.alpn_protocol(), Some(ACME_TLS_ALPN_PROTOCOL));
+        let peer_cert = connection
+            .peer_certificates()
+            .expect("server presents validation certificate")
+            .first()
+            .expect("certificate chain is non-empty")
+            .clone();
+        assert_eq!(
+            peer_cert.as_ref(),
+            validation.certificate_der.as_slice(),
+            "served certificate must be the installed validation certificate"
+        );
+        drop(tls);
+
+        // An unrouted SNI fails the handshake (RFC 8737: serve nothing).
+        assert!(
+            connect(&connector, addr, "other.example.net")
+                .await
+                .is_err()
+        );
+
+        // After cleanup the SNI is unrouted and fails the handshake too.
+        assert_eq!(edge.remove(&lease).await.unwrap(), CleanupOutcome::Cleaned);
+        assert!(connect(&connector, addr, "example.com").await.is_err());
+
+        edge.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_listener_rejects_handshakes_without_acme_tls_alpn() {
+        let edge = LocalTlsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let validation = build_tls_alpn_validation_cert(
+            &Identifier::try_dns("example.com").unwrap(),
+            "token.thumbprint",
+        )
+        .unwrap();
+        edge.install(tls_route("session-alpn", &validation))
+            .await
+            .unwrap();
+        let addr = edge.local_addr();
+
+        // RFC 8737 §3: a validation connection not offering acme-tls/1 must
+        // fail the handshake instead of receiving the validation certificate.
+        let https_connector = test_connector(vec![b"http/1.1".to_vec()]);
+        assert!(
+            connect(&https_connector, addr, "example.com")
+                .await
+                .is_err()
+        );
+
+        // No ALPN at all is rejected the same way.
+        let plain_connector = test_connector(Vec::new());
+        assert!(
+            connect(&plain_connector, addr, "example.com")
+                .await
+                .is_err()
+        );
+
+        edge.shutdown().await;
     }
 }

@@ -99,6 +99,10 @@ pub struct WorkflowWorkerSettings {
     pub secret_store_dir: std::path::PathBuf,
     /// HTTP-01 listen address (None disables the local HTTP-01 presenter).
     pub http01_listen: Option<String>,
+    /// TLS-ALPN-01 listen address (None falls back to
+    /// `[challenge.tls_alpn].listen_addr`; missing from both disables the
+    /// local TLS-ALPN-01 presenter).
+    pub tls_alpn_listen: Option<String>,
 }
 
 impl Default for WorkflowWorkerSettings {
@@ -114,6 +118,7 @@ impl Default for WorkflowWorkerSettings {
             external_account_binding: None,
             secret_store_dir: std::path::PathBuf::from(".acmex/secrets"),
             http01_listen: None,
+            tls_alpn_listen: None,
         }
     }
 }
@@ -362,6 +367,67 @@ async fn build_http_presenter(listen: Option<&str>) -> Option<Arc<dyn ChallengeP
     }
 }
 
+/// Builds the local multi-route TLS-ALPN-01 presenter when an address is
+/// configured. Bind failures are warnings, matching the HTTP-01 policy:
+/// TLS-ALPN-01 intents then fail with an explicit "no presenter" error
+/// instead of binding silently.
+async fn build_tls_alpn_presenter(listen: Option<&str>) -> Option<Arc<dyn ChallengePresenter>> {
+    let listen = listen?;
+    match listen.parse::<std::net::SocketAddr>() {
+        Ok(addr) => match crate::challenge::tls_alpn01::LocalTlsListener::bind(addr).await {
+            Ok(listener) => Some(Arc::new(
+                crate::challenge::tls_alpn01::TlsAlpn01Presenter::with_edge(Arc::new(listener)),
+            )),
+            Err(err) => {
+                tracing::warn!(error = %err, listen, "TLS-ALPN-01 local listener unavailable");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(listen, error = %err, "invalid tls_alpn.listen_addr");
+            None
+        }
+    }
+}
+
+/// Assembles the presenter registry from configuration: DNS-01 from
+/// `[challenge.dns01]`, HTTP-01 from `settings.http01_listen` and
+/// TLS-ALPN-01 from `settings.tls_alpn_listen`, which falls back to
+/// `[challenge.tls_alpn].listen_addr`. Every missing presenter is only a
+/// warning: the matching intents then fail with an explicit error at
+/// prepare time instead of being silently simulated.
+async fn build_presenters(
+    config: &Config,
+    settings: &mut WorkflowWorkerSettings,
+) -> PresenterRegistry {
+    if settings.tls_alpn_listen.is_none() {
+        settings.tls_alpn_listen = config
+            .challenge
+            .tls_alpn
+            .as_ref()
+            .map(|tls| tls.listen_addr.clone());
+    }
+    let mut presenters = PresenterRegistry::new();
+    if let Some(dns) = build_dns_presenter(config).await {
+        presenters.register(dns);
+    } else {
+        tracing::warn!("no DNS providers configured; DNS-01 challenges will fail explicitly");
+    }
+    match build_http_presenter(settings.http01_listen.as_deref()).await {
+        Some(http) => presenters.register(http),
+        None => tracing::warn!(
+            "no HTTP-01 listener configured; HTTP-01 challenges will fail explicitly"
+        ),
+    }
+    match build_tls_alpn_presenter(settings.tls_alpn_listen.as_deref()).await {
+        Some(tls) => presenters.register(tls),
+        None => tracing::warn!(
+            "no TLS-ALPN-01 listener configured; TLS-ALPN-01 challenges will fail explicitly"
+        ),
+    }
+    presenters
+}
+
 /// Builds the key-free RFC 9773 ARI provider used by renewal scanning.
 ///
 /// ARI lookups are unauthenticated GETs, so no account key is needed —
@@ -391,7 +457,8 @@ pub fn build_ari_provider(
 ///    (`.acmex/secrets` by default — restarts reuse the same account);
 /// 2. wraps the HTTP transport with request/duration/badNonce metrics;
 /// 3. builds the presenters that are actually configured (DNS-01 from
-///    `[challenge.dns01]`, HTTP-01 from `[challenge.http01].listen_addr`);
+///    `[challenge.dns01]`, HTTP-01 from `[challenge.http01].listen_addr`,
+///    TLS-ALPN-01 from `[challenge.tls_alpn].listen_addr`);
 /// 4. registers the durable File sink for `[delivery] file targets;
 /// 5. registers every production step executor via [`register_executors`].
 ///
@@ -436,20 +503,7 @@ pub async fn build_engine_from_config(
         FileSecretStore::new(settings.secret_store_dir.clone()),
     ));
 
-    let mut presenters = PresenterRegistry::new();
-    if let Some(dns) = build_dns_presenter(config).await {
-        presenters.register(dns);
-    } else {
-        tracing::warn!("no DNS providers configured; DNS-01 challenges will fail explicitly");
-    }
-    match build_http_presenter(settings.http01_listen.as_deref()).await {
-        Some(http) => presenters.register(http),
-        None => tracing::warn!(
-            "no HTTP-01 listener configured; HTTP-01 challenges will fail explicitly"
-        ),
-    }
-    // TLS-ALPN-01 has no local multi-route listener yet (KNOWN_LIMITATIONS);
-    // intents pinned to tls-alpn-01 fail explicitly at prepare time.
+    let presenters = build_presenters(config, &mut settings).await;
 
     let mut orchestrator =
         DeploymentOrchestrator::new(repositories.clone()).with_metrics(metrics.clone());
@@ -526,4 +580,53 @@ pub async fn spawn_from_config(
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ChallengeType;
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn tls_alpn_presenter_is_absent_without_configuration() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings::default();
+        let registry = build_presenters(&config, &mut settings).await;
+
+        assert!(!registry.kinds().contains(&ChallengeType::TlsAlpn01));
+        assert!(settings.tls_alpn_listen.is_none());
+    }
+
+    #[tokio::test]
+    async fn tls_alpn_presenter_registers_from_config_and_settings() {
+        // `[challenge.tls_alpn]` alone enables the local listener (ephemeral
+        // port 0 keeps the test hermetic).
+        let config =
+            Config::from_str("[challenge.tls_alpn]\nlisten_addr = \"127.0.0.1:0\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings::default();
+        let registry = build_presenters(&config, &mut settings).await;
+        assert!(registry.kinds().contains(&ChallengeType::TlsAlpn01));
+        assert_eq!(settings.tls_alpn_listen.as_deref(), Some("127.0.0.1:0"));
+
+        // An explicit setting wins even without a config section.
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings {
+            tls_alpn_listen: Some("127.0.0.1:0".to_string()),
+            ..Default::default()
+        };
+        let registry = build_presenters(&config, &mut settings).await;
+        assert!(registry.kinds().contains(&ChallengeType::TlsAlpn01));
+    }
+
+    #[tokio::test]
+    async fn invalid_tls_alpn_listen_degrades_to_warning() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings {
+            tls_alpn_listen: Some("not-a-socket-addr".to_string()),
+            ..Default::default()
+        };
+        let registry = build_presenters(&config, &mut settings).await;
+        assert!(!registry.kinds().contains(&ChallengeType::TlsAlpn01));
+    }
 }

@@ -180,14 +180,14 @@ pub use config::{
     AcmeSettings, ChallengeSettings, Config, FileRepositoryConfig, MigrationSettings,
     RenewalSettings, RepositorySettings, StorageSettings,
 };
+pub use delivery::k8s_sink::{KubernetesAuth, KubernetesSecretConfig, KubernetesSecretSink};
+pub use delivery::vault_sink::{VaultAuth, VaultKvConfig, VaultKvSink};
 pub use delivery::{
     CertificateMaterial, CertificateMaterialBuilder, CertificateMaterialRef, CertificateSink,
     CleanupOutcome, DeploymentActivationOutcome, DeploymentGate, DeploymentHealth,
     DeploymentOrchestrator, DeploymentSpec, FakeAgentCertificateSink, FileCertificateSink,
     HttpAgentSink, StagedDeployment,
 };
-pub use delivery::k8s_sink::{KubernetesAuth, KubernetesSecretConfig, KubernetesSecretSink};
-pub use delivery::vault_sink::{VaultAuth, VaultKvConfig, VaultKvSink};
 #[cfg(feature = "dns-alibaba")]
 pub use dns::AlibabaCloudDnsProvider;
 #[cfg(feature = "dns-azure")]
