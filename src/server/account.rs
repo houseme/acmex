@@ -1,6 +1,6 @@
 use crate::account::{AccountManager, KeyPair};
 use crate::domain::{AccountRecord, AccountStatus, KeyAlgorithm, KeyId, KeyRef, TenantId};
-use crate::error::{ProblemDetails, Result};
+use crate::error::{AcmeError, ProblemDetails, Result};
 use crate::metrics::AcmeEvent;
 use crate::metrics::events::EventAuditor;
 use crate::protocol::{DirectoryManager, NonceManager};
@@ -15,6 +15,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::info;
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +36,12 @@ pub async fn create_account(
     State(state): State<AppState>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> impl IntoResponse {
-    info!("Request to create account for email: {}", payload.email);
+    let (email_hash, email_domain) = redact_email(&payload.email);
+    tracing::debug!(
+        email_hash = %email_hash,
+        email_domain = %email_domain,
+        "request to create account"
+    );
     if let Some(problem) = validate_account_request(&payload) {
         return problem_response(problem);
     }
@@ -44,6 +51,25 @@ pub async fn create_account(
             "Account repository is not configured".to_string(),
         ));
     };
+    let account_id = AccountRecord::compute_id(&TenantId::default_tenant(), &state.config.acme.ca);
+
+    // A stored account that is no longer active must never be reset to
+    // active by a re-registration: report the state conflict instead.
+    match repositories.accounts.get(&account_id).await {
+        Ok(Some(existing)) if existing.value.status != AccountStatus::Active => {
+            return problem_response(
+                AcmeError::conflict(format!(
+                    "account `{}` is {} and cannot be re-registered as active",
+                    account_id,
+                    account_status_wire(existing.value.status)
+                ))
+                .to_problem_details(),
+            );
+        }
+        Ok(_) => {}
+        Err(err) => return problem_response(err.to_problem_details()),
+    }
+
     let Some(client) = &state.client else {
         return problem_response(unavailable_problem(
             "ACME client not configured on server".to_string(),
@@ -52,6 +78,8 @@ pub async fn create_account(
 
     // Register with the request's contact and ToS answer, reusing the
     // server's account key so later updates sign for the same account.
+    // (An owned copy is required here because the registration client
+    // outlives the shared client borrow; create is a rare operation.)
     let key_pair = match client_key_pair(client) {
         Ok(key_pair) => key_pair,
         Err(err) => return problem_response(err.to_problem_details()),
@@ -71,7 +99,7 @@ pub async fn create_account(
 
     let now = repositories.clock.now();
     let record = AccountRecord {
-        id: AccountRecord::compute_id(&TenantId::default_tenant(), &state.config.acme.ca),
+        id: account_id,
         tenant_id: TenantId::default_tenant(),
         ca_id: state.config.acme.ca.clone(),
         directory_url: state.config.acme_directory().to_string(),
@@ -146,6 +174,9 @@ pub async fn update_account(
             "ACME client not configured on server".to_string(),
         ));
     };
+    if let Err(err) = ensure_stored_key_matches_client(client, &stored) {
+        return problem_response(err.to_problem_details());
+    }
 
     let contacts = vec![Contact::email(payload.email.clone())];
     if let Err(err) = perform_account_operation(
@@ -194,6 +225,9 @@ pub async fn deactivate_account(
             "ACME client not configured on server".to_string(),
         ));
     };
+    if let Err(err) = ensure_stored_key_matches_client(client, &stored) {
+        return problem_response(err.to_problem_details());
+    }
 
     if let Err(err) = perform_account_operation(
         state.config.acme_directory(),
@@ -221,22 +255,38 @@ enum AccountOperation {
     Deactivate,
 }
 
+/// Shared HTTP client for CA round-trips: building a fresh client per request
+/// re-did the TLS/connection-pool setup every time and had no timeouts. One
+/// client with connect + whole-request timeouts is created lazily and reused.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 /// Calls the CA for an account operation, signing with the legacy account
-/// key. The transport managers are locals of this scope on purpose: the
-/// `AccountManager` borrows them, so it cannot outlive the call.
+/// key. The HTTP client is shared across requests (see [`http_client`]); the
+/// transport managers borrow it and the key, so they cannot outlive this call.
 async fn perform_account_operation(
     directory_url: &str,
     client: &AcmeClient,
     account_url: &str,
     operation: AccountOperation,
 ) -> Result<()> {
-    let key_pair = client_key_pair(client)?;
-    let http_client = reqwest::Client::new();
+    // The client already holds a parsed key pair: borrow it instead of the
+    // per-request PEM serialize + re-parse round trip.
+    let key_pair = client.key_pair();
+    let http_client = http_client().clone();
     let directory_manager = DirectoryManager::new(directory_url, http_client.clone());
     let directory = directory_manager.get().await?;
     let nonce_manager = NonceManager::new(&directory.new_nonce, http_client.clone());
     let account_manager =
-        AccountManager::new(&key_pair, &nonce_manager, &directory_manager, &http_client)?;
+        AccountManager::new(key_pair, &nonce_manager, &directory_manager, &http_client)?;
     match operation {
         AccountOperation::UpdateContacts(contacts) => {
             account_manager
@@ -248,6 +298,32 @@ async fn perform_account_operation(
         }
     }
     Ok(())
+}
+
+/// Ensures the stored account was registered with the server's current key.
+/// Signing an update/deactivate with a different key is rejected by the CA
+/// anyway, so fail fast with an operator-actionable error instead of sending
+/// a request that cannot succeed.
+fn ensure_stored_key_matches_client(client: &AcmeClient, stored: &AccountRecord) -> Result<()> {
+    let expected = legacy_key_ref(client)?;
+    if stored.key_ref.provider != expected.provider || stored.key_ref.key_id != expected.key_id {
+        return Err(AcmeError::configuration(format!(
+            "stored account `{}` is registered under key `{}` but the server signs with `{}`; \
+             re-register the account or restore the original server key",
+            stored.id, stored.key_ref.key_id, expected.key_id
+        )));
+    }
+    Ok(())
+}
+
+/// Redacts an email address for logging: only a short hash of the full
+/// address and the domain part are kept.
+fn redact_email(email: &str) -> (String, String) {
+    let trimmed = email.trim();
+    let digest = Sha256::digest(trimmed.as_bytes());
+    let hash = hex::encode(&digest[..6]);
+    let domain = trimmed.rsplit('@').next().unwrap_or("invalid").to_string();
+    (hash, domain)
 }
 
 /// Validates the contact/ToS payload shared by create and update.

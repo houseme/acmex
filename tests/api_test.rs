@@ -1469,3 +1469,157 @@ async fn legacy_account_create_never_fakes_success() {
         .unwrap();
     assert_eq!(bad_email.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn legacy_account_create_refuses_to_reactivate_deactivated_account() {
+    let state = application_state();
+    let repositories = state.repositories.as_ref().unwrap().clone();
+    let id = AccountRecord::compute_id(&TenantId::default_tenant(), "letsencrypt");
+    repositories
+        .accounts
+        .upsert(account_record_fixture(
+            &id,
+            Some("https://acme-staging-v02.api.letsencrypt.org/acme/acct/42".to_string()),
+            AccountStatus::Deactivated,
+            vec!["mailto:ops@example.com".to_string()],
+        ))
+        .await
+        .unwrap();
+    let app = legacy_account_app(state);
+
+    // Re-registering must never silently reset a deactivated account back to
+    // active: the state conflict is a 409 problem.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/accounts")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "email": "ops@example.com", "tos_agreed": true })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT,);
+    let problem = json_body(response).await;
+    assert_eq!(problem["status"], 409, "got: {problem}");
+
+    // The stored record is untouched.
+    let stored = repositories
+        .accounts
+        .get(&id)
+        .await
+        .unwrap()
+        .expect("record must survive the rejected re-registration");
+    assert_eq!(stored.value.status, AccountStatus::Deactivated);
+}
+
+#[tokio::test]
+async fn legacy_account_update_rejects_key_fingerprint_mismatch() {
+    let mut state = application_state();
+    let repositories = state.repositories.as_ref().unwrap().clone();
+    let id = AccountRecord::compute_id(&TenantId::default_tenant(), "letsencrypt");
+    repositories
+        .accounts
+        .upsert(account_record_fixture(
+            &id,
+            Some("https://acme-staging-v02.api.letsencrypt.org/acme/acct/42".to_string()),
+            AccountStatus::Active,
+            vec!["mailto:ops@example.com".to_string()],
+        ))
+        .await
+        .unwrap();
+
+    // The server signs with a fresh key that cannot match the stored record's
+    // random fixture key_ref.
+    let key_pair = acmex::KeyPair::generate().unwrap();
+    state.client = Some(Arc::new(acmex::AcmeClient::with_key_pair(
+        acmex::AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory"),
+        key_pair,
+    )));
+    let app = legacy_account_app(state);
+
+    // The handler must fail fast with a configuration problem instead of
+    // sending an update that the CA would reject for the wrong key.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/accounts/{id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "email": "new@example.com", "tos_agreed": true })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let problem = json_body(response).await;
+    assert_eq!(problem["type"], "https://acmex.sh/errors/configuration");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .unwrap()
+            .contains("registered under key"),
+        "got: {problem}"
+    );
+
+    // The failed mutation must not have touched the stored record.
+    let stored = repositories
+        .accounts
+        .get(&id)
+        .await
+        .unwrap()
+        .expect("record must survive the rejected mutation");
+    assert_eq!(stored.value.contacts, vec!["mailto:ops@example.com"]);
+}
+
+#[tokio::test]
+async fn legacy_account_deactivate_rejects_key_fingerprint_mismatch() {
+    let mut state = application_state();
+    let repositories = state.repositories.as_ref().unwrap().clone();
+    let id = AccountRecord::compute_id(&TenantId::default_tenant(), "letsencrypt");
+    repositories
+        .accounts
+        .upsert(account_record_fixture(
+            &id,
+            Some("https://acme-staging-v02.api.letsencrypt.org/acme/acct/42".to_string()),
+            AccountStatus::Active,
+            vec!["mailto:ops@example.com".to_string()],
+        ))
+        .await
+        .unwrap();
+    let key_pair = acmex::KeyPair::generate().unwrap();
+    state.client = Some(Arc::new(acmex::AcmeClient::with_key_pair(
+        acmex::AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory"),
+        key_pair,
+    )));
+    let app = legacy_account_app(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/accounts/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let problem = json_body(response).await;
+    assert_eq!(problem["type"], "https://acmex.sh/errors/configuration");
+
+    let stored = repositories
+        .accounts
+        .get(&id)
+        .await
+        .unwrap()
+        .expect("record must survive the rejected mutation");
+    assert_eq!(stored.value.status, AccountStatus::Active);
+}
