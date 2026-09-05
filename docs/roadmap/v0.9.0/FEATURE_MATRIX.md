@@ -22,5 +22,3 @@ provider has live external validation.
 | `dns-tencent` | DNS provider | `cargo check --all-features` | not yet validated against a live zone |
 | `dns-huawei` | DNS provider | `cargo check --all-features` | not yet validated against a live zone |
 | `dns-cloudns` | DNS provider | `cargo check --all-features` | not yet validated against a live zone |
-| `metrics` | observability | `cargo check --all-features` | not required |
-| `cli` | interface | `cargo check --all-features` | not required |
