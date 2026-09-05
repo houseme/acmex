@@ -13,9 +13,13 @@
 //!   rollback point; KV v2 keeps version history so the content does not need
 //!   to be duplicated) and writes the new material to `<path>-staging`.
 //!   Idempotent: staging writes are last-writer-wins on the same path.
-//! * `activate` — CAS-writes the active path with `options.cas` equal to the
-//!   version observed at stage time, so a concurrent activation is detected
-//!   instead of overwritten (Vault reports a mismatch as HTTP 400 with a
+//! * `activate` — first verifies the staging entry still carries the staged
+//!   fingerprint (SHA-256 of the `certificate` field): the path is shared per
+//!   target and a newer stage overwrites it, so a mismatch is the retryable
+//!   `Conflict` class instead of promoting foreign material. It then
+//!   CAS-writes the active path with `options.cas` equal to the version
+//!   observed at stage time, so a concurrent activation is detected instead
+//!   of overwritten (Vault reports a mismatch as HTTP 400 with a
 //!   "check-and-set" marker, surfaced as the retryable `Conflict` class).
 //!   Idempotent: a CAS loss converges to success when the target already
 //!   serves the staged fingerprint.
@@ -416,13 +420,29 @@ impl CertificateSink for VaultKvSink {
     }
 
     /// CAS-writes the active path (`options.cas` = version observed at stage
-    /// time). Idempotent: an already-serving target converges to success; a
-    /// lost race is the retryable `Conflict` class.
+    /// time). Before writing, verifies the staging entry still carries the
+    /// staged fingerprint: the staging path is shared per target and a newer
+    /// stage overwrites it, so a mismatch is the retryable `Conflict` class
+    /// instead of promoting foreign material. Idempotent: an already-serving
+    /// target converges to success; a lost CAS race is the retryable
+    /// `Conflict` class.
     #[tracing::instrument(skip(self, staged), fields(version_id = %staged.version_id))]
     async fn activate(&self, staged: &StagedDeployment) -> Result<()> {
         let staging_path = self.staged_kv_path(&staged.staged_ref)?;
         let path = self.active_path(&staged.staged_ref)?;
         let (_, data) = self.require_kv(staging_path).await?;
+        let staged_leaf_sha = kv_leaf_sha(&data).ok_or_else(|| {
+            AcmeError::conflict(format!(
+                "vault staging entry `{staging_path}` has no certificate field; \
+                 it was overwritten by a non-acmex writer; re-stage and retry"
+            ))
+        })?;
+        if staged_leaf_sha != staged.leaf_sha256 {
+            return Err(AcmeError::conflict(format!(
+                "vault staging entry `{staging_path}` was overwritten by a newer stage \
+                 (fingerprint mismatch); re-stage and retry"
+            )));
+        }
         match self
             .write_kv(path, &data, Some(staged.resource_version))
             .await
