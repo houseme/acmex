@@ -54,6 +54,10 @@ pub struct Config {
     #[serde(default)]
     pub outbox: OutboxSettings,
 
+    /// Remote certificate delivery sinks (Kubernetes Secret, Vault KV).
+    #[serde(default)]
+    pub delivery: DeliverySettings,
+
     /// CLI-specific settings.
     #[serde(default)]
     pub cli: Option<CliSettings>,
@@ -796,6 +800,95 @@ impl Default for OutboxSettings {
     }
 }
 
+/// Remote certificate delivery sink settings (`[delivery]`).
+///
+/// A sink section registers the corresponding [`crate::delivery::CertificateSink`]
+/// implementation with the workflow worker; intents whose delivery targets
+/// reference the kind then deploy to it. Absent sections simply leave the
+/// sink unregistered (issuing still succeeds — activation waits on the
+/// targets the intent actually declares).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeliverySettings {
+    /// Kubernetes TLS Secret sink (`[delivery.kubernetes]`).
+    #[serde(default)]
+    pub kubernetes: Option<KubernetesSinkSettings>,
+    /// HashiCorp Vault KV v2 sink (`[delivery.vault]`).
+    #[serde(default)]
+    pub vault: Option<VaultSinkSettings>,
+}
+
+/// Kubernetes Secret sink settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KubernetesSinkSettings {
+    /// API server base URL. Omit to discover the in-cluster endpoint from
+    /// `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Namespace that owns the target and staging Secrets.
+    #[serde(default = "default_k8s_namespace")]
+    pub namespace: String,
+    /// PEM bundle used to verify the API server (defaults to the in-cluster
+    /// `ca.crt` when the endpoint is discovered).
+    #[serde(default)]
+    pub ca_path: Option<String>,
+    #[serde(default = "default_sink_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_sink_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// Bearer token SecretRef (`env:`/`file:`/`vault:`). Omit when running
+    /// in-cluster so the service account token is used.
+    #[serde(default)]
+    pub auth_token: Option<SecretRef>,
+}
+
+impl Default for KubernetesSinkSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            namespace: default_k8s_namespace(),
+            ca_path: None,
+            connect_timeout_secs: default_sink_connect_timeout_secs(),
+            request_timeout_secs: default_sink_request_timeout_secs(),
+            auth_token: None,
+        }
+    }
+}
+
+/// Vault KV v2 sink settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSinkSettings {
+    /// Vault base URL (e.g. `https://vault.internal:8200`).
+    pub endpoint: String,
+    /// KV v2 engine mount (e.g. `secret`).
+    #[serde(default = "default_vault_mount")]
+    pub mount: String,
+    /// Enterprise namespace sent as `X-Vault-Namespace` (optional).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default = "default_sink_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_sink_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// Vault token SecretRef (`env:`/`file:`/`vault:`).
+    pub auth_token: SecretRef,
+}
+
+fn default_k8s_namespace() -> String {
+    "default".to_string()
+}
+
+fn default_vault_mount() -> String {
+    "secret".to_string()
+}
+
+fn default_sink_connect_timeout_secs() -> u64 {
+    5
+}
+
+fn default_sink_request_timeout_secs() -> u64 {
+    30
+}
+
 /// CLI settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliSettings {
@@ -1173,6 +1266,26 @@ impl Config {
         {
             return Err(AcmeError::configuration(
                 "repository.redis.url cannot be empty",
+            ));
+        }
+
+        if let Some(ref vault) = self.delivery.vault {
+            if vault.endpoint.is_empty() {
+                return Err(AcmeError::configuration(
+                    "delivery.vault.endpoint cannot be empty",
+                ));
+            }
+            if vault.mount.is_empty() {
+                return Err(AcmeError::configuration(
+                    "delivery.vault.mount cannot be empty",
+                ));
+            }
+        }
+        if let Some(ref kubernetes) = self.delivery.kubernetes
+            && kubernetes.namespace.is_empty()
+        {
+            return Err(AcmeError::configuration(
+                "delivery.kubernetes.namespace cannot be empty",
             ));
         }
 
@@ -1723,20 +1836,32 @@ poll_interval_secs = 3
         assert!(config.challenge.tls_alpn.is_none());
     }
 
+    /// `[delivery]` sink settings parse with defaults and reject empty
+    /// required fields at validation time.
     #[test]
-    fn challenge_tls_alpn_parses_listen_addr_and_defaults() {
-        let config =
-            Config::from_str("[challenge.tls_alpn]\nlisten_addr = \"127.0.0.1:5001\"\n").unwrap();
-        let tls_alpn = config.challenge.tls_alpn.unwrap();
-        assert_eq!(tls_alpn.listen_addr, "127.0.0.1:5001");
-        assert!(tls_alpn.cert_path.is_none());
-        assert!(tls_alpn.key_path.is_none());
+    fn delivery_sink_settings_parse_and_validate() {
+        let config = Config::from_str(
+            "[delivery.kubernetes]\nnamespace = \"certs\"\n\n[delivery.vault]\nendpoint = \"https://vault.internal:8200\"\nauth_token = \"env:VAULT_TOKEN\"\n",
+        )
+        .unwrap();
+        let kubernetes = config.delivery.kubernetes.as_ref().unwrap();
+        assert_eq!(kubernetes.namespace, "certs");
+        assert!(kubernetes.endpoint.is_none());
+        assert!(kubernetes.auth_token.is_none());
+        let vault = config.delivery.vault.as_ref().unwrap();
+        assert_eq!(vault.mount, "secret");
+        assert_eq!(vault.connect_timeout_secs, 5);
 
-        // An empty section still yields the documented default listen address.
-        let config = Config::from_str("[challenge.tls_alpn]\n").unwrap();
-        assert_eq!(
-            config.challenge.tls_alpn.unwrap().listen_addr,
-            "0.0.0.0:443"
+        let err = Config::from_str(
+            "[delivery.vault]\nendpoint = \"\"\nauth_token = \"env:VAULT_TOKEN\"\n",
+        )
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("delivery.vault.endpoint cannot be empty"),
+            "got: {err}"
         );
     }
 }

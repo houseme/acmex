@@ -448,6 +448,79 @@ pub fn build_ari_provider(
     ))
 }
 
+/// Registers the remote sinks configured under `[delivery]`.
+///
+/// Like the rest of the assembly, a sink that cannot be constructed (for
+/// example an unreadable in-cluster service account outside a real cluster)
+/// is logged and skipped rather than fatal: operations targeting that kind
+/// fail explicitly at the deployment step instead.
+fn register_configured_sinks(
+    orchestrator: DeploymentOrchestrator,
+    config: &Config,
+) -> DeploymentOrchestrator {
+    let resolver: Arc<dyn crate::dns::spec::SecretResolver> =
+        Arc::new(crate::dns::spec::EnvFileSecretResolver);
+    let mut orchestrator = orchestrator;
+
+    if let Some(kubernetes) = &config.delivery.kubernetes {
+        let sink_config = crate::delivery::k8s_sink::KubernetesSecretConfig {
+            endpoint: kubernetes.endpoint.clone(),
+            namespace: kubernetes.namespace.clone(),
+            ca_path: kubernetes.ca_path.as_ref().map(std::path::PathBuf::from),
+            connect_timeout_secs: kubernetes.connect_timeout_secs,
+            request_timeout_secs: kubernetes.request_timeout_secs,
+        };
+        let auth = match &kubernetes.auth_token {
+            Some(reference) => crate::delivery::k8s_sink::KubernetesAuth::Resolved {
+                reference: reference.clone(),
+                resolver: resolver.clone(),
+            },
+            None => crate::delivery::k8s_sink::KubernetesAuth::ServiceAccount,
+        };
+        match crate::delivery::k8s_sink::KubernetesSecretSink::new(sink_config, auth) {
+            Ok(sink) => {
+                orchestrator = orchestrator.register_sink(
+                    crate::domain::DeliveryTargetKind::KubernetesSecret,
+                    Arc::new(sink),
+                );
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                "kubernetes sink assembly failed; kubernetes_secret targets will fail explicitly"
+            ),
+        }
+    }
+
+    if let Some(vault) = &config.delivery.vault {
+        let sink_config = crate::delivery::vault_sink::VaultKvConfig {
+            endpoint: vault.endpoint.clone(),
+            mount: vault.mount.clone(),
+            namespace: vault.namespace.clone(),
+            connect_timeout_secs: vault.connect_timeout_secs,
+            request_timeout_secs: vault.request_timeout_secs,
+        };
+        let sink = crate::delivery::vault_sink::VaultKvSink::new(
+            sink_config,
+            crate::delivery::vault_sink::VaultAuth::Resolved {
+                reference: vault.auth_token.clone(),
+                resolver: resolver.clone(),
+            },
+        );
+        match sink {
+            Ok(sink) => {
+                orchestrator = orchestrator
+                    .register_sink(crate::domain::DeliveryTargetKind::VaultKv, Arc::new(sink));
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                "vault sink assembly failed; vault_kv targets will fail explicitly"
+            ),
+        }
+    }
+
+    orchestrator
+}
+
 /// Assembles a fully equipped [`WorkflowEngine`] from configuration.
 ///
 /// This is the shared assembly for the embedded server worker, the CLI
@@ -459,7 +532,8 @@ pub fn build_ari_provider(
 /// 3. builds the presenters that are actually configured (DNS-01 from
 ///    `[challenge.dns01]`, HTTP-01 from `[challenge.http01].listen_addr`,
 ///    TLS-ALPN-01 from `[challenge.tls_alpn].listen_addr`);
-/// 4. registers the durable File sink for `[delivery] file targets;
+/// 4. registers the durable File sink plus the configured remote sinks
+///    (`[delivery.kubernetes]`, `[delivery.vault]`);
 /// 5. registers every production step executor via [`register_executors`].
 ///
 /// The returned engine advances operations when `run_once`/`run_step` is
@@ -511,6 +585,7 @@ pub async fn build_engine_from_config(
         crate::domain::DeliveryTargetKind::File,
         Arc::new(FileCertificateSink::new()),
     );
+    orchestrator = register_configured_sinks(orchestrator, config);
 
     let mut engine =
         WorkflowEngine::new("server-worker", repositories.clone()).with_config(EngineConfig {
