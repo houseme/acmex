@@ -170,8 +170,10 @@ async fn read_json(path: &Path) -> Result<Option<Value>> {
 
 #[async_trait]
 impl EntityStore for FileEntityStore {
-    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Value>> {
-        read_json(&self.entity_path(aggregate, id)).await
+    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>> {
+        Ok(read_json(&self.entity_path(aggregate, id))
+            .await?
+            .map(Arc::new))
     }
 
     async fn env_create(
@@ -240,7 +242,10 @@ impl EntityStore for FileEntityStore {
             let value = read_json(&entry.path())
                 .await?
                 .ok_or_else(|| corrupt(format!("entity file vanished: {name}")))?;
-            out.push(Envelope { id, value });
+            out.push(Envelope {
+                id,
+                value: Arc::new(value),
+            });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)

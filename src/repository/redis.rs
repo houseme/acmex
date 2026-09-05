@@ -461,14 +461,14 @@ impl std::fmt::Debug for RedisEntityStore {
 
 #[async_trait]
 impl EntityStore for RedisEntityStore {
-    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Value>> {
+    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>> {
         let key = entity_key(aggregate, id);
         let mut conn = self.conn.clone();
         let raw: Option<String> = conn.get(&key).await.map_err(|e| redis_error("GET", e))?;
         match raw {
             None => Ok(None),
             Some(json) => serde_json::from_str(&json)
-                .map(Some)
+                .map(|value| Some(Arc::new(value)))
                 .map_err(|e| corrupt(format!("corrupt entity key {key}: {e}"))),
         }
     }
@@ -552,7 +552,7 @@ impl EntityStore for RedisEntityStore {
                 .map_err(|e| corrupt(format!("corrupt entity key {key}: {e}")))?;
             out.push(Envelope {
                 id: id_from_key(aggregate, &key)?,
-                value: parsed,
+                value: Arc::new(parsed),
             });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
