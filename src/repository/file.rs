@@ -30,8 +30,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -49,6 +49,32 @@ use super::{
 use crate::domain::AccountRecord;
 use crate::error::{AcmeError, Result};
 
+/// Freshness stamp of a cached parse: modification time and length.
+///
+/// Every cache access re-stats the file, so writes from any process (this
+/// one or an external one; both go through atomic rename, which changes
+/// mtime/len) invalidate the entry before the next read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    mtime: SystemTime,
+    len: u64,
+}
+
+/// Extracts the stamp of `meta`; `None` when the filesystem does not expose
+/// modification times (caching is skipped for such files).
+fn file_stamp(meta: &std::fs::Metadata) -> Option<FileStamp> {
+    Some(FileStamp {
+        mtime: meta.modified().ok()?,
+        len: meta.len(),
+    })
+}
+
+/// A parsed entity JSON plus the stamp it was read at.
+struct ParsedFile {
+    stamp: FileStamp,
+    value: Arc<Value>,
+}
+
 /// Filesystem store shared by all aggregates. Clones share state locks.
 #[derive(Clone)]
 pub struct FileEntityStore {
@@ -59,6 +85,10 @@ pub struct FileEntityStore {
     outbox_next: Arc<tokio::sync::Mutex<Option<u64>>>,
     manifest_next: Arc<tokio::sync::Mutex<Option<u64>>>,
     lease_tokens: Arc<tokio::sync::Mutex<HashMap<String, FencingToken>>>,
+    /// Parsed entity files keyed by path, validated against the on-disk
+    /// (mtime, len) stamp on every read (see [`Self::read_entity_json`]).
+    /// Plain `Mutex` is sufficient: no await happens while it is held.
+    parse_cache: Arc<Mutex<HashMap<PathBuf, ParsedFile>>>,
 }
 
 impl FileEntityStore {
@@ -70,6 +100,7 @@ impl FileEntityStore {
             outbox_next: Arc::new(tokio::sync::Mutex::new(None)),
             manifest_next: Arc::new(tokio::sync::Mutex::new(None)),
             lease_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            parse_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -90,6 +121,74 @@ impl FileEntityStore {
     fn entity_path(&self, aggregate: &str, id: &str) -> PathBuf {
         self.aggregate_dir(aggregate)
             .join(format!("{}.json", encode_file_name(id)))
+    }
+
+    /// Drops any cached parse for `path`. Called after every write so a
+    /// rewrite can never be shadowed by a stale cached value.
+    fn invalidate_parse_cache(&self, path: &Path) {
+        self.parse_cache
+            .lock()
+            .expect("parse cache poisoned")
+            .remove(path);
+    }
+
+    /// Reads and parses an entity file, returning cached parses while the
+    /// on-disk (mtime, len) stamp is unchanged.
+    ///
+    /// The file is stat'ed on *every* call (cheap) before the cache is
+    /// consulted, so a rewrite by any process invalidates the entry before
+    /// the next read: every write lands through an atomic rename with a
+    /// fresh mtime, which can never equal the stamp observed before the
+    /// rewrite. On a miss the file is read and cached under the stamp taken
+    /// *before* the read — if a write raced the read, its different stamp
+    /// simply forces a miss next time, so no stale parse is ever served.
+    async fn read_entity_json(&self, path: &Path) -> Result<Option<Arc<Value>>> {
+        let stamp = match fs::metadata(path).await {
+            Ok(meta) => file_stamp(&meta),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                self.invalidate_parse_cache(path);
+                return Ok(None);
+            }
+            Err(err) => {
+                return Err(AcmeError::Storage(format!(
+                    "failed to read {}: {err}",
+                    path.display()
+                )));
+            }
+        };
+
+        if let Some(stamp) = stamp {
+            let cached = self
+                .parse_cache
+                .lock()
+                .expect("parse cache poisoned")
+                .get(path)
+                .filter(|cached| cached.stamp == stamp)
+                .map(|cached| Arc::clone(&cached.value));
+            if let Some(value) = cached {
+                return Ok(Some(value));
+            }
+        }
+
+        let Some(value) = read_json(path).await? else {
+            self.invalidate_parse_cache(path);
+            return Ok(None);
+        };
+        let value = Arc::new(value);
+
+        if let Some(stamp) = stamp {
+            self.parse_cache
+                .lock()
+                .expect("parse cache poisoned")
+                .insert(
+                    path.to_path_buf(),
+                    ParsedFile {
+                        stamp,
+                        value: Arc::clone(&value),
+                    },
+                );
+        }
+        Ok(Some(value))
     }
 }
 
@@ -171,9 +270,8 @@ async fn read_json(path: &Path) -> Result<Option<Value>> {
 #[async_trait]
 impl EntityStore for FileEntityStore {
     async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>> {
-        Ok(read_json(&self.entity_path(aggregate, id))
-            .await?
-            .map(Arc::new))
+        self.read_entity_json(&self.entity_path(aggregate, id))
+            .await
     }
 
     async fn env_create(
@@ -191,6 +289,7 @@ impl EntityStore for FileEntityStore {
         let envelope = make_envelope(data, now);
         let bytes = serde_json::to_vec_pretty(&envelope)?;
         atomic_write(&path, &bytes, false).await?;
+        self.invalidate_parse_cache(&path);
         Ok(CreateOutcome::Created)
     }
 
@@ -214,6 +313,7 @@ impl EntityStore for FileEntityStore {
         let envelope = bump_envelope(&existing, data, now)?;
         let bytes = serde_json::to_vec_pretty(&envelope)?;
         atomic_write(&path, &bytes, false).await?;
+        self.invalidate_parse_cache(&path);
         Ok(CasOutcome::Updated(current + 1))
     }
 
@@ -239,13 +339,50 @@ impl EntityStore for FileEntityStore {
             }
             let id = decode_file_name(name.trim_end_matches(".json"))
                 .map_err(|e| corrupt(format!("unencodable file name {name:?}: {e}")))?;
-            let value = read_json(&entry.path())
-                .await?
-                .ok_or_else(|| corrupt(format!("entity file vanished: {name}")))?;
-            out.push(Envelope {
-                id,
-                value: Arc::new(value),
-            });
+            let path = entry.path();
+            // Stat first (cheap) and reuse the cached parse while the file
+            // is unchanged; only cache misses hit the filesystem read.
+            let stamp = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|meta| file_stamp(&meta));
+            let value = if let Some(stamp) = stamp {
+                self.parse_cache
+                    .lock()
+                    .expect("parse cache poisoned")
+                    .get(&path)
+                    .filter(|cached| cached.stamp == stamp)
+                    .map(|cached| Arc::clone(&cached.value))
+            } else {
+                None
+            };
+            let value = match value {
+                Some(value) => value,
+                None => {
+                    let parsed = read_json(&path)
+                        .await?
+                        .ok_or_else(|| corrupt(format!("entity file vanished: {name}")))?;
+                    let value = Arc::new(parsed);
+                    // Cache under the pre-read stamp (see
+                    // `read_entity_json`): a racing rewrite carries a
+                    // different stamp and forces a miss next time.
+                    if let Some(stamp) = stamp {
+                        self.parse_cache
+                            .lock()
+                            .expect("parse cache poisoned")
+                            .insert(
+                                path.clone(),
+                                ParsedFile {
+                                    stamp,
+                                    value: Arc::clone(&value),
+                                },
+                            );
+                    }
+                    value
+                }
+            };
+            out.push(Envelope { id, value });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
@@ -253,6 +390,7 @@ impl EntityStore for FileEntityStore {
 
     async fn env_delete(&self, aggregate: &str, id: &str) -> Result<()> {
         let path = self.entity_path(aggregate, id);
+        self.invalidate_parse_cache(&path);
         match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -489,6 +627,7 @@ impl LeaseManager for FileRepository {
         };
         let bytes = serde_json::to_vec(&lock)?;
         atomic_write(&path, &bytes, false).await?;
+        self.store.invalidate_parse_cache(&path);
         Ok(LeaseOutcome::Granted(LeaseGrant {
             key: key.to_string(),
             owner: owner.to_string(),
@@ -524,6 +663,7 @@ impl LeaseManager for FileRepository {
         };
         let bytes = serde_json::to_vec(&lock)?;
         atomic_write(&path, &bytes, false).await?;
+        self.store.invalidate_parse_cache(&path);
         Ok(Some(LeaseGrant {
             key: key.to_string(),
             owner: owner.to_string(),
@@ -540,6 +680,7 @@ impl LeaseManager for FileRepository {
             && existing.fencing_token == fencing_token
         {
             let _ = fs::remove_file(&path).await;
+            self.store.invalidate_parse_cache(&path);
         }
         Ok(())
     }
@@ -572,6 +713,7 @@ impl OutboxRepository for FileRepository {
             .join(format!("{sequence:012}.json"));
         let bytes = serde_json::to_vec_pretty(&event)?;
         atomic_write(&path, &bytes, false).await?;
+        self.store.invalidate_parse_cache(&path);
         Ok(sequence)
     }
 
@@ -668,6 +810,7 @@ impl FileRepository {
         mutate(&mut event);
         let bytes = serde_json::to_vec_pretty(&event)?;
         atomic_write(&path, &bytes, false).await?;
+        self.store.invalidate_parse_cache(&path);
         Ok(())
     }
 }
@@ -688,6 +831,7 @@ impl MigrationManifestStore for FileRepository {
             .join(format!("manifest-{sequence:06}.json"));
         let bytes = serde_json::to_vec_pretty(&entry)?;
         atomic_write(&path, &bytes, false).await?;
+        self.store.invalidate_parse_cache(&path);
         Ok(())
     }
 
@@ -777,5 +921,150 @@ mod tests {
         let unicode = encode_file_name("证书");
         assert!(unicode.starts_with('%'));
         assert_eq!(decode_file_name(&unicode).unwrap(), "证书");
+    }
+
+    // -- parse cache consistency ----------------------------------------------
+
+    fn cache_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "acmex-file-parse-cache-{label}-{}-{}",
+            std::process::id(),
+            crate::repository::SystemClock.now().as_millisecond()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("intents")).expect("create aggregate dir");
+        dir
+    }
+
+    async fn cached_data(store: &FileEntityStore, id: &str) -> Option<Value> {
+        store
+            .env_get("intents", id)
+            .await
+            .expect("env_get")
+            .map(|value| value["data"].clone())
+    }
+
+    /// The parse cache must never shadow writes: rewrites performed by other
+    /// processes (plain file IO that bypasses this store) change the on-disk
+    /// mtime/len stamp and must be observed by the next `env_get`/`env_list`.
+    #[tokio::test]
+    async fn parse_cache_tracks_external_writes_same_length_writes_and_deletions() {
+        let dir = cache_test_dir("external");
+        let store = FileEntityStore::new(&dir);
+        let path = dir.join("intents").join("int_a.json");
+        let now = crate::repository::SystemClock.now();
+
+        // Seed through the store, then warm the cache.
+        let v1 = serde_json::json!({ "payload": "aaaa" });
+        assert_eq!(
+            store
+                .env_create("intents", "int_a", &v1, now)
+                .await
+                .unwrap(),
+            CreateOutcome::Created
+        );
+        assert_eq!(
+            cached_data(&store, "int_a").await,
+            Some(serde_json::json!({ "payload": "aaaa" }))
+        );
+        // Cache hit must return the same value.
+        assert_eq!(
+            cached_data(&store, "int_a").await,
+            Some(serde_json::json!({ "payload": "aaaa" }))
+        );
+
+        // External rewrite with *identical file length*: only the mtime
+        // changed, which must still invalidate the cache.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let bytes = std::fs::read(&path).expect("read entity file");
+        let rewritten: String = std::string::String::from_utf8(bytes)
+            .expect("utf8")
+            .replace("aaaa", "bbbb");
+        std::fs::write(&path, &rewritten).expect("external rewrite");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            rewritten.len() as u64,
+            "test premise: the rewrite preserved the file length"
+        );
+        assert_eq!(
+            cached_data(&store, "int_a").await,
+            Some(serde_json::json!({ "payload": "bbbb" }))
+        );
+        // ... and the list path observes it too.
+        let listed = store.env_list("intents").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].value["data"]["payload"], "bbbb");
+
+        // Warm again, then an external *deletion* must be observed.
+        assert!(cached_data(&store, "int_a").await.is_some());
+        std::fs::remove_file(&path).expect("external delete");
+        assert_eq!(cached_data(&store, "int_a").await, None);
+        assert!(store.env_list("intents").await.unwrap().is_empty());
+
+        // An external re-creation (no store involvement) is picked up.
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&make_envelope(
+                &serde_json::json!({ "payload": "cccc" }),
+                now,
+            ))
+            .unwrap(),
+        )
+        .expect("external recreate");
+        assert_eq!(
+            cached_data(&store, "int_a").await,
+            Some(serde_json::json!({ "payload": "cccc" }))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writes made through the store itself (create/CAS/delete) must also
+    /// invalidate the cache so no stale value is ever served.
+    #[tokio::test]
+    async fn parse_cache_is_invalidated_by_store_writes() {
+        let dir = cache_test_dir("store-writes");
+        let store = FileEntityStore::new(&dir);
+        let now = crate::repository::SystemClock.now();
+
+        let v1 = serde_json::json!({ "payload": "aaaa" });
+        assert_eq!(
+            store
+                .env_create("intents", "int_b", &v1, now)
+                .await
+                .unwrap(),
+            CreateOutcome::Created
+        );
+        assert_eq!(
+            cached_data(&store, "int_b").await,
+            Some(serde_json::json!({ "payload": "aaaa" }))
+        );
+
+        // CAS bumps revision + data; the read must not serve revision 1.
+        let envelope = store
+            .env_get("intents", "int_b")
+            .await
+            .unwrap()
+            .expect("envelope");
+        let revision = envelope_revision(&envelope).unwrap();
+        let v2 = serde_json::json!({ "payload": "dddd" });
+        assert!(matches!(
+            store
+                .env_cas("intents", "int_b", revision, &v2, now)
+                .await
+                .unwrap(),
+            CasOutcome::Updated(_)
+        ));
+        assert_eq!(
+            cached_data(&store, "int_b").await,
+            Some(serde_json::json!({ "payload": "dddd" }))
+        );
+
+        // Delete removes the entity and the (now stale) cache entry.
+        store.env_delete("intents", "int_b").await.unwrap();
+        assert_eq!(cached_data(&store, "int_b").await, None);
+        assert!(store.env_list("intents").await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
