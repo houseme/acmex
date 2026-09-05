@@ -113,6 +113,10 @@ dns-tencent = []
 dns-huawei = []
 dns-cloudns = []
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [[example]]
 name = "dns_01_challenge"
 required-features = ["dns-cloudflare"]

@@ -952,7 +952,10 @@ pub(crate) const ENVELOPE_REVISION_FIELD: &str = "revision";
 
 pub(crate) struct Envelope {
     pub id: String,
-    pub value: Value,
+    /// Shared handle to the immutable stored envelope. Envelopes are never
+    /// mutated in place (CAS installs a new value), so backends can hand out
+    /// `Arc` clones instead of deep-copying the JSON tree.
+    pub value: Arc<Value>,
 }
 
 pub(crate) fn envelope_revision(value: &Value) -> Result<Revision> {
@@ -969,7 +972,7 @@ pub(crate) fn corrupt(detail: impl std::fmt::Display) -> AcmeError {
 /// Internal per-aggregate store both backends implement.
 #[async_trait]
 pub(crate) trait EntityStore: Send + Sync {
-    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Value>>;
+    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>>;
     async fn env_create(
         &self,
         aggregate: &str,
@@ -1080,7 +1083,10 @@ pub(crate) fn decode_versioned<T: serde::de::DeserializeOwned>(
         .ok_or("missing updated_at")?;
     let data = value.get("data").ok_or("missing data")?;
     Ok(Versioned {
-        value: serde_json::from_value(data.clone()).map_err(|e| e.to_string())?,
+        // Deserialize straight from the borrowed `Value` — `&Value`
+        // implements `Deserializer`, so no deep clone of the subtree is
+        // needed (unlike `serde_json::from_value`, which consumes).
+        value: T::deserialize(data).map_err(|e| e.to_string())?,
         revision,
         schema_version,
         created_at: Timestamp::from_str(created_at).map_err(|e| e.to_string())?,

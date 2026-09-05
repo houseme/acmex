@@ -18,7 +18,7 @@ use crate::error::Result;
 
 #[async_trait]
 impl EntityStore for MemoryEntityStore {
-    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Value>> {
+    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>> {
         let maps = self.maps.read().expect("memory repo lock poisoned");
         Ok(maps.get(aggregate).and_then(|m| m.get(id)).cloned())
     }
@@ -35,7 +35,7 @@ impl EntityStore for MemoryEntityStore {
         if map.contains_key(id) {
             return Ok(CreateOutcome::AlreadyExists);
         }
-        map.insert(id.to_string(), make_envelope(data, now));
+        map.insert(id.to_string(), Arc::new(make_envelope(data, now)));
         Ok(CreateOutcome::Created)
     }
 
@@ -56,7 +56,10 @@ impl EntityStore for MemoryEntityStore {
         if current != expected {
             return Ok(CasOutcome::Conflict { current });
         }
-        map.insert(id.to_string(), bump_envelope(existing, data, now)?);
+        map.insert(
+            id.to_string(),
+            Arc::new(bump_envelope(existing, data, now)?),
+        );
         Ok(CasOutcome::Updated(current + 1))
     }
 
@@ -86,10 +89,17 @@ impl EntityStore for MemoryEntityStore {
     }
 }
 
+/// Aggregate name → entity id → immutable stored envelope.
+type MemoryMaps = HashMap<String, HashMap<String, Arc<Value>>>;
+
 /// Shared state of the in-memory backend. Clones share the same data.
+///
+/// Envelopes are stored as `Arc<Value>`: they are immutable once written
+/// (updates install a new value), so reads clone an `Arc` instead of
+/// deep-copying the JSON tree.
 #[derive(Clone, Default)]
 pub struct MemoryEntityStore {
-    maps: Arc<RwLock<HashMap<String, HashMap<String, Value>>>>,
+    maps: Arc<RwLock<MemoryMaps>>,
 }
 
 struct MemoryLeaseState {
