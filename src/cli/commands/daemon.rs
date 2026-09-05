@@ -138,10 +138,17 @@ pub async fn handle_daemon(
     let outbox_handle = if config.outbox.enabled {
         let outbox_interval = Duration::from_secs(config.outbox.interval_secs.max(1));
         let webhook_manager = WebhookManager::from_config(&config)?;
+        // Defense in depth: `Config::validate` already rejects
+        // `outbox.batch_size = 0`, but a consumer wired with a zero batch
+        // would scan without ever claiming an event, so clamp here too —
+        // same guard as the interval above.
+        let mut consumer_config = OutboxConsumerConfig::from(&config.outbox);
+        consumer_config.batch_size = consumer_config.batch_size.max(1);
+        let consumer_batch_size = consumer_config.batch_size;
         let consumer = OutboxConsumer::new(
             repositories.clone(),
             Arc::new(webhook_manager),
-            OutboxConsumerConfig::from(&config.outbox),
+            consumer_config,
         )
         .with_metrics(metrics.clone());
         let handle = tokio::spawn(async move {
@@ -150,7 +157,7 @@ pub async fn handle_daemon(
         println!(
             "✓ outbox consumer running (interval {}s, batch {})",
             outbox_interval.as_secs(),
-            config.outbox.batch_size
+            consumer_batch_size
         );
         Some(handle)
     } else {
