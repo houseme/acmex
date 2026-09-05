@@ -880,6 +880,24 @@ pub struct OutboxSettings {
     /// Maximum events claimed per pass (maps to the consumer batch size).
     #[serde(default = "default_outbox_batch_size")]
     pub batch_size: usize,
+    /// Lease owner the consumer presents when claiming events. Must be
+    /// **globally unique** across every replica sharing the repository: lease
+    /// acquisition re-grants an unexpired lease to a caller presenting the
+    /// same owner, so two replicas configured with the same owner would both
+    /// claim the same events and deliver them concurrently. When unset, a
+    /// process-unique owner (PID + random suffix) is generated at startup,
+    /// which is safe even where replicas share PIDs (e.g. Kubernetes pods).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Outbox lease TTL in seconds. Must be larger than the slowest single
+    /// delivery (the webhook default timeout is 30s), or another consumer
+    /// can take over the lease while the first delivery is still in flight
+    /// and deliver the same event a second time.
+    #[serde(default = "default_outbox_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+    /// Delivery attempts per event before it is moved to the dead letter.
+    #[serde(default = "default_outbox_max_attempts")]
+    pub max_attempts: u32,
 }
 
 impl Default for OutboxSettings {
@@ -888,6 +906,9 @@ impl Default for OutboxSettings {
             enabled: default_true(),
             interval_secs: default_outbox_interval_secs(),
             batch_size: default_outbox_batch_size(),
+            owner: None,
+            lease_ttl_secs: default_outbox_lease_ttl_secs(),
+            max_attempts: default_outbox_max_attempts(),
         }
     }
 }
@@ -1097,6 +1118,14 @@ fn default_outbox_interval_secs() -> u64 {
 /// Matches `OutboxConsumerConfig::default().batch_size`.
 fn default_outbox_batch_size() -> usize {
     32
+}
+/// Matches `OutboxConsumerConfig::default().lease_ttl`.
+fn default_outbox_lease_ttl_secs() -> u64 {
+    30
+}
+/// Matches `OutboxConsumerConfig::default().max_attempts`.
+fn default_outbox_max_attempts() -> u32 {
+    6
 }
 fn default_smtp_port() -> u16 {
     587
@@ -1425,6 +1454,16 @@ impl Config {
         if self.outbox.batch_size == 0 {
             return Err(AcmeError::configuration(
                 "outbox.batch_size must be at least 1",
+            ));
+        }
+        if self.outbox.lease_ttl_secs == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.lease_ttl_secs must be at least 1 second",
+            ));
+        }
+        if self.outbox.max_attempts == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.max_attempts must be at least 1",
             ));
         }
 
@@ -1894,6 +1933,48 @@ poll_interval_secs = 3
         assert!(!config.outbox.enabled);
         assert_eq!(config.outbox.interval_secs, 15);
         assert_eq!(config.outbox.batch_size, 8);
+    }
+
+    /// The tunables added after the section shipped default like the
+    /// consumer defaults: no owner (generated per process), 30s lease TTL,
+    /// 6 attempts — and explicit values parse through.
+    #[test]
+    fn outbox_owner_lease_ttl_and_max_attempts_default_and_override() {
+        let config = Config::from_str("[outbox]\nenabled = true\n").unwrap();
+        assert_eq!(config.outbox.owner, None);
+        assert_eq!(config.outbox.lease_ttl_secs, 30);
+        assert_eq!(config.outbox.max_attempts, 6);
+
+        let config = Config::from_str(
+            "\n[outbox]\nowner = \"outbox-prod-eu-1\"\nlease_ttl_secs = 90\nmax_attempts = 3\n",
+        )
+        .unwrap();
+        assert_eq!(config.outbox.owner.as_deref(), Some("outbox-prod-eu-1"));
+        assert_eq!(config.outbox.lease_ttl_secs, 90);
+        assert_eq!(config.outbox.max_attempts, 3);
+    }
+
+    #[test]
+    fn outbox_validation_rejects_zero_lease_ttl_and_attempts() {
+        let err = Config::from_str("[outbox]\nlease_ttl_secs = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.lease_ttl_secs must be at least 1 second"),
+            "got: {err}"
+        );
+
+        let err = Config::from_str("[outbox]\nmax_attempts = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.max_attempts must be at least 1"),
+            "got: {err}"
+        );
     }
 
     #[test]
