@@ -23,6 +23,12 @@ use crate::domain::{
 use crate::error::{AcmeError, Result};
 use crate::repository::FileSecretStore;
 
+/// AWS KMS-backed key provider (feature `kms-aws`).
+#[cfg(feature = "kms-aws")]
+pub mod kms;
+#[cfg(feature = "kms-aws")]
+pub use kms::{KmsKeyProvider, KmsKeyProviderConfig};
+
 /// Secret bytes with redacted formatting and best-effort zeroization on drop.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretBytes(Vec<u8>);
