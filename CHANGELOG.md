@@ -40,6 +40,13 @@ must call out any unverified external evidence.
   to the CA and persist `AccountRecord`s instead of returning hardcoded
   values.
 
+### Removed
+
+- The no-op `metrics` and `cli` Cargo features. Neither gated any code —
+  `prometheus` and `clap` are unconditional dependencies — so enabling them
+  produced builds identical to the defaults. Users passing these flags can
+  simply drop them. Recorded as a minor-version change per 0.x semantics.
+
 ### Fixed
 
 - Issuance spine test fixtures now include the optional verification report

@@ -52,7 +52,7 @@ Enable optional features as needed:
 ```toml
 [dependencies.acmex]
 version = "0.8.0"
-features = ["dns-cloudflare", "redis", "cli"]
+features = ["dns-cloudflare", "redis"]
 ```
 
 Available features:
@@ -62,7 +62,6 @@ Available features:
 - **DNS Providers**: `dns-cloudflare`, `dns-route53`, `dns-alibaba`, `dns-azure`, `dns-google`, `dns-huawei`,
   `dns-tencent`, etc.
 - **CAs**: `google-ca`, `zerossl-ca`
-- **Other**: `metrics`, `cli`
 
 ## 📖 Quick Start
 

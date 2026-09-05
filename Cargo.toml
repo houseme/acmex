@@ -105,9 +105,6 @@ dns-tencent = []
 dns-huawei = []
 dns-cloudns = []
 
-metrics = []
-cli = []
-
 [[example]]
 name = "dns_01_challenge"
 required-features = ["dns-cloudflare"]
