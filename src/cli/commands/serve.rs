@@ -71,12 +71,10 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
     }
     let client = crate::client::AcmeClient::new(acme_config)?;
 
-    // Initialize webhook manager. `[notifications.webhooks]` has no mapping
-    // to the outbound delivery client yet, so serve runs with no endpoints:
-    // the outbox consumer treats that as a cheap no-op drain. (The previous
-    // hardcoded `localhost:8080` placeholder would now receive every outbox
-    // event — delivery ignores event filtering — and fail each one.)
-    let webhook_manager = Arc::new(WebhookManager::new(Vec::new()));
+    // Initialize webhook manager from `[notifications.webhooks]`: each entry
+    // becomes an outbound delivery endpoint for the durable outbox consumer
+    // (its `events` list filters by outbox event type; empty = everything).
+    let webhook_manager = Arc::new(WebhookManager::from_config(&config)?);
 
     // Start server
     start_server(

@@ -130,15 +130,15 @@ pub async fn handle_daemon(
     println!("✓ renewal controller scanning every {check_interval_secs}s");
 
     // 3. Durable outbox consumer: drains operation/deployment/audit events to
-    //    the webhook delivery so they do not accumulate without bound. The
-    //    daemon has no webhook endpoints (`[notifications.webhooks]` has no
-    //    mapping to the delivery client yet), and a manager without
-    //    endpoints delivers as a cheap no-op.
+    //    the webhook endpoints from `[notifications.webhooks]` so they do not
+    //    accumulate without bound. Without configured endpoints the manager
+    //    delivers as a cheap no-op drain.
     let outbox_handle = if config.outbox.enabled {
         let outbox_interval = Duration::from_secs(config.outbox.interval_secs.max(1));
+        let webhook_manager = WebhookManager::from_config(&config)?;
         let consumer = OutboxConsumer::new(
             repositories.clone(),
-            Arc::new(WebhookManager::new(Vec::new())),
+            Arc::new(webhook_manager),
             OutboxConsumerConfig::from(&config.outbox),
         )
         .with_metrics(metrics.clone());

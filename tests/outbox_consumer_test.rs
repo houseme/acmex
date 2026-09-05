@@ -314,6 +314,7 @@ async fn signed_webhook_delivery_verifies_consumer_side() {
         }),
         timeout_secs: 5,
         max_retries: 1,
+        event_type_filter: Vec::new(),
     }]);
 
     let event = OutboxEvent {

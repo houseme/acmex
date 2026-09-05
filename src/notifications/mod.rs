@@ -99,6 +99,10 @@ pub struct WebhookConfig {
     pub signing_secret: Option<SecretRef>,
     pub timeout_secs: u64,
     pub max_retries: u32,
+    /// Outbox event-type filter for the durable delivery path (for example
+    /// `"operation.created"`). An empty list delivers every outbox event.
+    #[serde(default)]
+    pub event_type_filter: Vec<String>,
 }
 
 /// Webhook response format
@@ -331,6 +335,20 @@ impl WebhookClient {
     }
 
     async fn send_outbox(&self, event: &OutboxEvent) -> Result<()> {
+        if !self.config.event_type_filter.is_empty()
+            && !self
+                .config
+                .event_type_filter
+                .iter()
+                .any(|allowed| allowed == &event.event_type)
+        {
+            debug!(
+                webhook = %self.config.name,
+                event_type = %event.event_type,
+                "skipping outbox event not in webhook filter"
+            );
+            return Ok(());
+        }
         let body = serde_json::json!({
             "event_id": event.event_id,
             "event_type": event.event_type,
@@ -358,6 +376,27 @@ impl WebhookManager {
         let webhooks = configs.into_iter().map(WebhookClient::new).collect();
 
         Self { webhooks }
+    }
+
+    /// Builds the manager from `[notifications.webhooks]` settings.
+    ///
+    /// `events` entries filter the durable outbox delivery by event-type
+    /// string (`operation.created`, `deployment.activated`, ...); an empty
+    /// list delivers everything. Retries are owned by the outbox consumer,
+    /// so each configured endpoint performs a single delivery attempt per
+    /// consumer pass instead of its own backoff loop.
+    pub fn from_config(config: &crate::config::Config) -> Result<Self> {
+        let settings = config
+            .notifications
+            .as_ref()
+            .map(|notifications| notifications.webhooks.as_slice())
+            .unwrap_or_default();
+        let webhooks = settings
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| webhook_config_from_settings(entry, index))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self::new(webhooks))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -390,6 +429,40 @@ impl OutboxDelivery for WebhookManager {
         }
         Ok(())
     }
+}
+
+/// Converts one `[notifications.webhooks]` entry into the delivery-side
+/// configuration. `index` only names the endpoint when no explicit name was
+/// configured.
+fn webhook_config_from_settings(
+    value: &crate::config::WebhookConfig,
+    index: usize,
+) -> Result<WebhookConfig> {
+    let format = match value.format.as_str() {
+        "json" => WebhookFormat::Json,
+        "slack" => WebhookFormat::Slack,
+        "discord" => WebhookFormat::Discord,
+        "custom" => WebhookFormat::Custom,
+        other => {
+            return Err(AcmeError::configuration(format!(
+                "notifications.webhooks[{index}].format `{other}` is not one of json|slack|discord|custom"
+            )));
+        }
+    };
+    Ok(WebhookConfig {
+        name: value
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("webhook-{index}")),
+        url: value.url.clone(),
+        events: Vec::new(),
+        format,
+        auth_token: value.auth_token.clone(),
+        signing_secret: value.signing_secret.clone(),
+        timeout_secs: value.timeout_secs,
+        max_retries: 1,
+        event_type_filter: value.events.clone(),
+    })
 }
 
 /// Delivery boundary used by the durable outbox consumer.
@@ -784,11 +857,97 @@ mod tests {
             signing_secret: None,
             timeout_secs: 30,
             max_retries: 3,
+            event_type_filter: Vec::new(),
         };
 
         let client = WebhookClient::new(config);
         assert!(client.should_handle(EventType::RenewalSuccess));
         assert!(!client.should_handle(EventType::RenewalFailed));
+    }
+
+    /// `[notifications.webhooks]` maps to delivery endpoints: names default
+    /// by index, formats parse strictly, and the configured `events` list
+    /// becomes the outbox event-type filter.
+    #[test]
+    fn webhook_manager_from_config_maps_settings() {
+        let config: crate::config::Config = "[[notifications.webhooks]]\nurl = \"https://hooks.example.test/acmex\"\nformat = \"slack\"\n\n[[notifications.webhooks]]\nname = \"ops\"\nurl = \"https://ops.example.test/hook\"\nevents = [\"operation.created\", \"deployment.activated\"]\n"
+            .parse()
+            .unwrap();
+
+        let manager = WebhookManager::from_config(&config).unwrap();
+        assert_eq!(manager.webhooks.len(), 2);
+        assert_eq!(manager.webhooks[0].config.name, "webhook-0");
+        assert!(matches!(
+            manager.webhooks[0].config.format,
+            WebhookFormat::Slack
+        ));
+        assert!(manager.webhooks[0].config.event_type_filter.is_empty());
+        assert_eq!(manager.webhooks[1].config.name, "ops");
+        assert_eq!(
+            manager.webhooks[1].config.event_type_filter,
+            vec![
+                "operation.created".to_string(),
+                "deployment.activated".to_string()
+            ]
+        );
+
+        let err = WebhookManager::from_config(
+            &"[[notifications.webhooks]]\nurl = \"https://hooks.example.test/acmex\"\nformat = \"carrier-pigeon\"\n"
+                .parse::<crate::config::Config>()
+                .unwrap(),
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("format `carrier-pigeon`"), "got: {err}");
+    }
+
+    /// The outbox delivery path respects the configured event-type filter:
+    /// filtered-out events are skipped without a delivery attempt (no
+    /// network error), matching events attempt delivery.
+    #[tokio::test]
+    async fn outbox_delivery_filters_by_event_type() {
+        let make_manager = |filter: Vec<&str>| {
+            WebhookManager::new(vec![WebhookConfig {
+                name: "filtered".to_string(),
+                // Unroutable address: a real delivery attempt fails fast.
+                url: "http://127.0.0.1:9/hook".to_string(),
+                events: Vec::new(),
+                format: WebhookFormat::Json,
+                auth_token: None,
+                signing_secret: None,
+                timeout_secs: 1,
+                max_retries: 1,
+                event_type_filter: filter.into_iter().map(String::from).collect(),
+            }])
+        };
+        let event = OutboxEvent {
+            sequence: 1,
+            event_id: "evt_filter".to_string(),
+            event_type: "audit.event".to_string(),
+            payload: serde_json::json!({}),
+            created_at: jiff::Timestamp::now(),
+            attempts: 0,
+            last_error: None,
+            next_attempt_at: None,
+            processed: false,
+            dead_lettered: false,
+        };
+
+        // Filtered out: delivered without touching the network.
+        make_manager(vec!["operation.created"])
+            .deliver(&event)
+            .await
+            .unwrap();
+        // No filter: every event is delivered (and fails on the dead URL).
+        assert!(make_manager(Vec::new()).deliver(&event).await.is_err());
+        // Matching filter: attempts delivery.
+        assert!(
+            make_manager(vec!["audit.event"])
+                .deliver(&event)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -802,6 +961,7 @@ mod tests {
             signing_secret: None,
             timeout_secs: 30,
             max_retries: 3,
+            event_type_filter: Vec::new(),
         };
 
         let client = WebhookClient::new(config);

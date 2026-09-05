@@ -738,6 +738,9 @@ pub struct NotificationSettings {
 pub struct WebhookConfig {
     pub name: Option<String>,
     pub url: String,
+    /// Outbox event-type filter applied to the durable delivery (for example
+    /// `"operation.created"` or `"deployment.activated"`). An empty list
+    /// delivers every outbox event to this endpoint.
     #[serde(default)]
     pub events: Vec<String>,
     #[serde(default = "default_webhook_format")]
