@@ -15,6 +15,11 @@ tests into implied success.
   and the HTTP agent sink have local contract tests on current main, but
   Redis, Kubernetes, Vault, and remote agent live environments are not yet
   validated as L4/L5 release evidence.
+- The AWS KMS key provider (`kms-aws`) is contract-tested against a mock
+  KMS endpoint; live AWS KMS/IAM behavior (real policies, throttling,
+  multi-region keys) is not yet validated. SMTP email delivery is
+  contract-tested against a fake SMTP server; live provider behavior is
+  not yet validated.
 - The current restart matrix uses fake idempotent external effects; it is not a
   release pass for real CA/DNS/sink adapters until those executors are executed
   in the Pebble/live evidence gates.

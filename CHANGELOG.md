@@ -32,6 +32,32 @@ must call out any unverified external evidence.
   the conservative `destroy` remains as the safe default.
 - `[[example]] intent_issuance` demonstrates the durable workflow offline,
   and `renewal_controller` replaces the deprecated scheduler example.
+- Account keys support ES256/ES384/ES512 and RS256: every JWS path (account
+  registration, lookup, contact updates, deactivation, key rollover, EAB
+  inner JWS, order and revocation calls) now derives its algorithm and JWK
+  from the actual key. New keys default to Ed25519 unchanged; opt in via
+  `[ca] account_key_type`. This also fixes a latent bug where the generated
+  account key was P-256 but was signed and labeled as Ed25519, which every
+  real CA would have rejected.
+- AWS KMS key provider behind the new `kms-aws` feature (`[key]
+  backend = "kms-aws"`): managed keys are created as KMS-held asymmetric
+  keys and CSRs are signed remotely via the KMS Sign API — private key
+  material never leaves the service and `export` is always `None`.
+- External CSR issuance end to end: intents created with
+  `key.mode = "external-csr"` now require and use a caller-supplied CSR
+  (`external_csr` on intent creation or issue), validated for signature and
+  exact identifier match. AcmeX never generates, imports, or persists a
+  private key on this path; declaring external CSR previously fell back
+  silently to a managed key.
+- SMTP email delivery: `[[notifications.email]]` now actually delivers
+  outbox events (implicit TLS, STARTTLS or explicit plaintext) with
+  per-channel error aggregation alongside webhooks.
+- Performance: repository reads avoid deep JSON copies (`Arc<Value>`
+  envelopes with borrowed deserialization), the file repository caches
+  parsed entities behind stat validation, the legacy Redis storage uses
+  `SCAN` plus a reused connection manager, and the release profile enables
+  thin LTO. 5 000-intent scans drop from ~21 ms to ~3 ms (memory) and from
+  ~108 ms to ~46 ms warm (file) in release builds.
 
 ### Changed
 
@@ -39,6 +65,10 @@ must call out any unverified external evidence.
   contacts into the ACME registration, and read/update/deactivate round-trip
   to the CA and persist `AccountRecord`s instead of returning hardcoded
   values.
+- Deployment health `Unknown` (sink unreachable) no longer triggers
+  rollback — only verified `Unhealthy` does; sink `activate` verifies the
+  staging fingerprint before promotion, and in-flight deployments recover
+  automatically after a crash instead of stalling forever.
 
 ### Removed
 
@@ -46,6 +76,9 @@ must call out any unverified external evidence.
   `prometheus` and `clap` are unconditional dependencies — so enabling them
   produced builds identical to the defaults. Users passing these flags can
   simply drop them. Recorded as a minor-version change per 0.x semantics.
+- The never-consumed `[renewal.hooks]` configuration (`RenewalHooks`);
+  existing configs with that section still parse and the section is now
+  ignored.
 
 ### Fixed
 
