@@ -496,7 +496,13 @@ async fn outbox_contract(set: &RepositorySet) {
         .unwrap();
     assert!(set.outbox.list_pending(10).await.unwrap().is_empty());
     set.outbox.requeue(seq2).await.unwrap();
-    assert_eq!(set.outbox.list_pending(10).await.unwrap().len(), 1);
+    let pending = set.outbox.list_pending(10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    // Manual replay restarts the retry budget: `attempts` is reset to 0 on
+    // every backend (redis, memory, file), so the replayed event gets a full
+    // retry allowance again.
+    assert_eq!(pending[0].attempts, 0);
+    assert_eq!(pending[0].last_error, None);
 }
 
 #[tokio::test]

@@ -345,6 +345,9 @@ impl OutboxRepository for MemoryRepository {
         if let Some(event) = outbox.events.iter_mut().find(|e| e.sequence == sequence) {
             event.dead_lettered = false;
             event.processed = false;
+            // Manual replay restarts the retry budget, matching the redis
+            // backend's `OUTBOX_REQUEUE_LUA` contract.
+            event.attempts = 0;
             event.last_error = None;
             event.next_attempt_at = None;
         }

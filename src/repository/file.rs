@@ -784,6 +784,9 @@ impl OutboxRepository for FileRepository {
         self.update_outbox(sequence, |event| {
             event.dead_lettered = false;
             event.processed = false;
+            // Manual replay restarts the retry budget, matching the redis
+            // backend's `OUTBOX_REQUEUE_LUA` contract.
+            event.attempts = 0;
             event.last_error = None;
             event.next_attempt_at = None;
         })

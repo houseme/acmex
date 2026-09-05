@@ -184,10 +184,17 @@ pub async fn start_server(
     // twice.
     if config.outbox.enabled {
         let outbox_interval = std::time::Duration::from_secs(config.outbox.interval_secs.max(1));
+        // Defense in depth: `Config::validate` already rejects
+        // `outbox.batch_size = 0`, but a consumer wired with a zero batch
+        // would scan without ever claiming an event, so clamp here too —
+        // same guard as the interval above.
+        let mut consumer_config = OutboxConsumerConfig::from(&config.outbox);
+        consumer_config.batch_size = consumer_config.batch_size.max(1);
+        let consumer_batch_size = consumer_config.batch_size;
         let consumer = OutboxConsumer::new(
             repositories.clone(),
             webhook_manager.clone(),
-            OutboxConsumerConfig::from(&config.outbox),
+            consumer_config,
         )
         .with_metrics(metrics.clone());
         tokio::spawn(async move {
@@ -195,7 +202,7 @@ pub async fn start_server(
         });
         tracing::info!(
             interval_secs = outbox_interval.as_secs(),
-            batch_size = config.outbox.batch_size,
+            batch_size = consumer_batch_size,
             "outbox consumer started"
         );
     } else {

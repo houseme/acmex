@@ -18,6 +18,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use jiff::Zoned;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -99,6 +100,12 @@ impl WebhookEvent {
 pub struct WebhookConfig {
     pub name: String,
     pub url: String,
+    /// Event types the push path ([`WebhookClient::send`] /
+    /// [`WebhookManager::send_event`]) delivers. Endpoints assembled from
+    /// `[notifications.webhooks]` keep this **empty** — they deliver through
+    /// the durable outbox path (`send_outbox`), filtered by
+    /// `event_type_filter` — and must not be routed through the push path;
+    /// see [`WebhookClient::should_handle`].
     pub events: Vec<EventType>,
     pub format: WebhookFormat,
     pub auth_token: Option<SecretRef>,
@@ -143,8 +150,21 @@ impl WebhookClient {
         }
     }
 
-    /// Check if webhook should handle this event
+    /// Check if webhook should handle this event.
+    ///
+    /// # Panics (debug builds)
+    ///
+    /// Asserts the push-path precondition that `events` is non-empty.
+    /// Clients assembled from `[notifications.webhooks]` leave `events`
+    /// empty (they filter via `event_type_filter` on the outbox path);
+    /// routing one of them through the push path (`send`/`send_event`)
+    /// would otherwise silently skip every event.
     pub fn should_handle(&self, event_type: EventType) -> bool {
+        debug_assert!(
+            !self.config.events.is_empty(),
+            "webhook `{}` has no `events` filter: the push path (send/send_event) would silently skip every event — from-config endpoints deliver via the outbox path (send_outbox) only",
+            self.config.name
+        );
         self.config.events.contains(&event_type)
     }
 
@@ -253,7 +273,13 @@ impl WebhookClient {
             return Ok(());
         }
 
-        info!("Sending webhook to: {}", self.config.url);
+        // Only the redacted endpoint (scheme + host + port) may reach logs:
+        // the configured URL can embed credentials (`user:pass@host`).
+        info!(
+            webhook = %self.config.name,
+            endpoint = %redact_url(&self.config.url),
+            "sending webhook"
+        );
 
         let body = self.format_event(event);
         let timeout = Duration::from_secs(self.config.timeout_secs);
@@ -325,10 +351,22 @@ impl WebhookClient {
                 .header(WEBHOOK_SIGNATURE_HEADER, signature);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| crate::error::AcmeError::Transport(e.to_string()))?;
+        let response = request.send().await.map_err(|e| {
+            // reqwest's error Display embeds the full request URL (which may
+            // carry embedded credentials): keep the raw detail at debug level
+            // only and hand the classified error a redacted endpoint.
+            debug!(
+                webhook = %self.config.name,
+                endpoint = %redact_url(&self.config.url),
+                error = %e,
+                "webhook request failed"
+            );
+            AcmeError::Transport(format!(
+                "webhook {} delivery to {} failed",
+                self.config.name,
+                redact_url(&self.config.url)
+            ))
+        })?;
 
         if !response.status().is_success() {
             return Err(crate::error::AcmeError::Transport(format!(
@@ -561,7 +599,7 @@ pub struct OutboxConsumerConfig {
 impl Default for OutboxConsumerConfig {
     fn default() -> Self {
         Self {
-            owner: format!("outbox-{}", std::process::id()),
+            owner: unique_outbox_owner(),
             lease_ttl: Duration::from_secs(30),
             batch_size: 32,
             max_attempts: 6,
@@ -571,13 +609,38 @@ impl Default for OutboxConsumerConfig {
     }
 }
 
+/// Generates a process-unique outbox lease owner.
+///
+/// The default must be unique across processes *and* across replicas:
+/// container runtimes hand every replica the same PID (a Kubernetes pod's
+/// PID namespace typically starts at 1), and lease acquisition re-grants an
+/// unexpired lease to a caller presenting the same owner — colliding owners
+/// would silently break outbox mutual exclusion and every replica would
+/// deliver the same batch. PID plus a random 64-bit hex suffix makes that
+/// collision practically impossible. Operators who need a stable owner
+/// across restarts set `[outbox].owner` explicitly (and take responsibility
+/// for global uniqueness).
+fn unique_outbox_owner() -> String {
+    format!(
+        "outbox-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    )
+}
+
 impl From<&OutboxSettings> for OutboxConsumerConfig {
-    /// Maps the `[outbox]` configuration section onto the consumer config;
-    /// every tunable the section does not expose (owner, lease TTL, retry
-    /// backoff) keeps its [`OutboxConsumerConfig::default`].
+    /// Maps the `[outbox]` configuration section onto the consumer config:
+    /// `batch_size`, `owner`, `lease_ttl_secs` and `max_attempts` map onto
+    /// the matching fields. When `owner` is unset a process-unique owner is
+    /// generated per construction (see [`unique_outbox_owner`]); an
+    /// explicitly configured owner must be globally unique across replicas.
+    /// The retry backoff keeps its [`OutboxConsumerConfig::default`].
     fn from(settings: &OutboxSettings) -> Self {
         OutboxConsumerConfig {
             batch_size: settings.batch_size,
+            owner: settings.owner.clone().unwrap_or_else(unique_outbox_owner),
+            lease_ttl: Duration::from_secs(settings.lease_ttl_secs),
+            max_attempts: settings.max_attempts,
             ..OutboxConsumerConfig::default()
         }
     }
@@ -617,9 +680,16 @@ where
         }
     }
 
-    /// Attaches the shared metrics registry: `acmex_outbox_pending` tracks
-    /// the batch backlog per event type (a lower bound of the true backlog,
-    /// which a single `list_pending` batch cannot observe).
+    /// Attaches the shared metrics registry.
+    ///
+    /// `acmex_outbox_pending` reports, per event type, how many events of
+    /// the most recent scan batch were still pending when the pass ended
+    /// (delivered and dead-lettered events are excluded). It is a lower
+    /// bound of the true backlog — a single `list_pending` batch cannot
+    /// observe events beyond the batch size, and events waiting out a retry
+    /// backoff only reappear in a later batch — and every label the pass
+    /// touches is fully reset with `set`, so the value never accumulates
+    /// stale increments across passes.
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
         self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
@@ -634,13 +704,17 @@ where
     /// task is aborted.
     ///
     /// The first pass starts immediately (draining the startup backlog), then
-    /// one batch is attempted every `interval`. A failing pass is logged at
-    /// warn level and retried on the next tick instead of terminating the
-    /// loop — the same classify-and-continue policy the workflow worker
-    /// uses. The wait between passes is the tokio timer, so aborting the
-    /// spawned task exits promptly; there is no cleanup on the cancel path.
+    /// one batch is attempted every `interval`. Missed ticks (a pass slower
+    /// than, or suspended past, the interval) collapse into a single delay
+    /// instead of firing back-to-back catching-up ticks. A failing pass is
+    /// logged at warn level and retried on the next tick instead of
+    /// terminating the loop — the same classify-and-continue policy the
+    /// workflow worker uses. The wait between passes is the tokio timer, so
+    /// aborting the spawned task exits promptly; there is no cleanup on the
+    /// cancel path.
     pub async fn run_forever(&self, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             // The first tick completes immediately, so the startup backlog
             // drains without waiting out the interval.
@@ -670,14 +744,20 @@ where
             .outbox
             .list_pending(self.config.batch_size)
             .await?;
+
+        // Gauge bookkeeping (`acmex_outbox_pending`): the map starts out with
+        // the batch composition and is decremented when an event reaches a
+        // terminal state (delivered, or dead-lettered). It is flushed to the
+        // gauge with `set` once per pass, so events that stay pending (retry
+        // backoff, lease held elsewhere) or land in the dead letter can never
+        // leak stale increments into the metric.
+        let mut backlog: HashMap<String, i64> = HashMap::new();
+        for event in &pending {
+            *backlog.entry(event.event_type.clone()).or_insert(0) += 1;
+        }
+
         let mut report = OutboxConsumerReport::default();
         for event in pending {
-            if let Some(metrics) = &self.metrics {
-                metrics
-                    .outbox_pending
-                    .with_label_values(&[&event.event_type])
-                    .inc();
-            }
             let lease_key = format!("outbox/{}", event.sequence);
             let grant = match self
                 .repositories
@@ -692,59 +772,117 @@ where
                 }
             };
 
-            let result = self.delivery.deliver(&event).await;
-            match result {
-                Ok(()) => {
-                    self.repositories
-                        .outbox
-                        .mark_processed(event.sequence)
-                        .await?;
-                    if let Some(metrics) = &self.metrics {
-                        metrics
-                            .outbox_pending
-                            .with_label_values(&[&event.event_type])
-                            .dec();
-                    }
-                    report.delivered += 1;
-                }
-                Err(err) => {
-                    let next_attempt = event.attempts + 1;
-                    let error = stable_delivery_error(&err);
-                    if next_attempt >= self.config.max_attempts {
-                        self.repositories
-                            .outbox
-                            .mark_failed(event.sequence, &error, None)
-                            .await?;
-                        self.repositories
-                            .outbox
-                            .dead_letter(event.sequence, &error)
-                            .await?;
-                        report.dead_lettered += 1;
-                    } else {
-                        let retry_at = self
-                            .repositories
-                            .clock
-                            .now()
-                            .checked_add(
-                                jiff::Span::new()
-                                    .milliseconds(self.backoff(next_attempt).as_millis() as i64),
-                            )
-                            .expect("outbox retry backoff overflow");
-                        self.repositories
-                            .outbox
-                            .mark_failed(event.sequence, &error, Some(retry_at))
-                            .await?;
-                        report.failed += 1;
-                    }
-                }
-            }
+            let settled = self
+                .settle_leased_event(&event, &mut report, &mut backlog)
+                .await;
 
-            self.repositories
+            // Best-effort lease release: a failed release only means the
+            // lease lapses via its TTL (delivery stays at-least-once), so it
+            // must not mask the settlement outcome nor skip the release of
+            // later events.
+            if let Err(err) = self
+                .repositories
                 .leases
                 .release(&lease_key, &grant.owner, grant.fencing_token)
-                .await?;
+                .await
+            {
+                debug!(
+                    lease_key = %lease_key,
+                    error = %err,
+                    "outbox lease release failed; lease will expire via ttl"
+                );
+            }
+
+            if let Err(err) = settled {
+                // Repository bookkeeping failed mid-pass: publish what this
+                // batch settled so far, then surface the failure.
+                self.flush_backlog_gauge(&backlog);
+                return Err(err);
+            }
         }
+
+        self.flush_backlog_gauge(&backlog);
         Ok(report)
+    }
+
+    /// Delivers one leased event and records its terminal state. Returns
+    /// `Err` only for repository bookkeeping failures (`mark_processed`,
+    /// `mark_failed`, `dead_letter`) — delivery errors are folded into the
+    /// retry / dead-letter paths — so the caller can release the lease
+    /// before surfacing them.
+    async fn settle_leased_event(
+        &self,
+        event: &OutboxEvent,
+        report: &mut OutboxConsumerReport,
+        backlog: &mut HashMap<String, i64>,
+    ) -> Result<()> {
+        let result = self.delivery.deliver(event).await;
+        match result {
+            Ok(()) => {
+                self.repositories
+                    .outbox
+                    .mark_processed(event.sequence)
+                    .await?;
+                // Delivered: no longer pending.
+                if let Some(remaining) = backlog.get_mut(&event.event_type) {
+                    *remaining -= 1;
+                }
+                report.delivered += 1;
+            }
+            Err(err) => {
+                let next_attempt = event.attempts + 1;
+                let error = stable_delivery_error(&err);
+                if next_attempt >= self.config.max_attempts {
+                    self.repositories
+                        .outbox
+                        .mark_failed(event.sequence, &error, None)
+                        .await?;
+                    self.repositories
+                        .outbox
+                        .dead_letter(event.sequence, &error)
+                        .await?;
+                    // Dead-lettered: terminal, no longer pending.
+                    if let Some(remaining) = backlog.get_mut(&event.event_type) {
+                        *remaining -= 1;
+                    }
+                    report.dead_lettered += 1;
+                } else {
+                    // Retry scheduling that overflows the representable
+                    // timestamp (clock at `Timestamp::MAX`) falls back to the
+                    // farthest instant instead of panicking the pass.
+                    let retry_at = self
+                        .repositories
+                        .clock
+                        .now()
+                        .checked_add(
+                            jiff::Span::new()
+                                .milliseconds(self.backoff(next_attempt).as_millis() as i64),
+                        )
+                        .unwrap_or(jiff::Timestamp::MAX);
+                    self.repositories
+                        .outbox
+                        .mark_failed(event.sequence, &error, Some(retry_at))
+                        .await?;
+                    report.failed += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes this pass's per-type remaining counts to the
+    /// `acmex_outbox_pending` gauge. Setting each label once per pass (as
+    /// opposed to inc/dec per event) keeps the gauge drift-free even when
+    /// events dead-letter, are leased elsewhere, or the pass aborts.
+    fn flush_backlog_gauge(&self, backlog: &HashMap<String, i64>) {
+        if let Some(metrics) = &self.metrics {
+            for (event_type, remaining) in backlog {
+                metrics
+                    .outbox_pending
+                    .with_label_values(&[event_type])
+                    .set(*remaining);
+            }
+        }
     }
 
     fn backoff(&self, attempt: u32) -> Duration {
@@ -753,6 +891,27 @@ where
             .retry_backoff_base
             .saturating_mul(2_u32.saturating_pow(shift))
             .min(self.config.retry_backoff_max)
+    }
+}
+
+/// Redacts a webhook URL to its `scheme://host[:port]` for logs and error
+/// messages. The configured URL may carry embedded basic-auth credentials
+/// (`https://user:pass@host/...`) and reqwest's error Display embeds the
+/// full URL, so raw URLs must never reach logs. Unparsable input redacts to
+/// a fixed placeholder (never panics, never echoes the input).
+fn redact_url(url: &str) -> String {
+    const OPAQUE: &str = "<unparsable webhook url>";
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return OPAQUE.to_string();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // `user:pass@host[:port]` — drop everything before the last `@`, which
+    // is the userinfo separator (hosts cannot contain `@`).
+    match authority.rsplit_once('@') {
+        Some((_credentials, host)) if !host.is_empty() => format!("{scheme}://{host}"),
+        Some(_) => OPAQUE.to_string(),
+        None if authority.is_empty() => OPAQUE.to_string(),
+        None => format!("{scheme}://{authority}"),
     }
 }
 
@@ -943,6 +1102,63 @@ mod tests {
         let client = WebhookClient::new(config);
         assert!(client.should_handle(EventType::RenewalSuccess));
         assert!(!client.should_handle(EventType::RenewalFailed));
+    }
+
+    /// The `should_handle` debug assertion catches from-config clients
+    /// (empty `events`) being routed through the push path — the trap that
+    /// would silently skip every event. In release builds the assert
+    /// compiles out and the check degrades to the old contains() semantics.
+    #[test]
+    fn should_handle_debug_asserts_on_empty_events() {
+        let client = WebhookClient::new(WebhookConfig {
+            name: "from-config".to_string(),
+            url: "https://example.com/webhook".to_string(),
+            events: Vec::new(),
+            format: WebhookFormat::Json,
+            auth_token: None,
+            signing_secret: None,
+            timeout_secs: 30,
+            max_retries: 1,
+            event_type_filter: Vec::new(),
+        });
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = client.should_handle(EventType::RenewalSuccess);
+        }))
+        .is_err();
+        assert_eq!(
+            panicked,
+            cfg!(debug_assertions),
+            "empty `events` must trip the push-path debug assert in debug builds"
+        );
+    }
+
+    /// Logs and classified errors must never carry the raw webhook URL:
+    /// embedded basic-auth credentials (`user:pass@host`) are stripped, and
+    /// only scheme + host + port survive.
+    #[test]
+    fn redact_url_strips_credentials_path_and_query() {
+        assert_eq!(
+            redact_url("https://user:pass@hooks.example.test:8443/path?token=secret"),
+            "https://hooks.example.test:8443"
+        );
+        assert_eq!(
+            redact_url("https://hooks.example.test/hook"),
+            "https://hooks.example.test"
+        );
+        assert_eq!(redact_url("http://127.0.0.1:9/hook"), "http://127.0.0.1:9");
+        // An `@` in the path must not confuse the userinfo split.
+        assert_eq!(
+            redact_url("https://hooks.example.test/u@ser"),
+            "https://hooks.example.test"
+        );
+        // Unparsable input degrades to a fixed placeholder — no panic, and
+        // the input is never echoed back.
+        assert_eq!(redact_url("not a url"), "<unparsable webhook url>");
+        assert_eq!(redact_url("https://"), "<unparsable webhook url>");
+
+        let redacted = redact_url("https://alice:s3cret@hooks.example.test/hook");
+        assert!(!redacted.contains("alice"), "{redacted}");
+        assert!(!redacted.contains("s3cret"), "{redacted}");
     }
 
     /// `[notifications.webhooks]` maps to delivery endpoints: names default
@@ -1267,15 +1483,47 @@ username = "user"
             enabled: true,
             interval_secs: 7,
             batch_size: 12,
+            owner: Some("outbox-prod-eu-1".to_string()),
+            lease_ttl_secs: 45,
+            max_attempts: 3,
         };
         let config = OutboxConsumerConfig::from(&settings);
         assert_eq!(config.batch_size, 12);
-        // Tunables the section does not expose keep the consumer defaults.
+        // An explicitly configured owner is passed through verbatim; the
+        // operator is responsible for its global uniqueness.
+        assert_eq!(config.owner, "outbox-prod-eu-1");
+        assert_eq!(config.lease_ttl, Duration::from_secs(45));
+        assert_eq!(config.max_attempts, 3);
+        // The retry backoff keeps the consumer default (not yet exposed by
+        // the section).
         let default = OutboxConsumerConfig::default();
-        assert_eq!(config.max_attempts, default.max_attempts);
-        assert_eq!(config.lease_ttl, default.lease_ttl);
         assert_eq!(config.retry_backoff_base, default.retry_backoff_base);
-        assert!(!config.owner.is_empty());
+        assert_eq!(config.retry_backoff_max, default.retry_backoff_max);
+
+        // An unset owner generates a fresh unique owner per construction.
+        let unset = OutboxSettings {
+            owner: None,
+            ..settings.clone()
+        };
+        let first = OutboxConsumerConfig::from(&unset);
+        let second = OutboxConsumerConfig::from(&unset);
+        assert_ne!(first.owner, second.owner);
+    }
+
+    /// The default lease owner must differ between constructions: container
+    /// replicas can observe the same PID, so a PID-only owner would collide,
+    /// and lease acquisition re-grants an unexpired lease to a caller
+    /// presenting the same owner — colliding owners silently break outbox
+    /// mutual exclusion.
+    #[test]
+    fn default_outbox_owner_is_unique_per_construction() {
+        let first = OutboxConsumerConfig::default();
+        let second = OutboxConsumerConfig::default();
+        assert_ne!(first.owner, second.owner);
+        assert!(first.owner.starts_with("outbox-"));
+        // The random suffix guarantees the difference even where both
+        // processes share a PID.
+        assert_ne!(first.owner, format!("outbox-{}", std::process::id()));
     }
 
     /// A manager without endpoints delivers nothing (no network I/O) and
