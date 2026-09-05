@@ -178,9 +178,11 @@ cargo test
 
 Explore the `examples/` directory for more usage patterns:
 
-- [Basic Issuance](examples/basic_issuance.rs)
-- [DNS-01 Challenge](examples/dns_01_challenge.rs)
-- [API Server Custom](examples/api_server_custom.rs)
+- [Intent-Based Issuance](examples/intent_issuance.rs) — v0.9+ durable workflow: `CertificateIntent` → application service → in-process workflow engine → deployed certificate (runs offline)
+- [Renewal Controller](examples/renewal_controller.rs) — ARI-first renewal decisions, jitter and shadow mode (runs offline)
+- [Basic Issuance](examples/basic_issuance.rs) — legacy `AcmeClient` style
+- [DNS-01 Challenge](examples/dns_01_challenge.rs) — legacy style; requires `--features dns-cloudflare`
+- [API Server Custom](examples/api_server_custom.rs) — legacy style embedded REST API
 
 ## 📄 Documentation
 
