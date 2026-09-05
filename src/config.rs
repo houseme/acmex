@@ -54,6 +54,10 @@ pub struct Config {
     #[serde(default)]
     pub outbox: OutboxSettings,
 
+    /// Key management settings.
+    #[serde(default)]
+    pub key: Option<KeySettings>,
+
     /// Remote certificate delivery sinks (Kubernetes Secret, Vault KV).
     #[serde(default)]
     pub delivery: DeliverySettings,
@@ -808,6 +812,34 @@ pub struct EmailConfig {
     pub password: Option<SecretRef>,
 }
 
+/// Key management settings (`[key]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeySettings {
+    /// Key provider backend: "software" (default) or "kms-aws" (requires
+    /// the `kms-aws` feature).
+    #[serde(default = "default_key_backend")]
+    pub backend: String,
+    /// AWS KMS settings (required when backend = "kms-aws").
+    #[serde(default)]
+    pub kms: Option<KmsKeySettings>,
+}
+
+/// AWS KMS provider settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KmsKeySettings {
+    /// AWS region (e.g. `us-east-1`). Omit to use the ambient AWS
+    /// configuration chain.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// KMS endpoint override (VPC endpoints, contract tests).
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+}
+
+fn default_key_backend() -> String {
+    "software".to_string()
+}
+
 /// Durable outbox consumer settings (`[outbox]`).
 ///
 /// The consumer drains `operation.*`/`deployment.*`/`audit.*` events from the
@@ -1322,6 +1354,15 @@ impl Config {
         {
             return Err(AcmeError::configuration(
                 "delivery.kubernetes.namespace cannot be empty",
+            ));
+        }
+
+        if let Some(ref key) = self.key
+            && key.backend == "kms-aws"
+            && key.kms.is_none()
+        {
+            return Err(AcmeError::configuration(
+                "key.kms settings are required when key.backend = \"kms-aws\"",
             ));
         }
 
@@ -1902,6 +1943,29 @@ poll_interval_secs = 3
             err.contains("delivery.vault.endpoint cannot be empty"),
             "got: {err}"
         );
+    }
+
+    /// `[key]` parses with the software default; the kms-aws backend
+    /// requires its kms settings section at validation time.
+    #[test]
+    fn key_backend_settings_parse_and_validate() {
+        let config: Config = "[key]\nbackend = \"kms-aws\"\n\n[key.kms]\nregion = \"us-east-1\"\nendpoint_url = \"http://127.0.0.1:8200\"\n".parse().unwrap();
+        let key = config.key.as_ref().unwrap();
+        assert_eq!(key.backend, "kms-aws");
+        assert_eq!(
+            key.kms.as_ref().unwrap().region.as_deref(),
+            Some("us-east-1")
+        );
+        // Omitting the section entirely keeps the software default.
+        let config: Config = "[outbox]\nenabled = false\n".parse().unwrap();
+        assert!(config.key.is_none());
+
+        let err = Config::from_str("[key]\nbackend = \"kms-aws\"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("key.kms settings are required"), "got: {err}");
     }
 
     /// The default account key type stays Ed25519 — the compatibility

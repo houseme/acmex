@@ -526,6 +526,48 @@ fn register_configured_sinks(
     orchestrator
 }
 
+/// Assembles the key provider configured under `[key]`.
+///
+/// `backend = "kms-aws"` (with the `kms-aws` feature compiled in) routes
+/// managed-key generation and CSR signing through AWS KMS; private key
+/// material never leaves the service. Anything else — or a KMS assembly
+/// failure, which the caller logs — falls back to the local software
+/// provider backed by the file secret store.
+async fn build_key_provider(
+    config: &Config,
+) -> crate::error::Result<Arc<dyn crate::key::KeyProvider>> {
+    let settings = config.key.as_ref();
+    let backend = settings
+        .map(|key| key.backend.as_str())
+        .unwrap_or("software");
+    if backend != "kms-aws" {
+        return Err(crate::error::AcmeError::configuration(format!(
+            "key backend `{backend}` is the software provider"
+        )));
+    }
+    #[cfg(feature = "kms-aws")]
+    {
+        let kms = settings.and_then(|key| key.kms.as_ref()).ok_or_else(|| {
+            crate::error::AcmeError::configuration(
+                "key.kms settings are required when key.backend = \"kms-aws\"",
+            )
+        })?;
+        let provider_config = crate::key::kms::KmsKeyProviderConfig {
+            region: kms.region.clone(),
+            endpoint_url: kms.endpoint_url.clone(),
+            ..Default::default()
+        };
+        let provider = crate::key::kms::KmsKeyProvider::new(provider_config).await?;
+        Ok(Arc::new(provider))
+    }
+    #[cfg(not(feature = "kms-aws"))]
+    {
+        Err(crate::error::AcmeError::configuration(
+            "key backend `kms-aws` requires the `kms-aws` feature",
+        ))
+    }
+}
+
 /// Assembles a fully equipped [`WorkflowEngine`] from configuration.
 ///
 /// This is the shared assembly for the embedded server worker, the CLI
@@ -578,9 +620,18 @@ pub async fn build_engine_from_config(
         repositories.clone(),
     ));
 
-    let key_provider: Arc<dyn crate::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
-        FileSecretStore::new(settings.secret_store_dir.clone()),
-    ));
+    let key_provider: Arc<dyn crate::key::KeyProvider> = match build_key_provider(config).await {
+        Ok(provider) => provider,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "configured key provider assembly failed; falling back to the software provider"
+            );
+            Arc::new(SoftwareKeyProvider::new(FileSecretStore::new(
+                settings.secret_store_dir.clone(),
+            )))
+        }
+    };
 
     let presenters = build_presenters(config, &mut settings).await;
 
