@@ -9,6 +9,7 @@ provider has live external validation.
 | `aws-lc-rs` | crypto backend | default build | not required |
 | `ring-crypto` | crypto backend | `cargo check --all-features` | not required |
 | `redis` | repository/storage backend | `cargo check --all-features` | not yet validated as live Redis E2E |
+| `kms-aws` | key provider backend | `cargo test --features kms-aws --test kms_key_provider_contract` | contract-tested against a mock KMS endpoint; live AWS KMS/IAM not yet validated |
 | `google-ca` | CA integration | `cargo check --all-features` | not yet validated against Google staging |
 | `zerossl-ca` | CA integration | `cargo check --all-features` | not yet validated against ZeroSSL staging |
 | `dns-cloudflare` | DNS provider | `cargo check --all-features` | not yet validated against a live zone |
