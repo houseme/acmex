@@ -704,17 +704,6 @@ pub struct RenewalSettings {
     /// Concurrency level for renewals.
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
-    /// Renewal hooks.
-    #[serde(default)]
-    pub hooks: Option<RenewalHooks>,
-}
-
-/// Renewal hooks configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RenewalHooks {
-    pub before: Option<String>,
-    pub after: Option<String>,
-    pub on_error: Option<String>,
 }
 
 /// Metrics settings.
@@ -1073,7 +1062,6 @@ impl Default for RenewalSettings {
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay(),
             concurrency: default_concurrency(),
-            hooks: None,
         }
     }
 }
