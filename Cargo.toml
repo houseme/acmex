@@ -108,6 +108,10 @@ dns-cloudns = []
 metrics = []
 cli = []
 
+[[example]]
+name = "dns_01_challenge"
+required-features = ["dns-cloudflare"]
+
 [dev-dependencies]
 mockito = "1.7.2"
 hex = "0.4.3"
