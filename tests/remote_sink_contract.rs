@@ -764,6 +764,89 @@ async fn kubernetes_secret_sink_unreachable_is_unknown_health() {
     ));
 }
 
+#[tokio::test]
+async fn kubernetes_activate_refuses_to_promote_a_restaged_slot() {
+    let state = Arc::new(Mutex::new(K8sState::default()));
+    let base_url = spawn_k8s(state.clone()).await;
+    let sink = k8s_sink(&base_url);
+    let spec = k8s_spec("acmex-restage-tls");
+
+    let (v1, key1) = sample_version("restage-one.example.com");
+    let material1 = build_material(&v1, key1);
+    let staged1 = sink.stage(&spec, &v1, mat_ref(&material1)).await.unwrap();
+
+    // A newer version re-stages over the same staging slot.
+    let (v2, key2) = sample_version("restage-two.example.com");
+    let material2 = build_material(&v2, key2);
+    sink.stage(&spec, &v2, mat_ref(&material2)).await.unwrap();
+
+    // Activating the stale handle must fail as a retryable Conflict, never
+    // promote the v2 material under v1's identity.
+    let err = sink.activate(&staged1).await.unwrap_err();
+    assert!(matches!(err, AcmeError::Conflict(_)), "got: {err}");
+    assert!(!err.to_string().contains("PRIVATE KEY"), "got: {err}");
+
+    // The target secret was never touched.
+    assert!(matches!(
+        sink.health_check(&staged1).await.unwrap(),
+        DeploymentHealth::Unknown(_)
+    ));
+
+    // The fresh handle still activates cleanly.
+    let staged2 = sink.stage(&spec, &v2, mat_ref(&material2)).await.unwrap();
+    sink.activate(&staged2).await.unwrap();
+    assert_eq!(
+        sink.health_check(&staged2).await.unwrap(),
+        DeploymentHealth::Healthy
+    );
+}
+
+#[tokio::test]
+async fn kubernetes_rollback_without_snapshot_and_previous_secret_fails_loudly() {
+    let state = Arc::new(Mutex::new(K8sState::default()));
+    let base_url = spawn_k8s(state.clone()).await;
+    let sink = k8s_sink(&base_url);
+    let spec = k8s_spec("acmex-snapshot-loss-tls");
+
+    let (v1, key1) = sample_version("snapshot-loss.example.com");
+    let material1 = build_material(&v1, key1);
+    let staged1 = sink.stage(&spec, &v1, mat_ref(&material1)).await.unwrap();
+    sink.activate(&staged1).await.unwrap();
+
+    let (v2, key2) = sample_version("snapshot-loss-two.example.com");
+    let material2 = build_material(&v2, key2);
+    // A previous Secret existed (resource_version > 0), so the handle
+    // promises a restorable snapshot.
+    let staged2 = sink.stage(&spec, &v2, mat_ref(&material2)).await.unwrap();
+    assert!(staged2.resource_version > 0);
+
+    // Someone deletes the staging snapshot behind our back.
+    state.lock().await.secrets.remove(&(
+        NAMESPACE.to_string(),
+        "staging-acmex-snapshot-loss-tls".to_string(),
+    ));
+
+    // Rollback must report the lost snapshot instead of faking success.
+    let err = sink.rollback(&staged2).await.unwrap_err();
+    assert!(
+        err.to_string().contains("snapshot"),
+        "error must name the lost snapshot, got: {err}"
+    );
+
+    // With no previous Secret (resource_version == 0) a missing snapshot
+    // stays an idempotent no-op.
+    let (v3, key3) = sample_version("snapshot-loss-three.example.com");
+    let material3 = build_material(&v3, key3);
+    let spec3 = k8s_spec("acmex-snapshot-loss-noop-tls");
+    let staged3 = sink.stage(&spec3, &v3, mat_ref(&material3)).await.unwrap();
+    assert_eq!(staged3.resource_version, 0);
+    state.lock().await.secrets.remove(&(
+        NAMESPACE.to_string(),
+        "staging-acmex-snapshot-loss-noop-tls".to_string(),
+    ));
+    sink.rollback(&staged3).await.unwrap();
+}
+
 // --- Vault KV sink contract ---------------------------------------------------
 
 #[tokio::test]
@@ -1020,6 +1103,43 @@ async fn vault_kv_sink_unreachable_is_unknown_health() {
         sink.health_check(&staged).await.unwrap(),
         DeploymentHealth::Unknown(_)
     ));
+}
+
+#[tokio::test]
+async fn vault_activate_refuses_to_promote_a_restaged_slot() {
+    let state = Arc::new(Mutex::new(VaultState::default()));
+    let base_url = spawn_vault(state.clone()).await;
+    let sink = vault_sink(&base_url);
+    let spec = vault_spec("certs/restage.example.com");
+
+    let (v1, key1) = sample_version("restage-vault-one.example.com");
+    let material1 = build_material(&v1, key1);
+    let staged1 = sink.stage(&spec, &v1, mat_ref(&material1)).await.unwrap();
+
+    // A newer version re-stages over the same staging path.
+    let (v2, key2) = sample_version("restage-vault-two.example.com");
+    let material2 = build_material(&v2, key2);
+    sink.stage(&spec, &v2, mat_ref(&material2)).await.unwrap();
+
+    // Activating the stale handle must fail as a retryable Conflict, never
+    // promote the v2 material under v1's identity.
+    let err = sink.activate(&staged1).await.unwrap_err();
+    assert!(matches!(err, AcmeError::Conflict(_)), "got: {err}");
+    assert!(!err.to_string().contains("PRIVATE KEY"), "got: {err}");
+
+    // The active entry was never created.
+    assert!(matches!(
+        sink.health_check(&staged1).await.unwrap(),
+        DeploymentHealth::Unknown(_)
+    ));
+
+    // The fresh handle still activates cleanly.
+    let staged2 = sink.stage(&spec, &v2, mat_ref(&material2)).await.unwrap();
+    sink.activate(&staged2).await.unwrap();
+    assert_eq!(
+        sink.health_check(&staged2).await.unwrap(),
+        DeploymentHealth::Healthy
+    );
 }
 
 // --- shared contract ----------------------------------------------------------

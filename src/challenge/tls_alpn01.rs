@@ -31,8 +31,13 @@ use crate::types::{ChallengeType, Identifier};
 /// TLS-ALPN protocol required by RFC 8737.
 pub const ACME_TLS_ALPN_PROTOCOL: &[u8] = b"acme-tls/1";
 
+/// Upper bound for one TLS handshake. A validation client completes the
+/// handshake and closes immediately, so a connection still handshaking after
+/// this is a stuck or hostile peer holding an accept slot and gets dropped.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Self-signed validation material for one TLS-ALPN-01 challenge.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ValidationCertificate {
     /// SNI name the edge must route on. IP identifiers use RFC 8738 reverse DNS.
     pub sni: String,
@@ -44,6 +49,20 @@ pub struct ValidationCertificate {
     pub fingerprint: String,
     /// SHA-256 digest of key authorization, hex-encoded.
     pub acme_identifier_sha256: String,
+}
+
+impl std::fmt::Debug for ValidationCertificate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately redacted: `private_key_der` must never appear in
+        // Debug output (logs, test failures, tracing).
+        f.debug_struct("ValidationCertificate")
+            .field("sni", &self.sni)
+            .field("certificate_der_len", &self.certificate_der.len())
+            .field("private_key_der_len", &self.private_key_der.len())
+            .field("fingerprint", &self.fingerprint)
+            .field("acme_identifier_sha256", &self.acme_identifier_sha256)
+            .finish()
+    }
 }
 
 /// Returns the TLS SNI name used for validation. DNS identifiers use their
@@ -290,6 +309,7 @@ impl ChallengePresenter for TlsAlpn01Presenter {
 /// One installed SNI route: rustls-ready validation material plus the lease
 /// metadata needed for idempotent install/inspect/remove.
 struct InstalledRoute {
+    route_id: String,
     sni: String,
     fingerprint: String,
     certified_key: Arc<CertifiedKey>,
@@ -455,16 +475,22 @@ async fn accept_loop(
                     tokio::spawn(async move {
                         // RFC 8737: only the handshake matters — the validation
                         // client inspects the certificate and closes, so no
-                        // application data is served.
-                        match acceptor.accept(stream).await {
-                            Ok(mut tls) => {
+                        // application data is served. Timing out drops the
+                        // connection and frees the accept slot.
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+                            .await
+                        {
+                            Ok(Ok(mut tls)) => {
                                 use tokio::io::AsyncWriteExt;
                                 let _ = tls.shutdown().await;
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 // Expected for ALPN violations and unrouted
                                 // SNI probes; anything else shows up here too.
                                 tracing::debug!(error = %err, %peer_addr, "TLS-ALPN-01 handshake rejected");
+                            }
+                            Err(_) => {
+                                tracing::debug!(%peer_addr, "TLS-ALPN-01 handshake timed out; connection dropped");
                             }
                         }
                     });
@@ -487,17 +513,27 @@ impl TlsChallengeEdge for LocalTlsListener {
         let sni = route.sni.to_ascii_lowercase();
         let certified_key =
             validation_certified_key(&route.certificate_der, &route.private_key_der)?;
+        let route_id = route.idempotency_key.clone();
         let installed = Arc::new(InstalledRoute {
+            route_id: route_id.clone(),
             fingerprint: route.fingerprint.clone(),
             certified_key,
             sni: sni.clone(),
         });
-        let route_id = route.idempotency_key.clone();
         let mut table = self.write_table();
         // Reinstalling the same session id replaces its route in place, so
         // prepare retries stay idempotent at the route-id level.
         table.by_id.insert(route_id.clone(), Arc::clone(&installed));
-        table.by_sni.insert(sni.clone(), installed);
+        // Installing a route for an SNI supersedes the previous owner: the
+        // old route is dropped from `by_id` too, so both tables stay
+        // consistent and the superseded lease reports not-serving / removes
+        // as already absent.
+        if let Some(previous) = table.by_sni.insert(sni.clone(), installed)
+            && previous.route_id != route_id
+        {
+            table.by_id.remove(&previous.route_id);
+            tracing::debug!(superseded_route_id = %previous.route_id, sni, "TLS-ALPN-01 route superseded");
+        }
         drop(table);
         tracing::debug!(route_id, sni, "TLS-ALPN-01 route installed");
         Ok(TlsRouteLease {
@@ -591,14 +627,19 @@ impl TlsAlpn01Solver {
                     Ok((stream, peer_addr)) => {
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
-                            match acceptor.accept(stream).await {
-                                Ok(tls_stream) => {
+                            match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+                                .await
+                            {
+                                Ok(Ok(tls_stream)) => {
                                     use tokio::io::AsyncWriteExt;
                                     let (_, mut writer) = tokio::io::split(tls_stream);
                                     let _ = writer.shutdown().await;
                                 }
-                                Err(err) => {
+                                Ok(Err(err)) => {
                                     tracing::warn!(error = %err, %peer_addr, "TLS-ALPN-01 handshake failed");
+                                }
+                                Err(_) => {
+                                    tracing::debug!(%peer_addr, "TLS-ALPN-01 handshake timed out; connection dropped");
                                 }
                             }
                         });
@@ -748,6 +789,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validation_certificate_debug_redacts_private_key() {
+        let validation = build_tls_alpn_validation_cert(
+            &Identifier::try_dns("example.com").unwrap(),
+            "token.thumbprint",
+        )
+        .unwrap();
+        let debug = format!("{validation:?}");
+        // Neither the derived-Debug byte list nor a hex rendering of the key
+        // may leak; only the length is shown.
+        assert!(
+            !debug.contains(&format!("{:?}", validation.private_key_der)),
+            "got: {debug}"
+        );
+        assert!(
+            !debug.contains(&hex::encode(&validation.private_key_der)),
+            "got: {debug}"
+        );
+        assert!(debug.contains("private_key_der_len"), "got: {debug}");
+    }
+
     #[tokio::test]
     async fn tls_presenter_installs_and_cleans_edge_route() {
         let presenter =
@@ -822,6 +884,78 @@ mod tests {
         // The untouched route keeps serving.
         assert!(edge.inspect(&lease_ip).await.unwrap().serving);
         assert_eq!(edge.route_count(), 1);
+        edge.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_listener_install_supersedes_previous_route_for_same_sni() {
+        let edge = LocalTlsListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let validation_a = build_tls_alpn_validation_cert(
+            &Identifier::try_dns("example.com").unwrap(),
+            "ka-session-a",
+        )
+        .unwrap();
+        let validation_b = build_tls_alpn_validation_cert(
+            &Identifier::try_dns("example.com").unwrap(),
+            "ka-session-b",
+        )
+        .unwrap();
+
+        // Two sessions stage the same SNI: the second install supersedes the
+        // first, so exactly one route remains in both tables.
+        let lease_a = edge
+            .install(tls_route("session-a", &validation_a))
+            .await
+            .unwrap();
+        let lease_b = edge
+            .install(tls_route("session-b", &validation_b))
+            .await
+            .unwrap();
+        assert_eq!(edge.route_count(), 1);
+
+        // The superseded lease no longer serves and removes as already
+        // absent — `by_id` and `by_sni` stay consistent.
+        assert!(!edge.inspect(&lease_a).await.unwrap().serving);
+        assert_eq!(
+            edge.remove(&lease_a).await.unwrap(),
+            CleanupOutcome::AlreadyAbsent
+        );
+        assert!(edge.inspect(&lease_b).await.unwrap().serving);
+
+        // Reinstalling the same session id (prepare retry) stays idempotent.
+        let lease_b_again = edge
+            .install(tls_route("session-b", &validation_b))
+            .await
+            .unwrap();
+        assert_eq!(lease_b_again, lease_b);
+        assert_eq!(edge.route_count(), 1);
+        assert!(edge.inspect(&lease_b).await.unwrap().serving);
+
+        // The live handshake serves the surviving session's validation cert.
+        let connector = test_connector(vec![ACME_TLS_ALPN_PROTOCOL.to_vec()]);
+        let tls = connect(&connector, edge.local_addr(), "example.com")
+            .await
+            .unwrap();
+        let (_, connection) = tls.get_ref();
+        let peer_cert = connection
+            .peer_certificates()
+            .expect("server presents validation certificate")
+            .first()
+            .expect("certificate chain is non-empty")
+            .clone();
+        assert_eq!(
+            peer_cert.as_ref(),
+            validation_b.certificate_der.as_slice(),
+            "the superseding route's certificate must be served"
+        );
+        drop(tls);
+
+        assert_eq!(
+            edge.remove(&lease_b).await.unwrap(),
+            CleanupOutcome::Cleaned
+        );
         edge.shutdown().await;
     }
 

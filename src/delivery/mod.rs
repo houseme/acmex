@@ -36,6 +36,17 @@ const MAX_CLEANUP_ATTEMPTS: u32 = 5;
 /// engine retry defaults.
 const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(2);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(300);
+/// How long an in-flight state (`Staging`/`Activating`/`RollingBack`) may sit
+/// untouched before the next `run_deployment_once` call assumes the worker
+/// that persisted the transition crashed mid-sink-call and recovers the
+/// record. Generous enough to never race a live sink invocation.
+const IN_FLIGHT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(300);
+/// Extra key in the serialized `staged_ref` JSON that records the attempts
+/// counter value at which the current retry phase (`RollbackFailed` or
+/// `CleanupPending`) began. Kept outside `StagedDeployment` so the persisted
+/// record shape stays stable; readers ignore unknown JSON fields, so old and
+/// new records deserialize identically either way.
+const PHASE_ATTEMPTS_BASELINE_KEY: &str = "phase_started_at_attempts";
 
 /// Rendered certificate material for a sink invocation.
 #[derive(Clone, PartialEq, Eq)]
@@ -425,6 +436,18 @@ impl DeploymentOrchestrator {
         let sink = self.sink(spec.kind)?;
         let now = self.repositories.clock.now();
 
+        // A fresh in-flight state is owned by a worker that already persisted
+        // the transition and may still be inside its sink call: leave it
+        // alone. Only records that outlive the in-flight timeout fall through
+        // to the recovery arms below.
+        if matches!(
+            stored.value.state,
+            DeploymentState::Staging | DeploymentState::Activating | DeploymentState::RollingBack
+        ) && !in_flight_timed_out(&stored.value, now)
+        {
+            return Ok(stored.value);
+        }
+
         match stored.value.state {
             DeploymentState::Pending | DeploymentState::Failed => {
                 let staging = self
@@ -509,7 +532,7 @@ impl DeploymentOrchestrator {
                             .await?;
                         Ok(record)
                     }
-                    DeploymentHealth::Unhealthy(reason) | DeploymentHealth::Unknown(reason) => {
+                    DeploymentHealth::Unhealthy(reason) => {
                         let rolling_back = self
                             .transition_deployment(
                                 &stored,
@@ -541,12 +564,21 @@ impl DeploymentOrchestrator {
                             // A failed rollback must not be reported as
                             // `RolledBack`: the record is parked in
                             // `RollbackFailed` so the retry loop can engage.
+                            // The retry budget for that phase is counted
+                            // from the attempts baseline reached here, so
+                            // the staging/activating attempts do not eat
+                            // into it.
                             Err(err) => {
+                                let reloaded = self.reload_deployment(&rolling_back.id).await?;
+                                let staged_ref = staged_ref_with_phase_baseline(
+                                    &staged,
+                                    reloaded.value.attempts,
+                                )?;
                                 let record = self
                                     .transition_deployment(
-                                        &self.reload_deployment(&rolling_back.id).await?,
+                                        &reloaded,
                                         DeploymentState::RollbackFailed,
-                                        None,
+                                        Some(staged_ref),
                                         Some(format!(
                                             "health check failed ({reason}); rollback failed: {err}"
                                         )),
@@ -562,17 +594,40 @@ impl DeploymentOrchestrator {
                             }
                         }
                     }
+                    DeploymentHealth::Unknown(reason) => {
+                        // Sink contract: `Unknown` means the target cannot be
+                        // observed right now (unreachable, 401/404). That must
+                        // never trigger a rollback — the record stays `Active`
+                        // and is simply re-polled on the next pass.
+                        tracing::warn!(
+                            deployment_id = %stored.value.id,
+                            reason = %reason,
+                            "deployment health unknown; staying active"
+                        );
+                        let error = AcmeError::transport(reason);
+                        self.emit_deployment_event(
+                            &stored.value,
+                            "deployment.health_unknown",
+                            Some(&error),
+                        )
+                        .await?;
+                        Ok(stored.value)
+                    }
                 }
             }
             DeploymentState::RollbackFailed => {
                 // Retry the rollback with backoff until the attempt budget
                 // is exhausted; the record then stays put for operator
-                // attention instead of looping forever.
-                if stored.value.attempts >= MAX_ROLLBACK_ATTEMPTS || !retry_due(&stored.value, now)
+                // attention instead of looping forever. The budget counts
+                // from the baseline recorded when the record entered this
+                // phase, so earlier staging/activating attempts do not
+                // shorten it.
+                let staged = decode_staged(&stored.value)?;
+                if rollback_budget_exhausted(&stored.value, stored.value.staged_ref.as_deref())
+                    || !retry_due(&stored.value, now)
                 {
                     return Ok(stored.value);
                 }
-                let staged = decode_staged(&stored.value)?;
                 let rolling_back = self
                     .transition_deployment(
                         &stored,
@@ -619,11 +674,17 @@ impl DeploymentOrchestrator {
             }
             DeploymentState::CleanupPending => {
                 // Same retry discipline as `RollbackFailed`: back off between
-                // attempts, stop once the budget is exhausted.
-                if stored.value.attempts >= MAX_CLEANUP_ATTEMPTS || !retry_due(&stored.value, now) {
+                // attempts, stop once the phase budget is exhausted. Records
+                // staged before baselines existed get their budget counted
+                // from the first observation of the phase.
+                let staged = decode_staged(&stored.value)?;
+                let baseline = phase_baseline(stored.value.staged_ref.as_deref())
+                    .unwrap_or(stored.value.attempts);
+                if stored.value.attempts.saturating_sub(baseline) >= MAX_CLEANUP_ATTEMPTS
+                    || !retry_due(&stored.value, now)
+                {
                     return Ok(stored.value);
                 }
-                let staged = decode_staged(&stored.value)?;
                 match sink.cleanup(&staged).await {
                     Ok(_) => {
                         let record = self
@@ -634,7 +695,7 @@ impl DeploymentOrchestrator {
                         Ok(record)
                     }
                     Err(err) => {
-                        let record = self.record_cleanup_failure(&stored, &err).await?;
+                        let record = self.record_cleanup_failure(&stored, baseline, &err).await?;
                         self.emit_deployment_event(
                             &record,
                             "deployment.cleanup_retry_failed",
@@ -645,12 +706,105 @@ impl DeploymentOrchestrator {
                     }
                 }
             }
-            DeploymentState::Healthy
-            | DeploymentState::RollingBack
-            | DeploymentState::RolledBack
-            | DeploymentState::Cleaned
-            | DeploymentState::Staging
-            | DeploymentState::Activating => Ok(stored.value),
+            // In-flight states whose worker crashed between persisting the
+            // transition and finishing the sink call would sit forever
+            // without recovery. Once the in-flight timeout elapses the next
+            // run takes over: stage/activate are idempotent by sink
+            // contract, and a stale rollback is parked in `RollbackFailed`
+            // so the existing retry loop engages.
+            DeploymentState::Staging => {
+                self.emit_in_flight_recovery_event(&stored.value).await?;
+                let staged = sink
+                    .stage(&spec, &version, CertificateMaterialRef { material })
+                    .await;
+                match staged {
+                    Ok(staged) => {
+                        let staged_ref = serde_json::to_string(&staged)?;
+                        let record = self
+                            .transition_deployment(
+                                &self.reload_deployment(&stored.value.id).await?,
+                                DeploymentState::Staged,
+                                Some(staged_ref),
+                                None,
+                            )
+                            .await?;
+                        self.emit_deployment_event(&record, "deployment.staged", None)
+                            .await?;
+                        Ok(record)
+                    }
+                    Err(err) => {
+                        let record = self
+                            .transition_deployment(
+                                &self.reload_deployment(&stored.value.id).await?,
+                                DeploymentState::Failed,
+                                None,
+                                Some(err.to_string()),
+                            )
+                            .await?;
+                        self.emit_deployment_event(&record, "deployment.failed", Some(&err))
+                            .await?;
+                        Ok(record)
+                    }
+                }
+            }
+            DeploymentState::Activating => {
+                self.emit_in_flight_recovery_event(&stored.value).await?;
+                let staged = decode_staged(&stored.value)?;
+                match sink.activate(&staged).await {
+                    Ok(()) => {
+                        let record = self
+                            .transition_deployment(
+                                &self.reload_deployment(&stored.value.id).await?,
+                                DeploymentState::Active,
+                                None,
+                                None,
+                            )
+                            .await?;
+                        self.emit_deployment_event(&record, "deployment.activated", None)
+                            .await?;
+                        Ok(record)
+                    }
+                    Err(err) => {
+                        let _ = sink.rollback(&staged).await;
+                        let record = self
+                            .transition_deployment(
+                                &self.reload_deployment(&stored.value.id).await?,
+                                DeploymentState::Failed,
+                                None,
+                                Some(err.to_string()),
+                            )
+                            .await?;
+                        self.emit_deployment_event(&record, "deployment.failed", Some(&err))
+                            .await?;
+                        Ok(record)
+                    }
+                }
+            }
+            DeploymentState::RollingBack => {
+                self.emit_in_flight_recovery_event(&stored.value).await?;
+                // The interrupted rollback outcome is unknown, so park the
+                // record in `RollbackFailed` where the existing retry loop
+                // (with a fresh phase budget) takes over.
+                let staged = decode_staged(&stored.value)?;
+                let staged_ref = staged_ref_with_phase_baseline(&staged, stored.value.attempts)?;
+                let record = self
+                    .transition_deployment(
+                        &stored,
+                        DeploymentState::RollbackFailed,
+                        Some(staged_ref),
+                        Some(
+                            "in-flight rollback timed out and was recovered; retrying rollback"
+                                .to_string(),
+                        ),
+                    )
+                    .await?;
+                self.emit_deployment_event(&record, "deployment.rollback_failed", None)
+                    .await?;
+                Ok(record)
+            }
+            DeploymentState::Healthy | DeploymentState::RolledBack | DeploymentState::Cleaned => {
+                Ok(stored.value)
+            }
         }
     }
 
@@ -887,10 +1041,13 @@ impl DeploymentOrchestrator {
 
     /// Records a failed cleanup attempt in place. `CleanupPending` has no
     /// self-transition in the domain state machine, so only the attempt
-    /// bookkeeping changes here.
+    /// bookkeeping changes here. The first failure also persists the phase
+    /// attempts baseline inside the staged pointer so the cleanup retry
+    /// budget is counted per phase.
     async fn record_cleanup_failure(
         &self,
         stored: &crate::repository::Versioned<DeploymentRecord>,
+        baseline: u32,
         error: &AcmeError,
     ) -> Result<DeploymentRecord> {
         let mut stored = stored.clone();
@@ -899,6 +1056,17 @@ impl DeploymentOrchestrator {
             next.attempts = next.attempts.saturating_add(1);
             next.last_error = Some(format!("cleanup retry failed: {error}"));
             next.updated_at = self.repositories.clock.now();
+            if phase_baseline(next.staged_ref.as_deref()).is_none()
+                && let Some(raw) = next.staged_ref.as_deref()
+                && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw)
+                && let Some(map) = value.as_object_mut()
+            {
+                map.insert(
+                    PHASE_ATTEMPTS_BASELINE_KEY.to_string(),
+                    serde_json::Value::from(baseline),
+                );
+                next.staged_ref = Some(value.to_string());
+            }
             match self
                 .repositories
                 .deployments
@@ -930,6 +1098,28 @@ impl DeploymentOrchestrator {
                     "target_id": deployment.target_id.as_str(),
                     "state": deployment.state.as_str(),
                     "error": error.map(ToString::to_string),
+                }),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Outbox marker that an in-flight record was taken over after the
+    /// in-flight timeout, so operators can tell timeout recovery apart from
+    /// ordinary progress.
+    async fn emit_in_flight_recovery_event(&self, deployment: &DeploymentRecord) -> Result<()> {
+        self.repositories
+            .outbox
+            .append(
+                "deployment.in_flight_timeout_recovered",
+                serde_json::json!({
+                    "deployment_id": deployment.id.as_str(),
+                    "version_id": deployment.version_id.as_str(),
+                    "lineage_id": deployment.lineage_id.as_str(),
+                    "target_id": deployment.target_id.as_str(),
+                    "state": deployment.state.as_str(),
+                    "timeout_secs": IN_FLIGHT_RECOVERY_TIMEOUT.as_secs(),
                 }),
                 None,
             )
@@ -1423,6 +1613,54 @@ fn retry_due(record: &DeploymentRecord, now: jiff::Timestamp) -> bool {
     }
 }
 
+/// Whether an in-flight record has outlived the recovery timeout, i.e. the
+/// worker that persisted the transition is assumed crashed.
+fn in_flight_timed_out(record: &DeploymentRecord, now: jiff::Timestamp) -> bool {
+    match record.updated_at.checked_add(
+        jiff::Span::new().seconds(
+            IN_FLIGHT_RECOVERY_TIMEOUT
+                .as_secs()
+                .try_into()
+                .unwrap_or(i64::MAX),
+        ),
+    ) {
+        Ok(deadline) => now >= deadline,
+        Err(_) => true,
+    }
+}
+
+/// The attempts counter value at which the current retry phase began, as
+/// recorded in the extra `staged_ref` JSON key; `None` when absent (records
+/// staged before the baseline existed).
+fn phase_baseline(staged_ref: Option<&str>) -> Option<u32> {
+    let raw = staged_ref?;
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    value
+        .get(PHASE_ATTEMPTS_BASELINE_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .map(|baseline| baseline.min(u32::MAX as u64) as u32)
+}
+
+/// Serializes the staged pointer with the phase attempts baseline recorded.
+fn staged_ref_with_phase_baseline(staged: &StagedDeployment, baseline: u32) -> Result<String> {
+    let mut value = serde_json::to_value(staged)?;
+    if let Some(map) = value.as_object_mut() {
+        map.insert(
+            PHASE_ATTEMPTS_BASELINE_KEY.to_string(),
+            serde_json::Value::from(baseline),
+        );
+    }
+    Ok(value.to_string())
+}
+
+/// Whether the rollback retry budget, counted from the phase baseline, is
+/// exhausted. Records without a baseline fall back to the global attempts
+/// counter (the pre-baseline behaviour), which stays conservative.
+fn rollback_budget_exhausted(record: &DeploymentRecord, staged_ref: Option<&str>) -> bool {
+    let baseline = phase_baseline(staged_ref).unwrap_or(0);
+    record.attempts.saturating_sub(baseline) >= MAX_ROLLBACK_ATTEMPTS
+}
+
 /// Stable jitter seed derived from the deployment identity.
 fn backoff_seed(id: &str) -> u64 {
     let digest = sha256_hex(id.as_bytes());
@@ -1448,28 +1686,55 @@ mod tests {
         KeyAlgorithm, KeyId, LineageId, RenewalPolicy, TargetId, TenantId, ValidationPolicy,
         VersionId, VersionState,
     };
-    use crate::repository::MemoryRepository;
+    use crate::repository::{Clock, FakeClock, MemoryRepository};
 
     /// Sink whose rollback/cleanup fail a configurable number of times so
     /// the retry loop can be observed end to end.
     #[derive(Debug, Default)]
     struct FlakySink {
+        health: HealthMode,
+        stage_calls: Mutex<usize>,
+        rollback_calls: Mutex<usize>,
         remaining_rollback_failures: Mutex<usize>,
         remaining_cleanup_failures: Mutex<usize>,
+    }
+
+    /// Which health result the sink reports.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    enum HealthMode {
+        /// Reachable but serving other material.
+        #[default]
+        Unhealthy,
+        /// Target cannot currently be observed.
+        Unknown,
     }
 
     impl FlakySink {
         fn failing_rollback() -> Self {
             Self {
                 remaining_rollback_failures: Mutex::new(1),
-                remaining_cleanup_failures: Mutex::new(0),
+                ..FlakySink::default()
             }
         }
 
         fn failing_cleanup() -> Self {
             Self {
-                remaining_rollback_failures: Mutex::new(0),
                 remaining_cleanup_failures: Mutex::new(1),
+                ..FlakySink::default()
+            }
+        }
+
+        fn always_failing_rollback() -> Self {
+            Self {
+                remaining_rollback_failures: Mutex::new(usize::MAX),
+                ..FlakySink::default()
+            }
+        }
+
+        fn unknown_health() -> Self {
+            Self {
+                health: HealthMode::Unknown,
+                ..FlakySink::default()
             }
         }
     }
@@ -1482,6 +1747,7 @@ mod tests {
             version: &CertificateVersion,
             material: CertificateMaterialRef<'_>,
         ) -> Result<StagedDeployment> {
+            *self.stage_calls.lock().expect("flaky sink lock") += 1;
             Ok(StagedDeployment {
                 kind: spec.kind,
                 target_id: spec.target_id.clone(),
@@ -1498,12 +1764,18 @@ mod tests {
         }
 
         async fn health_check(&self, _staged: &StagedDeployment) -> Result<DeploymentHealth> {
-            Ok(DeploymentHealth::Unhealthy(
-                "flaky sink never serves the material".into(),
-            ))
+            Ok(match self.health {
+                HealthMode::Unhealthy => {
+                    DeploymentHealth::Unhealthy("flaky sink never serves the material".into())
+                }
+                HealthMode::Unknown => {
+                    DeploymentHealth::Unknown("flaky sink cannot be observed".into())
+                }
+            })
         }
 
         async fn rollback(&self, _staged: &StagedDeployment) -> Result<()> {
+            *self.rollback_calls.lock().expect("flaky sink lock") += 1;
             let mut remaining = self
                 .remaining_rollback_failures
                 .lock()
@@ -1542,6 +1814,16 @@ mod tests {
     /// Seeds one intent/lineage/version triple with a single delivery target.
     async fn seed_delivery_fix(target: DeliveryTarget) -> (RepositorySet, CertificateVersion) {
         let set = MemoryRepository::new().into_set();
+        let version = seed_delivery_fix_in(&set, target).await;
+        (set, version)
+    }
+
+    /// Same fixture inside a caller-provided repository set (e.g. one wired
+    /// to a [`crate::repository::FakeClock`]).
+    async fn seed_delivery_fix_in(
+        set: &RepositorySet,
+        target: DeliveryTarget,
+    ) -> CertificateVersion {
         let lineage_id = LineageId::generate();
         let certified =
             rcgen::generate_simple_self_signed(vec!["flaky.example.com".to_string()]).unwrap();
@@ -1587,7 +1869,7 @@ mod tests {
             })
             .await
             .unwrap();
-        (set, version)
+        version
     }
 
     async fn scheduled_deployment(
@@ -1604,12 +1886,14 @@ mod tests {
     }
 
     /// Moves a scheduled record along a legal transition path and back-dates
-    /// it so the retry backoff has already elapsed.
+    /// it to `updated_at` so retry backoff / in-flight timeouts can be
+    /// controlled from the test.
     async fn park_record_in(
         set: &RepositorySet,
         deployment: &DeploymentRecord,
         steps: &[DeploymentState],
         attempts: u32,
+        updated_at: jiff::Timestamp,
     ) {
         let stored = set.deployments.get(&deployment.id).await.unwrap().unwrap();
         let mut next = stored.value.clone();
@@ -1630,9 +1914,34 @@ mod tests {
             .unwrap(),
         );
         next.attempts = attempts;
-        next.updated_at = jiff::Timestamp::now()
-            .checked_add(jiff::Span::new().hours(-1))
+        next.updated_at = updated_at;
+        set.deployments
+            .update(stored.revision, next)
+            .await
+            .unwrap()
+            .expect_updated()
             .unwrap();
+    }
+
+    /// One hour before real time, so retry backoff has elapsed.
+    fn hours_ago(hours: i64) -> jiff::Timestamp {
+        jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().hours(-hours))
+            .unwrap()
+    }
+
+    /// Writes a phase attempts baseline into the staged pointer of a parked
+    /// record, for tests that exercise budget exhaustion.
+    async fn set_phase_baseline(set: &RepositorySet, deployment_id: &DeploymentId, baseline: u32) {
+        let stored = set.deployments.get(deployment_id).await.unwrap().unwrap();
+        let mut next = stored.value.clone();
+        let mut value: serde_json::Value =
+            serde_json::from_str(next.staged_ref.as_deref().unwrap()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            PHASE_ATTEMPTS_BASELINE_KEY.to_string(),
+            serde_json::Value::from(baseline),
+        );
+        next.staged_ref = Some(value.to_string());
         set.deployments
             .update(stored.revision, next)
             .await
@@ -1746,6 +2055,7 @@ mod tests {
                 DeploymentState::RollbackFailed,
             ],
             MAX_ROLLBACK_ATTEMPTS,
+            hours_ago(1),
         )
         .await;
 
@@ -1781,6 +2091,7 @@ mod tests {
                 DeploymentState::CleanupPending,
             ],
             2,
+            hours_ago(1),
         )
         .await;
 
@@ -1851,8 +2162,12 @@ mod tests {
                 DeploymentState::CleanupPending,
             ],
             MAX_CLEANUP_ATTEMPTS,
+            hours_ago(1),
         )
         .await;
+        // The record entered its cleanup phase with the full budget and has
+        // spent it: baseline 0 with MAX attempts recorded since.
+        set_phase_baseline(&set, &deployment.id, 0).await;
 
         let terminal = orchestrator
             .run_deployment_once(&deployment.id, &material)
@@ -1860,5 +2175,295 @@ mod tests {
             .unwrap();
         assert_eq!(terminal.state, DeploymentState::CleanupPending);
         assert_eq!(terminal.attempts, MAX_CLEANUP_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn health_unknown_keeps_deployment_active() {
+        let (set, version) = seed_delivery_fix(webhook_target("unknown-agent")).await;
+        let orchestrator = DeploymentOrchestrator::new(set.clone()).register_sink(
+            DeliveryTargetKind::Webhook,
+            Arc::new(FlakySink::unknown_health()),
+        );
+        let material = CertificateMaterialBuilder::new()
+            .build(&version, None)
+            .unwrap();
+        let deployment_id = scheduled_deployment(&orchestrator, &version).await.id;
+
+        let staged = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(staged.state, DeploymentState::Staged);
+        let active = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(active.state, DeploymentState::Active);
+
+        // Unknown health (unreachable/401/404) must never roll back: the
+        // record stays `Active` with its attempts untouched, waiting for the
+        // next poll.
+        let observed = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(observed.state, DeploymentState::Active);
+        assert_eq!(observed.attempts, active.attempts);
+
+        let events = set.outbox.list_pending(100).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.health_unknown")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "deployment.rolled_back")
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_budget_is_measured_from_phase_start() {
+        let (set, version) = seed_delivery_fix(webhook_target("flaky-agent")).await;
+        let sink = Arc::new(FlakySink::always_failing_rollback());
+        let orchestrator = DeploymentOrchestrator::new(set.clone())
+            .register_sink(DeliveryTargetKind::Webhook, sink.clone());
+        let material = CertificateMaterialBuilder::new()
+            .build(&version, None)
+            .unwrap();
+        let deployment_id = scheduled_deployment(&orchestrator, &version).await.id;
+
+        // The normal path consumes two attempts (staging + activating) plus
+        // the health-triggered rollback attempt.
+        let staged = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(staged.state, DeploymentState::Staged);
+        let active = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(active.state, DeploymentState::Active);
+        let parked = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(parked.state, DeploymentState::RollbackFailed);
+        assert_eq!(parked.attempts, 3);
+        assert_eq!(
+            phase_baseline(parked.staged_ref.as_deref()),
+            Some(3),
+            "the rollback phase baseline is persisted at entry"
+        );
+
+        // The full rollback budget is available from the phase start despite
+        // the earlier staging/activating attempts.
+        for expected_attempts in 4..=(3 + MAX_ROLLBACK_ATTEMPTS) {
+            age_record(&set, &deployment_id).await;
+            let record = orchestrator
+                .run_deployment_once(&deployment_id, &material)
+                .await
+                .unwrap();
+            assert_eq!(record.state, DeploymentState::RollbackFailed);
+            assert_eq!(record.attempts, expected_attempts);
+        }
+
+        // Budget exhausted: parked for operator attention, no more sink calls.
+        age_record(&set, &deployment_id).await;
+        let terminal = orchestrator
+            .run_deployment_once(&deployment_id, &material)
+            .await
+            .unwrap();
+        assert_eq!(terminal.state, DeploymentState::RollbackFailed);
+        assert_eq!(terminal.attempts, 3 + MAX_ROLLBACK_ATTEMPTS);
+        assert_eq!(
+            *sink.rollback_calls.lock().unwrap(),
+            1 + MAX_ROLLBACK_ATTEMPTS as usize,
+            "one initial rollback plus the full phase budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_in_flight_staging_is_left_alone() {
+        let clock = Arc::new(FakeClock::at("2026-01-01T00:00:00Z".parse().unwrap()));
+        let set = MemoryRepository::with_clock(clock.clone()).into_set();
+        let version = seed_delivery_fix_in(&set, webhook_target("flaky-agent")).await;
+        let sink = Arc::new(FlakySink::default());
+        let orchestrator = DeploymentOrchestrator::new(set.clone())
+            .register_sink(DeliveryTargetKind::Webhook, sink.clone());
+        let material = CertificateMaterialBuilder::new()
+            .build(&version, None)
+            .unwrap();
+        let deployment = scheduled_deployment(&orchestrator, &version).await;
+
+        park_record_in(
+            &set,
+            &deployment,
+            &[DeploymentState::Staging],
+            1,
+            clock.now(),
+        )
+        .await;
+
+        // A fresh in-flight record may have a live worker inside its sink
+        // call: the runner must leave it untouched.
+        let fresh = orchestrator
+            .run_deployment_once(&deployment.id, &material)
+            .await
+            .unwrap();
+        assert_eq!(fresh.state, DeploymentState::Staging);
+        assert_eq!(*sink.stage_calls.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_in_flight_staging_recovers_by_restaging() {
+        let clock = Arc::new(FakeClock::at("2026-01-01T00:00:00Z".parse().unwrap()));
+        let set = MemoryRepository::with_clock(clock.clone()).into_set();
+        let version = seed_delivery_fix_in(&set, webhook_target("flaky-agent")).await;
+        let sink = Arc::new(FlakySink::default());
+        let orchestrator = DeploymentOrchestrator::new(set.clone())
+            .register_sink(DeliveryTargetKind::Webhook, sink.clone());
+        let material = CertificateMaterialBuilder::new()
+            .build(&version, None)
+            .unwrap();
+        let deployment = scheduled_deployment(&orchestrator, &version).await;
+
+        park_record_in(
+            &set,
+            &deployment,
+            &[DeploymentState::Staging],
+            1,
+            clock.now(),
+        )
+        .await;
+
+        // Past the in-flight timeout the stage is retried (idempotent by
+        // sink contract) and the record lands on the normal `Staged` outcome.
+        clock.advance_secs(IN_FLIGHT_RECOVERY_TIMEOUT.as_secs() as i64 + 1);
+        let recovered = orchestrator
+            .run_deployment_once(&deployment.id, &material)
+            .await
+            .unwrap();
+        assert_eq!(recovered.state, DeploymentState::Staged);
+        assert_eq!(*sink.stage_calls.lock().unwrap(), 1);
+
+        let events = set.outbox.list_pending(100).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.in_flight_timeout_recovered")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.staged")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_in_flight_activating_recovers_by_reactivating() {
+        let clock = Arc::new(FakeClock::at("2026-01-01T00:00:00Z".parse().unwrap()));
+        let set = MemoryRepository::with_clock(clock.clone()).into_set();
+        let version = seed_delivery_fix_in(&set, webhook_target("flaky-agent")).await;
+        let orchestrator = DeploymentOrchestrator::new(set.clone())
+            .register_sink(DeliveryTargetKind::Webhook, Arc::new(FlakySink::default()));
+        let material = CertificateMaterialBuilder::new()
+            .build(&version, None)
+            .unwrap();
+        let deployment = scheduled_deployment(&orchestrator, &version).await;
+
+        park_record_in(
+            &set,
+            &deployment,
+            &[
+                DeploymentState::Staging,
+                DeploymentState::Staged,
+                DeploymentState::Activating,
+            ],
+            2,
+            clock.now(),
+        )
+        .await;
+
+        clock.advance_secs(IN_FLIGHT_RECOVERY_TIMEOUT.as_secs() as i64 + 1);
+        let recovered = orchestrator
+            .run_deployment_once(&deployment.id, &material)
+            .await
+            .unwrap();
+        assert_eq!(recovered.state, DeploymentState::Active);
+
+        let events = set.outbox.list_pending(100).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.in_flight_timeout_recovered")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.activated")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_in_flight_rolling_back_parks_for_retry() {
+        let clock = Arc::new(FakeClock::at("2026-01-01T00:00:00Z".parse().unwrap()));
+        let set = MemoryRepository::with_clock(clock.clone()).into_set();
+        let version = seed_delivery_fix_in(&set, webhook_target("flaky-agent")).await;
+        let orchestrator = DeploymentOrchestrator::new(set.clone())
+            .register_sink(DeliveryTargetKind::Webhook, Arc::new(FlakySink::default()));
+        let material = CertificateMaterialBuilder::new()
+            .build(&version, None)
+            .unwrap();
+        let deployment = scheduled_deployment(&orchestrator, &version).await;
+
+        park_record_in(
+            &set,
+            &deployment,
+            &[
+                DeploymentState::Staging,
+                DeploymentState::Staged,
+                DeploymentState::Activating,
+                DeploymentState::Active,
+                DeploymentState::RollingBack,
+            ],
+            3,
+            clock.now(),
+        )
+        .await;
+
+        // The interrupted rollback outcome is unknown: the record is parked
+        // in `RollbackFailed` with a fresh phase baseline instead of sitting
+        // in `RollingBack` forever.
+        clock.advance_secs(IN_FLIGHT_RECOVERY_TIMEOUT.as_secs() as i64 + 1);
+        let parked = orchestrator
+            .run_deployment_once(&deployment.id, &material)
+            .await
+            .unwrap();
+        assert_eq!(parked.state, DeploymentState::RollbackFailed);
+        assert!(parked.last_error.as_deref().unwrap().contains("timed out"));
+        assert_eq!(phase_baseline(parked.staged_ref.as_deref()), Some(3));
+
+        // The existing retry loop takes over once the backoff has elapsed.
+        clock.advance_secs(3600);
+        let recovered = orchestrator
+            .run_deployment_once(&deployment.id, &material)
+            .await
+            .unwrap();
+        assert_eq!(recovered.state, DeploymentState::RolledBack);
+
+        let events = set.outbox.list_pending(100).await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.in_flight_timeout_recovered")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "deployment.rolled_back")
+        );
     }
 }

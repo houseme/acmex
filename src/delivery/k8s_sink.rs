@@ -7,18 +7,24 @@
 //! * `stage` — snapshots the active Secret (data, type, annotations) into a
 //!   `staging-<name>` Secret together with the new material and never touches
 //!   the target. Idempotent: re-staging replaces the same staging Secret.
-//! * `activate` — replaces the target Secret (`tls.crt`/`tls.key`/`ca.crt`
-//!   plus `acmex.acme/version` annotations) under `metadata.resourceVersion`
-//!   optimistic concurrency. Idempotent: when the target already serves the
-//!   staged fingerprint it is a no-op; a 409 is reported as the retryable
-//!   `Conflict` class unless a re-read shows the staged material went live
-//!   concurrently.
+//! * `activate` — first verifies the staging Secret still carries the staged
+//!   fingerprint (`acmex.acme/leaf-sha256`): the slot is shared per target and
+//!   a newer stage overwrites it, so a mismatch is the retryable `Conflict`
+//!   class instead of promoting foreign material. It then replaces the target
+//!   Secret (`tls.crt`/`tls.key`/`ca.crt` plus `acmex.acme/version`
+//!   annotations) under `metadata.resourceVersion` optimistic concurrency.
+//!   Idempotent: when the target already serves the staged fingerprint it is
+//!   a no-op; a 409 is reported as the retryable `Conflict` class unless a
+//!   re-read shows the staged material went live concurrently.
 //! * `health_check` — GETs the target Secret and compares the SHA-256 of the
 //!   decoded leaf certificate with the staged fingerprint. Reachable but
 //!   wrong is `Unhealthy`; unreachable, unauthorized or absent is `Unknown`
 //!   so transient conditions never trigger rollbacks.
 //! * `rollback` — writes the stage-time snapshot back to the target; when no
-//!   previous Secret existed the target is deleted instead. Idempotent.
+//!   previous Secret existed the target is deleted instead. A missing staging
+//!   Secret is a no-op only when nothing was active before staging; if a
+//!   previous Secret existed but its snapshot is gone, the rollback fails so
+//!   the operator can investigate. Idempotent.
 //! * `cleanup` — deletes the staging Secret (absent counts as clean).
 //!
 //! Authentication supports in-cluster service accounts (endpoint, token and
@@ -401,10 +407,10 @@ impl CertificateSink for KubernetesSecretSink {
 
         // Snapshot the active Secret — rollback restores exactly this content.
         let previous = self.get_secret(name).await?;
-        let previous_resource_version = previous
-            .as_ref()
-            .map(K8sSecret::resource_version)
-            .unwrap_or(0);
+        let previous_resource_version = match previous.as_ref() {
+            Some(secret) => secret.resource_version(name)?,
+            None => 0,
+        };
 
         let mut annotations = HashMap::new();
         annotations.insert(ANN_MANAGED_BY.to_string(), "acmex".to_string());
@@ -446,7 +452,7 @@ impl CertificateSink for KubernetesSecretSink {
                 // Replace keeps staging idempotent across re-runs.
                 self.replace_secret(
                     &staging_name,
-                    existing.resource_version(),
+                    existing.resource_version(&staging_name)?,
                     TYPE_OPAQUE,
                     &data,
                     &annotations,
@@ -475,9 +481,27 @@ impl CertificateSink for KubernetesSecretSink {
     #[tracing::instrument(skip(self, staged), fields(version_id = %staged.version_id))]
     async fn activate(&self, staged: &StagedDeployment) -> Result<()> {
         let name = self.staging_target_name(&staged.staged_ref)?;
-        let staging = self
-            .require_secret(&format!("{STAGING_PREFIX}{name}"))
-            .await?;
+        let staging_name = format!("{STAGING_PREFIX}{name}");
+        let staging = self.require_secret(&staging_name).await?;
+        // The staging slot is shared per target and re-staging overwrites it:
+        // promote only the exact material this handle staged, otherwise a
+        // newer stage would go live under this version's identity.
+        let staged_leaf_sha = staging
+            .metadata
+            .annotations
+            .get(ANN_LEAF_SHA)
+            .ok_or_else(|| {
+                AcmeError::conflict(format!(
+                    "kubernetes staging secret `{staging_name}` has no {ANN_LEAF_SHA} annotation; \
+                     it was overwritten by a non-acmex writer; re-stage and retry"
+                ))
+            })?;
+        if staged_leaf_sha != &staged.leaf_sha256 {
+            return Err(AcmeError::conflict(format!(
+                "kubernetes staging secret `{staging_name}` was overwritten by a newer stage \
+                 (fingerprint mismatch); re-stage and retry"
+            )));
+        }
         let data = staging.data;
         let secret_type = secret_type_for(&data);
         let annotations = active_annotations(staged);
@@ -490,7 +514,7 @@ impl CertificateSink for KubernetesSecretSink {
                 match self
                     .replace_secret(
                         name,
-                        current.resource_version(),
+                        current.resource_version(name)?,
                         secret_type,
                         &data,
                         &annotations,
@@ -551,12 +575,25 @@ impl CertificateSink for KubernetesSecretSink {
 
     /// Restores the stage-time snapshot. Idempotent: repeated calls rewrite
     /// the same previous content; with no snapshot (staging already cleaned)
-    /// it is a no-op; when nothing was active before, the target is deleted.
+    /// and no previously active Secret it is a no-op; a missing snapshot with
+    /// a previously active Secret is an error for operator attention.
     #[tracing::instrument(skip(self, staged), fields(version_id = %staged.version_id))]
     async fn rollback(&self, staged: &StagedDeployment) -> Result<()> {
         let name = self.staging_target_name(&staged.staged_ref)?;
         let Some(staging) = self.get_secret(&format!("{STAGING_PREFIX}{name}")).await? else {
-            // Snapshot already cleaned up: there is nothing left to restore.
+            if staged.resource_version > 0 {
+                // A previous Secret existed at stage time, but its snapshot is
+                // gone (concurrent cleanup or manual deletion): the restore
+                // outcome cannot be proven. Fail loudly instead of silently
+                // pretending the active Secret was restored.
+                return Err(AcmeError::storage(format!(
+                    "kubernetes staging secret `{STAGING_PREFIX}{name}` is missing but a \
+                     previous target Secret existed; cannot restore the rollback snapshot \
+                     (operator action required)"
+                )));
+            }
+            // Snapshot already cleaned up and nothing was active before
+            // staging: there is nothing left to restore.
             return Ok(());
         };
         if staging
@@ -588,7 +625,7 @@ impl CertificateSink for KubernetesSecretSink {
             Some(current) => {
                 self.replace_secret(
                     name,
-                    current.resource_version(),
+                    current.resource_version(name)?,
                     &secret_type,
                     &data,
                     &annotations,
@@ -606,7 +643,7 @@ impl CertificateSink for KubernetesSecretSink {
                         Some(current) => {
                             self.replace_secret(
                                 name,
-                                current.resource_version(),
+                                current.resource_version(name)?,
                                 &secret_type,
                                 &data,
                                 &annotations,
@@ -642,12 +679,20 @@ struct K8sSecret {
 }
 
 impl K8sSecret {
-    fn resource_version(&self) -> u64 {
+    /// The parsed `metadata.resourceVersion`. A missing or unparseable value
+    /// is a hard error: falling back to `0` would turn every guarded replace
+    /// into an unconditional overwrite.
+    fn resource_version(&self, name: &str) -> Result<u64> {
         self.metadata
             .resource_version
             .as_deref()
             .and_then(|rv| rv.parse().ok())
-            .unwrap_or(0)
+            .ok_or_else(|| {
+                AcmeError::transport(format!(
+                    "kubernetes secret `{name}` has no parseable metadata.resourceVersion; \
+                     refusing an unguarded write"
+                ))
+            })
     }
 
     /// Whether the Secret's `tls.crt` leaf matches the expected fingerprint.
