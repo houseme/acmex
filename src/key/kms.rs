@@ -15,6 +15,7 @@
 //! |--------------|------------------|----------------------------|--------------------------|
 //! | `EcP256`     | `ECC_NIST_P256`  | `ECDSA_SHA_256`            | `PKCS_ECDSA_P256_SHA256` |
 //! | `EcP384`     | `ECC_NIST_P384`  | `ECDSA_SHA_384`            | `PKCS_ECDSA_P384_SHA384` |
+//! | `EcP521`     | `ECC_NIST_P521`  | `ECDSA_SHA_512`            | `PKCS_ECDSA_P521_SHA512` |
 //! | `Rsa2048`    | `RSA_2048`       | `RSASSA_PKCS1_V1_5_SHA_256`| `PKCS_RSA_SHA256`        |
 //! | `Rsa4096`    | `RSA_4096`       | `RSASSA_PKCS1_V1_5_SHA_512`| `PKCS_RSA_SHA512`        |
 //!
@@ -245,6 +246,11 @@ fn algorithm_mapping(
             KeySpec::EccNistP384,
             SigningAlgorithmSpec::EcdsaSha384,
             &rcgen::PKCS_ECDSA_P384_SHA384,
+        )),
+        KeyAlgorithm::EcP521 => Ok((
+            KeySpec::EccNistP521,
+            SigningAlgorithmSpec::EcdsaSha512,
+            &rcgen::PKCS_ECDSA_P521_SHA512,
         )),
         KeyAlgorithm::Rsa2048 => Ok((
             KeySpec::Rsa2048,
@@ -638,7 +644,8 @@ fn classify_service_code(operation: &str, code: Option<&str>, message: &str) -> 
 mod tests {
     use super::*;
     use rcgen::{
-        KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_RSA_SHA256, PKCS_RSA_SHA512,
+        KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ECDSA_P521_SHA512,
+        PKCS_RSA_SHA256, PKCS_RSA_SHA512,
     };
 
     fn spki_der_of(key_pair: &KeyPair) -> Vec<u8> {
@@ -660,6 +667,12 @@ mod tests {
         assert_eq!(spec, KeySpec::EccNistP384);
         assert_eq!(signing, SigningAlgorithmSpec::EcdsaSha384);
         assert_eq!(rcgen_alg, &PKCS_ECDSA_P384_SHA384);
+
+        let (spec, signing, rcgen_alg) =
+            algorithm_mapping(KeyAlgorithm::EcP521).expect("EcP521 mapping");
+        assert_eq!(spec, KeySpec::EccNistP521);
+        assert_eq!(signing, SigningAlgorithmSpec::EcdsaSha512);
+        assert_eq!(rcgen_alg, &PKCS_ECDSA_P521_SHA512);
 
         let (spec, signing, rcgen_alg) =
             algorithm_mapping(KeyAlgorithm::Rsa2048).expect("Rsa2048 mapping");

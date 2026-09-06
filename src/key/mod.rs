@@ -8,8 +8,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 use rcgen::{
-    CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_ED25519,
-    PKCS_RSA_SHA256, PKCS_RSA_SHA512, SanType,
+    CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384,
+    PKCS_ECDSA_P521_SHA512, PKCS_ED25519, PKCS_RSA_SHA256, PKCS_RSA_SHA512, SanType,
 };
 use rustls::pki_types::CertificateSigningRequestDer;
 use serde::{Deserialize, Serialize};
@@ -284,6 +284,7 @@ impl SoftwareKeyProvider {
         let result = match algorithm {
             KeyAlgorithm::EcP256 => KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256),
             KeyAlgorithm::EcP384 => KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384),
+            KeyAlgorithm::EcP521 => KeyPair::generate_for(&PKCS_ECDSA_P521_SHA512),
             KeyAlgorithm::Ed25519 => KeyPair::generate_for(&PKCS_ED25519),
             KeyAlgorithm::Rsa2048 => KeyPair::generate_for(&PKCS_RSA_SHA256),
             KeyAlgorithm::Rsa4096 => KeyPair::generate_for(&PKCS_RSA_SHA512),
@@ -453,8 +454,7 @@ fn validate_external_csr(request: CreateCsr, external: ExternalCsr) -> Result<Cs
         )));
     }
 
-    csr.verify_signature()
-        .map_err(|err| AcmeError::crypto(format!("verify external CSR signature: {err}")))?;
+    verify_csr_signature(&csr)?;
 
     let mut actual = csr_identifiers(&csr)?;
     let mut expected = request.identifiers.as_slice().to_vec();
@@ -490,7 +490,7 @@ fn validate_external_csr(request: CreateCsr, external: ExternalCsr) -> Result<Cs
 /// | `rsaEncryption` (1.2.840.113549.1.1.1) | any other modulus (incl. < 2048-bit) | rejected, naming the modulus length |
 /// | `id-ecPublicKey` (1.2.840.10045.2.1) | `prime256v1` (1.2.840.10045.3.1.7) | `EcP256` |
 /// | `id-ecPublicKey` (1.2.840.10045.2.1) | `secp384r1` (1.3.132.0.34) | `EcP384` |
-/// | `id-ecPublicKey` (1.2.840.10045.2.1) | `secp521r1` (1.3.132.0.35) | rejected (no key algorithm) |
+/// | `id-ecPublicKey` (1.2.840.10045.2.1) | `secp521r1` (1.3.132.0.35) | `EcP521` |
 /// | Ed25519 (1.3.101.112) | — | `Ed25519` |
 ///
 /// This doubles as the minimum-strength gate for external CSRs: RSA keys
@@ -531,10 +531,7 @@ pub(crate) fn csr_key_algorithm(csr: &X509CertificationRequest<'_>) -> Result<Ke
         } else if curve == OID_NIST_EC_P384 {
             Ok(KeyAlgorithm::EcP384)
         } else if curve == OID_NIST_EC_P521 {
-            Err(AcmeError::crypto(
-                "external CSR EC key uses P-521 (secp521r1), which is not a supported \
-                 certificate key algorithm",
-            ))
+            Ok(KeyAlgorithm::EcP521)
         } else {
             Err(AcmeError::crypto(format!(
                 "external CSR EC key uses unsupported curve OID {curve}"
@@ -548,6 +545,58 @@ pub(crate) fn csr_key_algorithm(csr: &X509CertificationRequest<'_>) -> Result<Ke
         "external CSR public key algorithm {} is not supported",
         spki.algorithm.algorithm
     )))
+}
+
+/// Verifies a CSR's self-signature.
+///
+/// `x509-parser`'s verification table has no `ecdsa-with-SHA512` mapping
+/// (the signature algorithm P-521 keys sign CSRs with), so that case is
+/// verified through the crypto backend directly; every other algorithm keeps
+/// the library path unchanged.
+fn verify_csr_signature(csr: &X509CertificationRequest<'_>) -> Result<()> {
+    use x509_parser::oid_registry::OID_SIG_ECDSA_WITH_SHA512;
+    if csr.signature_algorithm.algorithm == OID_SIG_ECDSA_WITH_SHA512 {
+        let tbs = csr.certification_request_info.raw;
+        let public_key = csr
+            .certification_request_info
+            .subject_pki
+            .subject_public_key
+            .data
+            .as_ref();
+        let signature = csr.signature_value.data.as_ref();
+        return verify_ecdsa_sha512_signature(tbs, public_key, signature)
+            .map_err(|err| AcmeError::crypto(format!("verify external CSR signature: {err}")));
+    }
+    csr.verify_signature()
+        .map_err(|err| AcmeError::crypto(format!("verify external CSR signature: {err}")))
+}
+
+#[cfg(feature = "aws-lc-rs")]
+fn verify_ecdsa_sha512_signature(tbs: &[u8], public_key: &[u8], signature: &[u8]) -> Result<()> {
+    let key = aws_lc_rs::signature::UnparsedPublicKey::new(
+        &aws_lc_rs::signature::ECDSA_P521_SHA512_ASN1,
+        public_key,
+    );
+    key.verify(tbs, signature)
+        .map_err(|_| AcmeError::crypto("invalid ECDSA-with-SHA512 signature"))
+}
+
+#[cfg(all(feature = "ring-crypto", not(feature = "aws-lc-rs")))]
+fn verify_ecdsa_sha512_signature(tbs: &[u8], public_key: &[u8], signature: &[u8]) -> Result<()> {
+    let key = ring::signature::UnparsedPublicKey::new(
+        &ring::signature::ECDSA_P521_SHA512_ASN1,
+        public_key,
+    );
+    key.verify(tbs, signature)
+        .map_err(|_| AcmeError::crypto("invalid ECDSA-with-SHA512 signature"))
+}
+
+#[cfg(not(any(feature = "aws-lc-rs", feature = "ring-crypto")))]
+fn verify_ecdsa_sha512_signature(_tbs: &[u8], _public_key: &[u8], _signature: &[u8]) -> Result<()> {
+    Err(AcmeError::crypto(
+        "ECDSA-with-SHA512 CSR signature verification requires the `aws-lc-rs` or \
+         `ring-crypto` feature",
+    ))
 }
 
 fn certificate_params_for_identifiers(identifiers: &[Identifier]) -> Result<CertificateParams> {
@@ -783,6 +832,7 @@ mod tests {
         let key = match algorithm {
             KeyAlgorithm::EcP256 => rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256),
             KeyAlgorithm::EcP384 => rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384),
+            KeyAlgorithm::EcP521 => rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P521_SHA512),
             KeyAlgorithm::Ed25519 => rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519),
             KeyAlgorithm::Rsa2048 => {
                 rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
@@ -829,6 +879,7 @@ mod tests {
         for (algorithm, expected) in [
             (KeyAlgorithm::EcP256, KeyAlgorithm::EcP256),
             (KeyAlgorithm::EcP384, KeyAlgorithm::EcP384),
+            (KeyAlgorithm::EcP521, KeyAlgorithm::EcP521),
             (KeyAlgorithm::Ed25519, KeyAlgorithm::Ed25519),
             (KeyAlgorithm::Rsa2048, KeyAlgorithm::Rsa2048),
             (KeyAlgorithm::Rsa4096, KeyAlgorithm::Rsa4096),
@@ -848,6 +899,7 @@ mod tests {
         for algorithm in [
             KeyAlgorithm::EcP256,
             KeyAlgorithm::EcP384,
+            KeyAlgorithm::EcP521,
             KeyAlgorithm::Ed25519,
             KeyAlgorithm::Rsa2048,
             KeyAlgorithm::Rsa4096,
@@ -879,9 +931,13 @@ mod tests {
 
     #[tokio::test]
     async fn external_csr_with_unsupported_algorithm_is_rejected() {
-        // P-521 has no KeyAlgorithm variant: rcgen can generate the CSR, but
-        // AcmeX must refuse it instead of labeling it with the policy value.
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P521_SHA512).unwrap();
+        // RSA keys outside the 2048/4096 set cannot be classified into a
+        // KeyAlgorithm: rcgen can generate the CSR, but AcmeX must refuse it
+        // instead of labeling it with the policy value. The gate names the
+        // actual modulus so operators see why the material was refused.
+        let key =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_3072)
+                .unwrap();
         let params = rcgen::CertificateParams::new(vec!["example.com".to_string()]).unwrap();
         let csr_der = params
             .serialize_request(&key)
@@ -893,9 +949,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AcmeError::Crypto(_)), "got: {err:?}");
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("P-521"),
-            "error must name the unsupported algorithm: {err}"
+            message.contains("3072-bit modulus"),
+            "error must name the unsupported modulus: {message}"
         );
     }
 }

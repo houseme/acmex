@@ -1538,19 +1538,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(key_ref.algorithm, domain::KeyAlgorithm::Ed25519);
-    }
 
-    /// Keys `csr_key_algorithm` cannot classify (P-521 has no KeyAlgorithm
-    /// variant) fall back to the policy value here; the provider validation
-    /// that runs right after rejects the material with the exact reason, so
-    /// the fallback never persists a wrong label.
-    #[test]
-    fn external_key_ref_falls_back_to_the_policy_for_unclassifiable_keys() {
         let p521 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P521_SHA512).unwrap();
         let key_ref = external_key_ref(
             &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
             &ExternalCsr {
                 csr_der: csr_der_for(&p521),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            key_ref.algorithm,
+            domain::KeyAlgorithm::EcP521,
+            "P-521 SPKIs derive EcP521, not the declared policy value"
+        );
+    }
+
+    /// Keys `csr_key_algorithm` cannot classify (e.g. an RSA modulus outside
+    /// the 2048/4096 set) fall back to the policy value here; the provider
+    /// validation that runs right after rejects the material with the exact
+    /// reason, so the fallback never persists a wrong label.
+    #[test]
+    fn external_key_ref_falls_back_to_the_policy_for_unclassifiable_keys() {
+        let rsa3072 =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_3072)
+                .unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
+            &ExternalCsr {
+                csr_der: csr_der_for(&rsa3072),
             },
         )
         .unwrap();

@@ -288,6 +288,8 @@ pub enum KeyAlgorithm {
     EcP256,
     /// ECDSA P-384.
     EcP384,
+    /// ECDSA P-521.
+    EcP521,
     /// RSA 2048.
     Rsa2048,
     /// RSA 4096.
@@ -948,6 +950,57 @@ mod tests {
         assert_eq!(key.algorithm, KeyAlgorithm::EcP256);
         assert_eq!(key.mode, KeyManagementMode::Managed);
         assert!(!key.exportable);
+    }
+
+    /// Wire names are a persistence contract: recorded keys, lineages and
+    /// intents serialize the algorithm verbatim, so a rename would silently
+    /// break deserialization of existing storage. `EcP521` is a pure
+    /// addition — every pre-existing name keeps its exact spelling.
+    #[test]
+    fn key_algorithm_wire_names_are_stable() {
+        for (algorithm, wire) in [
+            (KeyAlgorithm::EcP256, "ec_p256"),
+            (KeyAlgorithm::EcP384, "ec_p384"),
+            (KeyAlgorithm::EcP521, "ec_p521"),
+            (KeyAlgorithm::Rsa2048, "rsa2048"),
+            (KeyAlgorithm::Rsa4096, "rsa4096"),
+            (KeyAlgorithm::Ed25519, "ed25519"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(algorithm).unwrap(),
+                serde_json::Value::String(wire.to_string()),
+                "serialization of {algorithm:?} drifted"
+            );
+            let parsed: KeyAlgorithm = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+            assert_eq!(parsed, algorithm, "deserialization of {wire}");
+        }
+    }
+
+    /// A record written before the `EcP521` variant existed (no `ec_p521`
+    /// string anywhere) must keep deserializing unchanged.
+    #[test]
+    fn key_algorithm_without_ecp521_roundtrips_unchanged() {
+        for (wire, expected) in [
+            ("ec_p256", KeyAlgorithm::EcP256),
+            ("ec_p384", KeyAlgorithm::EcP384),
+            ("rsa2048", KeyAlgorithm::Rsa2048),
+            ("rsa4096", KeyAlgorithm::Rsa4096),
+            ("ed25519", KeyAlgorithm::Ed25519),
+        ] {
+            let json = format!("{{\"algorithm\":\"{wire}\",\"mode\":\"managed\"}}");
+            let policy: KeyPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                policy.algorithm, expected,
+                "legacy record with {wire} must deserialize unchanged"
+            );
+        }
+        let json = serde_json::to_string(&KeyPolicy {
+            algorithm: KeyAlgorithm::EcP521,
+            ..KeyPolicy::default()
+        })
+        .unwrap();
+        let policy: KeyPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy.algorithm, KeyAlgorithm::EcP521);
     }
 
     #[test]
