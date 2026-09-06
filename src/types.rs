@@ -188,6 +188,16 @@ pub enum ChallengeType {
     /// depend on the account key thumbprint, so account key rollover never
     /// invalidates in-flight authorizations.
     DnsAccount01,
+    /// Validation via a *persistent* DNS TXT record
+    /// (draft-ietf-acme-dns-persist-01). The record lives at
+    /// `_validation-persist.<domain>` (never `_acme-challenge`) and its value
+    /// is `<issuer-domain-name>;accounturi=<account-url>[;persistUntil=<ts>]`.
+    /// It is designed to survive across issuances so the CA can skip
+    /// re-validating a domain it has already seen — which is why cleanup
+    /// never deletes it (see the dns-persist presenter documentation). The
+    /// challenge object carries no `token`; instead it advertises
+    /// `issuer-domain-names` and `accounturi`.
+    DnsPersist01,
 }
 
 impl ChallengeType {
@@ -198,6 +208,7 @@ impl ChallengeType {
             ChallengeType::Dns01 => "dns-01",
             ChallengeType::TlsAlpn01 => "tls-alpn-01",
             ChallengeType::DnsAccount01 => "dns-account-01",
+            ChallengeType::DnsPersist01 => "dns-persist-01",
         }
     }
 }
@@ -224,6 +235,7 @@ impl std::str::FromStr for ChallengeType {
             "dns-01" => Ok(ChallengeType::Dns01),
             "tls-alpn-01" => Ok(ChallengeType::TlsAlpn01),
             "dns-account-01" => Ok(ChallengeType::DnsAccount01),
+            "dns-persist-01" => Ok(ChallengeType::DnsPersist01),
             _ => Err(format!("Unknown challenge type: {}", s)),
         }
     }
@@ -378,6 +390,21 @@ mod tests {
         assert_eq!(json, "\"dns-account-01\"");
         let back: ChallengeType = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ChallengeType::DnsAccount01);
+    }
+
+    #[test]
+    fn test_dns_persist_01_challenge_type() {
+        assert_eq!(ChallengeType::DnsPersist01.as_str(), "dns-persist-01");
+        assert_eq!(
+            "dns-persist-01".parse::<ChallengeType>(),
+            Ok(ChallengeType::DnsPersist01)
+        );
+        assert_eq!(ChallengeType::DnsPersist01.to_string(), "dns-persist-01");
+        // Wire round trip via serde.
+        let json = serde_json::to_string(&ChallengeType::DnsPersist01).unwrap();
+        assert_eq!(json, "\"dns-persist-01\"");
+        let back: ChallengeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ChallengeType::DnsPersist01);
     }
 
     #[test]

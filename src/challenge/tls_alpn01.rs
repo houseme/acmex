@@ -819,6 +819,8 @@ mod tests {
                 session: session(Identifier::try_ip("192.0.2.1").unwrap()),
                 key_authorization: "token.thumbprint".to_string(),
                 account_url: String::new(),
+                issuer_domain_names: Vec::new(),
+                accounturi: None,
             })
             .await
             .unwrap();

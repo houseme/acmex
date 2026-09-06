@@ -61,6 +61,44 @@ pub fn dns_account01_validation_value(account_url: &str, token: &str) -> String 
     URL_SAFE_NO_PAD.encode(digest.finalize())
 }
 
+/// DNS-PERSIST-01 TXT value (draft-ietf-acme-dns-persist-01).
+///
+/// The record is a semicolon-separated parameter list:
+///
+/// ```text
+/// <issuer-domain-name>;accounturi=<account-url>[;persistUntil=<unix-ts>]
+/// ```
+///
+/// * `issuer-domain-name` is one of the challenge object's
+///   `issuer-domain-names` (AcmeX deterministically picks the first — the
+///   CA's VA rejects records naming an identity it does not own);
+/// * `accounturi` is the challenge object's `accounturi`, verbatim;
+/// * `persistUntil` is optional and only honored when the operator pins an
+///   expiry (AcmeX never sets one on its own).
+///
+/// Unlike every other DNS challenge value this one contains **no** token or
+/// digest: the record is designed to persist across issuances so the CA can
+/// recognize a previously validated account/domain pairing.
+pub fn dns_persist01_validation_value(
+    issuer_domain_name: &str,
+    accounturi: &str,
+    persist_until: Option<i64>,
+) -> String {
+    let mut value = format!("{issuer_domain_name};accounturi={accounturi}");
+    if let Some(until) = persist_until {
+        value.push_str(&format!(";persistUntil={until}"));
+    }
+    value
+}
+
+/// The `_validation-persist.<domain>` record name of a dns-persist-01
+/// challenge (base name for wildcards — the same validation-domain rule as
+/// DNS-01's `_acme-challenge`). Note the deliberate difference from every
+/// other DNS challenge: this is *not* `_acme-challenge`.
+pub fn dns_persist01_record_name(domain: &str) -> String {
+    format!("_validation-persist.{domain}")
+}
+
 /// The ACME token part of a key authorization (`token.thumbprint`).
 ///
 /// Both parts are base64url without padding, so the first `.` separates
@@ -84,6 +122,13 @@ pub struct PrepareChallenge {
     /// fresh from the persisted EnsureAccount payload on every (re)run of
     /// PrepareChallenges, so it never has to be persisted elsewhere.
     pub account_url: String,
+    /// The `issuer-domain-names` advertised by the CA's challenge object
+    /// (dns-persist-01 only). Presenters publish one of these — the first —
+    /// in the TXT value.
+    pub issuer_domain_names: Vec<String>,
+    /// The `accounturi` from the CA's challenge object (dns-persist-01
+    /// only), placed verbatim into the TXT value.
+    pub accounturi: Option<String>,
 }
 
 /// Result of observing an external resource.
@@ -218,6 +263,17 @@ impl MemoryPresenter {
         Arc::new(Self::build(ChallengeType::DnsAccount01, behavior))
     }
 
+    /// A dns-persist-01-flavored memory presenter.
+    ///
+    /// Mirrors the production semantics of the draft: records live under
+    /// `_validation-persist.<domain>` and **cleanup never deletes them** —
+    /// the record is designed to outlive the operation, and its removal is
+    /// an operational decision of the zone owner (see
+    /// [`ChallengePresenter::cleanup`]).
+    pub fn dns_persist01(behavior: MemoryPresenterBehavior) -> Arc<Self> {
+        Arc::new(Self::build(ChallengeType::DnsPersist01, behavior))
+    }
+
     fn build(kind: ChallengeType, behavior: MemoryPresenterBehavior) -> Self {
         Self {
             kind,
@@ -250,12 +306,42 @@ impl ChallengePresenter for MemoryPresenter {
     }
 
     async fn prepare(&self, request: PrepareChallenge) -> Result<ChallengeLease> {
+        // dns-persist-01 has its own record name prefix and needs CA-supplied
+        // parameters instead of a digest; every other kind shares
+        // `_acme-challenge.<base name>`.
+        let is_persist = self.kind == ChallengeType::DnsPersist01;
+        let domain = match request.session.identifier.as_dns() {
+            Some(dns) => dns.base_name().to_string(),
+            None => request.session.identifier.acme_value(),
+        };
+        let record_name = if is_persist {
+            dns_persist01_record_name(&domain)
+        } else {
+            format!("_acme-challenge.{domain}")
+        };
+
         let value = match self.kind {
             ChallengeType::Dns01 => dns01_validation_value(&request.key_authorization),
             ChallengeType::DnsAccount01 => dns_account01_validation_value(
                 &request.account_url,
                 token_from_key_authorization(&request.key_authorization),
             ),
+            ChallengeType::DnsPersist01 => {
+                // The CA names the identity it will accept and the account it
+                // binds the record to; without either there is nothing valid
+                // to publish, so fail explicitly instead of guessing.
+                let issuer = request.issuer_domain_names.first().ok_or_else(|| {
+                    crate::error::AcmeError::InvalidInput(
+                        "dns-persist-01 challenge carries no issuer-domain-names".to_string(),
+                    )
+                })?;
+                let accounturi = request.accounturi.as_deref().ok_or_else(|| {
+                    crate::error::AcmeError::InvalidInput(
+                        "dns-persist-01 challenge carries no accounturi".to_string(),
+                    )
+                })?;
+                dns_persist01_validation_value(issuer, accounturi, None)
+            }
             ChallengeType::Http01 | ChallengeType::TlsAlpn01 => request.key_authorization.clone(),
         };
         let value_hash = crate::dns::record::txt_value_hash(&value);
@@ -273,13 +359,7 @@ impl ChallengePresenter for MemoryPresenter {
                 ));
             }
             let mut resources = self.resources.lock().await;
-            resources.insert(
-                (
-                    format!("_acme-challenge.{}", request.session.identifier),
-                    value_hash.clone(),
-                ),
-                value,
-            );
+            resources.insert((record_name.clone(), value_hash.clone()), value);
         }
 
         let now = jiff::Timestamp::now();
@@ -291,7 +371,7 @@ impl ChallengePresenter for MemoryPresenter {
             locator: ChallengeLeaseLocator::Dns {
                 provider_id: "memory".to_string(),
                 zone: "example.com".to_string(),
-                record_name: format!("_acme-challenge.{}", request.session.identifier),
+                record_name,
                 record_id: None,
                 value_hash,
             },
@@ -348,6 +428,17 @@ impl ChallengePresenter for MemoryPresenter {
             return Err(crate::error::AcmeError::protocol(
                 "scripted cleanup failure".to_string(),
             ));
+        }
+        // dns-persist-01 leases are *persistent authorization records*
+        // (draft-ietf-acme-dns-persist-01): the TXT record is designed to
+        // survive this and future issuances so the CA can skip
+        // re-validating a domain it has already seen. Cleanup therefore
+        // reports the lease as handled WITHOUT deleting the record —
+        // removing it is an operational decision of the zone owner (e.g.
+        // once all accounts covering the zone have been decommissioned, or
+        // after the record's `persistUntil` timestamp has passed).
+        if lease.challenge_type == ChallengeType::DnsPersist01 {
+            return Ok(CleanupOutcome::Cleaned);
         }
         let mut resources = self.resources.lock().await;
         let key = match &lease.locator {
@@ -417,6 +508,8 @@ impl ChallengePresenter for LegacySolverPresenter {
                 .next()
                 .unwrap_or_default()
                 .to_string(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
             key_authorization: None,
             validation: None,
             updated: None,
@@ -471,6 +564,7 @@ impl ChallengePresenter for LegacySolverPresenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Identifier;
 
     /// draft-ietf-acme-dns-account-01 §4: TXT =
     /// base64url(SHA256(Concat(accountUrl, ".", token))).
@@ -506,6 +600,144 @@ mod tests {
             "token-x"
         );
         assert_eq!(token_from_key_authorization("only-token"), "only-token");
+    }
+
+    /// draft-ietf-acme-dns-persist-01: the TXT value is a semicolon
+    /// parameter list `<issuer>;accounturi=<url>[;persistUntil=<ts>]`.
+    #[test]
+    fn dns_persist_01_txt_value_matches_draft_parameter_list() {
+        assert_eq!(
+            dns_persist01_validation_value(
+                "pebble.letsencrypt.org",
+                "https://acme.example/acct/1",
+                None,
+            ),
+            "pebble.letsencrypt.org;accounturi=https://acme.example/acct/1"
+        );
+        // persistUntil is optional and appended last when present.
+        assert_eq!(
+            dns_persist01_validation_value(
+                "pebble.letsencrypt.org",
+                "https://acme.example/acct/1",
+                Some(1893456000),
+            ),
+            "pebble.letsencrypt.org;accounturi=https://acme.example/acct/1;persistUntil=1893456000"
+        );
+    }
+
+    #[test]
+    fn dns_persist_01_record_name_is_not_acme_challenge() {
+        assert_eq!(
+            dns_persist01_record_name("example.com"),
+            "_validation-persist.example.com"
+        );
+        assert_ne!(
+            dns_persist01_record_name("example.com"),
+            "_acme-challenge.example.com"
+        );
+    }
+
+    fn persist_session(identifier: Identifier) -> ChallengeSession {
+        ChallengeSession {
+            id: "chs_persist".to_string(),
+            operation_id: crate::domain::OperationId::generate(),
+            authorization_url: "https://acme.example/authz/1".to_string(),
+            challenge_url: "https://acme.example/authz/1/challenge".to_string(),
+            identifier,
+            challenge_type: ChallengeType::DnsPersist01,
+            token_hash: ChallengeSession::hash_token(""),
+            state: crate::challenge::ChallengeSessionState::Selected,
+            lease_id: None,
+            deadline: jiff::Timestamp::now()
+                .checked_add(jiff::Span::new().minutes(30))
+                .unwrap(),
+            last_propagation_check_at: None,
+            last_propagation_status: None,
+            last_ca_poll_at: None,
+            last_ca_status: None,
+            last_error: None,
+        }
+    }
+
+    /// The memory presenter publishes the persistent TXT under
+    /// `_validation-persist.<domain>` with the issuer/accounturi parameter
+    /// list, and its cleanup reports Cleaned *without* deleting the record.
+    #[tokio::test]
+    async fn dns_persist_01_memory_presenter_publishes_and_keeps_record() {
+        let presenter = MemoryPresenter::dns_persist01(MemoryPresenterBehavior::default());
+        let lease = presenter
+            .prepare(PrepareChallenge {
+                session: persist_session(Identifier::try_dns("example.com").unwrap()),
+                key_authorization: String::new(),
+                account_url: "https://acme.example/acct/1".to_string(),
+                issuer_domain_names: vec!["pebble.letsencrypt.org".to_string()],
+                accounturi: Some("https://acme.example/acct/1".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let expected_value = dns_persist01_validation_value(
+            "pebble.letsencrypt.org",
+            "https://acme.example/acct/1",
+            None,
+        );
+        let expected_hash = crate::dns::record::txt_value_hash(&expected_value);
+        match &lease.locator {
+            ChallengeLeaseLocator::Dns {
+                record_name,
+                value_hash,
+                ..
+            } => {
+                assert_eq!(record_name, "_validation-persist.example.com");
+                assert_eq!(value_hash, &expected_hash);
+            }
+            other => panic!("dns locator expected, got {other:?}"),
+        }
+        assert_eq!(
+            presenter.observe(&lease).await.unwrap(),
+            Observation::Propagated
+        );
+
+        // Cleanup: handled, but the persistent record stays.
+        assert_eq!(
+            presenter.cleanup(&lease).await.unwrap(),
+            CleanupOutcome::Cleaned
+        );
+        assert_eq!(presenter.resource_count().await, 1);
+        assert!(
+            presenter
+                .has_resource("_validation-persist.example.com", &expected_hash)
+                .await,
+            "the persistent authorization record must survive cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_persist_01_prepare_requires_issuer_and_accounturi() {
+        let presenter = MemoryPresenter::dns_persist01(MemoryPresenterBehavior::default());
+        let missing_issuer = presenter
+            .prepare(PrepareChallenge {
+                session: persist_session(Identifier::try_dns("example.com").unwrap()),
+                key_authorization: String::new(),
+                account_url: String::new(),
+                issuer_domain_names: Vec::new(),
+                accounturi: Some("https://acme.example/acct/1".to_string()),
+            })
+            .await
+            .unwrap_err();
+        assert!(missing_issuer.to_string().contains("issuer-domain-names"));
+
+        let missing_accounturi = presenter
+            .prepare(PrepareChallenge {
+                session: persist_session(Identifier::try_dns("example.com").unwrap()),
+                key_authorization: String::new(),
+                account_url: String::new(),
+                issuer_domain_names: vec!["pebble.letsencrypt.org".to_string()],
+                accounturi: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(missing_accounturi.to_string().contains("accounturi"));
     }
 
     #[test]

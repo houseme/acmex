@@ -26,6 +26,24 @@ pub struct Challenge {
     #[serde(default)]
     pub token: String,
 
+    /// Issuer domain names the CA accepts in `dns-persist-01` records
+    /// (draft-ietf-acme-dns-persist-01). The challenge object advertises the
+    /// names (`"issuer-domain-names"`); AcmeX puts one of them — the first —
+    /// into the TXT value it publishes. Empty for every other challenge
+    /// type.
+    #[serde(
+        default,
+        rename = "issuer-domain-names",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub issuer_domain_names: Vec<String>,
+
+    /// The account URI (`accounturi`) a `dns-persist-01` challenge binds its
+    /// persistent record to, verbatim from the challenge object. `None` for
+    /// every other challenge type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounturi: Option<String>,
+
     /// The computed key authorization string, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key_authorization: Option<String>,
@@ -229,6 +247,36 @@ mod tests {
         let challenge: Challenge = serde_json::from_str(json).expect("Failed to parse challenge");
         assert_eq!(challenge.challenge_type, "http-01");
         assert_eq!(challenge.token, "test-token");
+        assert!(challenge.issuer_domain_names.is_empty());
+        assert!(challenge.accounturi.is_none());
+    }
+
+    /// Pebble's observed dns-persist-01 shape: no token, an `accounturi` and
+    /// the `issuer-domain-names` array (draft-ietf-acme-dns-persist-01).
+    #[test]
+    fn test_dns_persist_01_challenge_parsing() {
+        let json = r#"{
+            "type": "dns-persist-01",
+            "url": "https://example.com/acme/challenge/999",
+            "status": "pending",
+            "accounturi": "https://acme.example/acct/1",
+            "issuer-domain-names": ["pebble.letsencrypt.org", "pebble.letsencrypt.org:14001"]
+        }"#;
+
+        let challenge: Challenge = serde_json::from_str(json).expect("Failed to parse challenge");
+        assert_eq!(challenge.challenge_type, "dns-persist-01");
+        assert_eq!(challenge.token, "");
+        assert_eq!(
+            challenge.accounturi.as_deref(),
+            Some("https://acme.example/acct/1")
+        );
+        assert_eq!(
+            challenge.issuer_domain_names,
+            vec![
+                "pebble.letsencrypt.org".to_string(),
+                "pebble.letsencrypt.org:14001".to_string()
+            ]
+        );
     }
 
     #[test]
