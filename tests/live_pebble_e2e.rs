@@ -920,7 +920,7 @@ async fn run_pebble_issue(
 
     if mode == PebbleRunMode::Lifecycle {
         let mut entries = Vec::new();
-        if let Ok(mut rd) = std::fs::read_dir(&key_dir) {
+        if let Ok(rd) = std::fs::read_dir(&key_dir) {
             for e in rd.flatten() {
                 entries.push(e.file_name().to_string_lossy().to_string());
             }
@@ -958,7 +958,7 @@ async fn run_pebble_issue(
             .unwrap();
         if renewed_record.status != acmex::domain::OperationStatus::Succeeded {
             let mut entries = Vec::new();
-            if let Ok(mut rd) = std::fs::read_dir(&key_dir) {
+            if let Ok(rd) = std::fs::read_dir(&key_dir) {
                 for e in rd.flatten() {
                     entries.push(e.file_name().to_string_lossy().to_string());
                 }
