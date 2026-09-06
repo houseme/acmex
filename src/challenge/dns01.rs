@@ -210,6 +210,8 @@ mod tests {
             url: "https://example.com/challenge/123".to_string(),
             status: "pending".to_string(),
             token: "test-token".to_string(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
             key_authorization: None,
             validation: None,
             updated: None,

@@ -29,6 +29,7 @@ pub use presenter::{
     ChallengePresenter, CleanupOutcome, LegacySolverPresenter, MemoryPresenter,
     MemoryPresenterBehavior, Observation, PrepareChallenge, PresenterRegistry,
     dns_account01_record_name, dns_account01_validation_value, dns01_validation_value,
+    dns_persist01_record_name, dns_persist01_validation_value,
 };
 pub use session::{ChallengeSession, ChallengeSessionState};
 pub use steps::{

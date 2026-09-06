@@ -544,6 +544,8 @@ async fn cleanup_already_absent_is_success() {
             session,
             key_authorization: "token.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -565,6 +567,8 @@ async fn multi_value_resources_are_isolated() {
             session: session_of("a"),
             key_authorization: "token-a.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -573,6 +577,8 @@ async fn multi_value_resources_are_isolated() {
             session: session_of("b"),
             key_authorization: "token-b.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -617,6 +623,45 @@ fn session_of(id: &str) -> acmex::challenge::ChallengeSession {
     }
 }
 
+/// dns-persist-01 cleanup semantics (draft-ietf-acme-dns-persist-01): the
+/// persistent authorization record is *kept* — cleanup reports the lease as
+/// handled, but removing `_validation-persist.<domain>` is an operational
+/// decision of the zone owner, not part of the challenge lifecycle.
+#[tokio::test]
+async fn dns_persist_01_cleanup_keeps_the_persistent_record() {
+    let presenter = MemoryPresenter::dns_persist01(MemoryPresenterBehavior::default());
+    let mut session = session_of("persist");
+    session.challenge_type = ChallengeType::DnsPersist01;
+    let lease = presenter
+        .prepare(PrepareChallenge {
+            session,
+            key_authorization: String::new(),
+            account_url: String::new(),
+            issuer_domain_names: vec!["pebble.letsencrypt.org".to_string()],
+            accounturi: Some("https://acme.example/acct/1".to_string()),
+        })
+        .await
+        .unwrap();
+
+    match &lease.locator {
+        acmex::domain::ChallengeLeaseLocator::Dns { record_name, .. } => {
+            assert_eq!(record_name, "_validation-persist.example.com");
+        }
+        other => panic!("dns locator expected, got {other:?}"),
+    }
+
+    // Cleanup claims the lease but never deletes the persistent record.
+    assert_eq!(
+        presenter.cleanup(&lease).await.unwrap(),
+        acmex::challenge::CleanupOutcome::Cleaned
+    );
+    assert_eq!(
+        presenter.resource_count().await,
+        1,
+        "the persistent authorization record must survive cleanup"
+    );
+}
+
 /// The orphan scanner retries transient cleanup failures and eventually
 /// marks exhausted leases for alerting.
 #[tokio::test]
@@ -632,6 +677,8 @@ async fn scanner_retries_then_exhausts() {
             session: session_of("scan"),
             key_authorization: "token.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -679,6 +726,8 @@ async fn scanner_recovers_orphaned_lease_after_restart() {
             session: session_of("orphan"),
             key_authorization: "token.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -709,6 +758,8 @@ async fn observation_not_yet_then_propagated() {
             session: session_of("obs"),
             key_authorization: "t.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -755,6 +806,8 @@ async fn cleanup_scanner_sets_pending_backlog_metric() {
             session: session_of("metric-scan"),
             key_authorization: "token.fp".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();

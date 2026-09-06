@@ -215,6 +215,32 @@ impl FakeCa {
         );
     }
 
+    /// One authorization for `domain` offering the given raw challenge
+    /// objects (used by the dns-persist-01 and prepare-all-supported tests,
+    /// whose challenge bodies carry extra fields or multiple entries).
+    fn authz_with_challenges(
+        &self,
+        domain: &str,
+        challenges: serde_json::Value,
+        status: &str,
+        uses: usize,
+    ) {
+        let url = "https://acme.example/authz/a";
+        self.transport.push(
+            ScriptedResponse::json(
+                url,
+                200,
+                serde_json::json!({
+                    "identifier": {"type": "dns", "value": domain},
+                    "status": status,
+                    "expires": "2026-01-08T00:00:00Z",
+                    "challenges": challenges
+                }),
+            )
+            .uses(uses),
+        );
+    }
+
     fn acknowledge_ok(&self) {
         self.transport.push(
             ScriptedResponse::json(
@@ -333,6 +359,7 @@ struct FixtureVerification {
 
 /// File-level counter shared by every fixture builder: per-function counters
 /// collide when different builders run concurrently (same key-store dir).
+/// Starts at 1 so the very first fixture never collides with a zeroed value.
 static FIXTURE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
 async fn build_fixture(
@@ -577,6 +604,107 @@ async fn build_dns_account01_fixture(
     }
 }
 
+/// Fixture for the dns-persist-01 and prepare-all-supported tests: the fake
+/// CA offers the given challenge objects on a single authorization for
+/// `example.com` (pending first, then valid after acknowledgement). The
+/// caller supplies the presenter registry and the intent's validation
+/// policy — the latter is what flows into PrepareChallengesStep at runtime
+/// (worker deps keep their defaults), so the fixtures double as wiring
+/// evidence.
+async fn build_challenge_mode_fixture(
+    challenges: serde_json::Value,
+    presenters: acmex::challenge::PresenterRegistry,
+    primary: Arc<MemoryPresenter>,
+    validation_policy: acmex::domain::ValidationPolicy,
+    trust_anchor_pems: Vec<String>,
+) -> SpineFixture {
+    let clock = Arc::new(FakeClock::at(now()));
+    let repositories = MemoryRepository::with_clock(clock.clone()).into_set();
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+
+    let mut intent = sample_intent(identifiers.clone(), Vec::new(), None);
+    intent.validation_policy = validation_policy;
+    repositories.intents.create(intent.clone()).await.unwrap();
+    let lineage = CertificateLineage::new(
+        LineageId::new("lin_spine").unwrap(),
+        acmex::domain::TenantId::default_tenant(),
+        intent.id.clone(),
+        identifiers.clone(),
+    );
+    repositories.lineages.create(lineage).await.unwrap();
+
+    let ca = FakeCa::new(&clock, directory());
+    ca.allow_account("https://acme.example/acct/1");
+    ca.allow_order();
+    ca.order_pending("example.com");
+    ca.authz_with_challenges("example.com", challenges.clone(), "pending", 2);
+    ca.acknowledge_ok();
+    // Authorization flips to valid after acknowledgement.
+    ca.authz_with_challenges("example.com", challenges, "valid", 100);
+    ca.finalize_ok();
+    ca.order_processing_then_valid("example.com");
+
+    let fixture_seq = FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let key_store_dir =
+        std::env::temp_dir().join(format!("acmex-spine-{}-{fixture_seq}", std::process::id()));
+    let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
+        FileSecretStore::new(key_store_dir.clone()),
+    ));
+
+    let account_key = Arc::new(KeyPair::generate().unwrap());
+    let account_jwk = acmex::ca_backend::backend::AccountJwkHandle::new(
+        Jwk::for_key_pair(&account_key.0).unwrap(),
+    );
+    let acme_backend = Arc::new(AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        ca.transport.clone(),
+        account_key,
+        repositories.clone(),
+    ));
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn acmex::ca_backend::CaBackend> = acme_backend.clone();
+
+    let orchestrator = acmex::delivery::DeploymentOrchestrator::new(repositories.clone())
+        .register_sink(
+            DeliveryTargetKind::File,
+            Arc::new(acmex::delivery::FileCertificateSink::new()),
+        );
+
+    let mut engine = WorkflowEngine::new("spine-challenge-mode", repositories.clone()).with_config(
+        acmex::workflow::EngineConfig {
+            retry_backoff_base: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(5),
+            ..Default::default()
+        },
+    );
+    register_executors(
+        &mut engine,
+        &WorkflowWorkerSettings {
+            challenge_poll_interval: Duration::from_millis(50),
+            trust_anchor_pems,
+            ..Default::default()
+        },
+        acmex::server::worker::WorkflowWorkerComponents {
+            backend,
+            account_jwk,
+            presenters,
+            key_provider,
+            orchestrator,
+        },
+    );
+
+    SpineFixture {
+        clock,
+        repositories,
+        engine,
+        presenter: primary,
+        key_store_dir,
+        transport: ca.transport,
+        backend: acme_backend,
+    }
+}
+
 impl SpineFixture {
     async fn drive_to_terminal(&self, operation: &OperationId) -> OperationRecord {
         let mut guard = 0;
@@ -661,7 +789,37 @@ impl SpineFixture {
                 self.clock.advance_secs(1);
             }
             guard += 1;
-            assert!(guard < 2000, "operation never produced a CSR");
+            assert!(
+                guard < 2000,
+                "operation never produced a CSR: {op:?}",
+                op = self
+                    .repositories
+                    .operations
+                    .get(operation)
+                    .await
+                    .unwrap()
+                    .map(|stored| format!(
+                        "status={:?} error={:?} steps={}",
+                        stored.value.status,
+                        stored.value.error,
+                        stored
+                            .value
+                            .steps
+                            .iter()
+                            .map(|s| format!(
+                                "{}:{:?}:{}",
+                                s.kind.as_str(),
+                                s.status,
+                                s.error
+                                    .as_ref()
+                                    .and_then(|e| e.detail.clone())
+                                    .unwrap_or_default()
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                    .unwrap_or_default()
+            );
         }
     }
 }
@@ -954,6 +1112,351 @@ async fn dns_account01_spine_publishes_account_bound_txt_value() {
 
     // Observation/acknowledgement/cleanup reused the DNS machinery.
     assert_eq!(fixture.presenter.resource_count().await, 0);
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// dns-persist-01 end to end (draft-ietf-acme-dns-persist-01): the fake CA
+/// offers ONLY dns-persist-01 — Pebble's observed shape (no token,
+/// `accounturi`, `issuer-domain-names`) — the intent opts in explicitly via
+/// its validation policy, the TXT is published under
+/// `_validation-persist.<domain>` with the issuer/accounturi parameter list,
+/// issuance succeeds and **cleanup keeps the persistent record**.
+#[tokio::test]
+async fn dns_persist01_spine_publishes_persistent_txt() {
+    let ca = test_ca("acmex test ca");
+    let challenges = serde_json::json!([{
+        "type": "dns-persist-01",
+        "url": "https://acme.example/authz/a/challenge",
+        "status": "pending",
+        "accounturi": "https://acme.example/acct/1",
+        "issuer-domain-names": ["pebble.letsencrypt.org"]
+    }]);
+    let presenter = MemoryPresenter::dns_persist01(MemoryPresenterBehavior::default());
+    let mut presenters = acmex::challenge::PresenterRegistry::new();
+    presenters.register(presenter.clone());
+    // The opt-in lives on the intent's validation policy; the worker's
+    // ChallengeStepDeps keep their default allowed set, so this only works
+    // when the intent policy actually reaches PrepareChallengesStep.
+    let fixture = build_challenge_mode_fixture(
+        challenges,
+        presenters,
+        presenter.clone(),
+        acmex::domain::ValidationPolicy {
+            allowed_challenges: acmex::domain::ChallengeSet::new([
+                acmex::types::ChallengeType::DnsPersist01,
+            ]),
+            ..Default::default()
+        },
+        vec![ca.pem()],
+    )
+    .await;
+
+    let op_id = OperationId::new("op_spine_dnspersist").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_dnspersist",
+            "spine-dnspersist",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    // First issuer-domain-name wins; the accounturi is placed verbatim.
+    let expected_txt = acmex::challenge::dns_persist01_validation_value(
+        "pebble.letsencrypt.org",
+        "https://acme.example/acct/1",
+        None,
+    );
+    let expected_hash = acmex::dns::record::txt_value_hash(&expected_txt);
+
+    let csr_key = fixture.drive_until_csr(&op_id).await;
+    assert!(
+        fixture
+            .presenter
+            .has_resource("_validation-persist.example.com", &expected_hash)
+            .await,
+        "the persistent TXT must be published under _validation-persist.<domain> \
+         (never _acme-challenge) with the issuer;accounturi value"
+    );
+
+    // Exactly one session, of the dns-persist-01 family.
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].value.challenge_type,
+        acmex::types::ChallengeType::DnsPersist01
+    );
+
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}\nrequests: {:?}\nqueue: {:?}",
+        final_record.error,
+        fixture
+            .transport
+            .requests()
+            .iter()
+            .map(|r| format!("{:?} {}", r.method, r.url))
+            .collect::<Vec<_>>(),
+        fixture.transport.queued_fragments(),
+    );
+
+    // The lifecycle handled the lease (session + lease are Cleaned)...
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        sessions[0].value.state,
+        acmex::challenge::ChallengeSessionState::Cleaned
+    );
+    let lease_id = sessions[0].value.lease_id.clone().expect("lease recorded");
+    let lease = fixture
+        .repositories
+        .challenge_leases
+        .get(&lease_id)
+        .await
+        .unwrap()
+        .expect("lease persisted");
+    assert_eq!(
+        lease.value.state,
+        acmex::domain::ChallengeLeaseState::Cleaned
+    );
+    match &lease.value.locator {
+        acmex::domain::ChallengeLeaseLocator::Dns {
+            record_name,
+            value_hash,
+            ..
+        } => {
+            assert_eq!(record_name, "_validation-persist.example.com");
+            assert_eq!(value_hash, &expected_hash);
+        }
+        other => panic!("dns locator expected, got {other:?}"),
+    }
+
+    // ...but the persistent authorization record SURVIVES cleanup: the
+    // record is designed to outlive the operation (the CA can skip
+    // re-validating later issuances), so deleting it is an operational
+    // decision of the zone owner — not part of the challenge lifecycle.
+    assert_eq!(fixture.presenter.resource_count().await, 1);
+    assert!(
+        fixture
+            .presenter
+            .has_resource("_validation-persist.example.com", &expected_hash)
+            .await,
+        "cleanup must NOT delete the persistent authorization record"
+    );
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// prepare-all-supported: the fake CA offers dns-01 AND http-01 (in that CA
+/// order), the intent sets `prepare_all_supported = true` — BOTH challenges
+/// get their own session (created and acknowledged in plan preference
+/// order), issuance succeeds and every resource is cleaned up.
+#[tokio::test]
+async fn prepare_all_prepares_and_acks_every_offered_challenge() {
+    let ca = test_ca("acmex test ca");
+    let challenges = serde_json::json!([
+        {
+            "type": "http-01",
+            "url": "https://acme.example/authz/a/challenge-http",
+            "token": "token-h",
+            "status": "pending"
+        },
+        {
+            "type": "dns-01",
+            "url": "https://acme.example/authz/a/challenge-dns",
+            "token": "token-d",
+            "status": "pending"
+        }
+    ]);
+    let dns = MemoryPresenter::dns01(MemoryPresenterBehavior::default());
+    let http = MemoryPresenter::http01(MemoryPresenterBehavior::default());
+    let mut presenters = acmex::challenge::PresenterRegistry::new();
+    presenters.register(dns.clone());
+    presenters.register(http.clone());
+    let fixture = build_challenge_mode_fixture(
+        challenges,
+        presenters,
+        dns.clone(),
+        acmex::domain::ValidationPolicy {
+            prepare_all_supported: true,
+            ..Default::default()
+        },
+        vec![ca.pem()],
+    )
+    .await;
+
+    let op_id = OperationId::new("op_spine_prepare_all").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_prepare_all",
+            "spine-prepare-all",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let csr_key = fixture.drive_until_csr(&op_id).await;
+    assert_eq!(dns.resource_count().await, 1, "dns-01 resource prepared");
+    assert_eq!(http.resource_count().await, 1, "http-01 resource prepared");
+
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        sessions.len(),
+        2,
+        "one session per offered+allowed challenge type"
+    );
+    let mut types: Vec<acmex::types::ChallengeType> =
+        sessions.iter().map(|s| s.value.challenge_type).collect();
+    types.sort();
+    assert_eq!(
+        types,
+        // ChallengeType's Ord follows variant declaration order.
+        vec![
+            acmex::types::ChallengeType::Http01,
+            acmex::types::ChallengeType::Dns01,
+        ]
+    );
+
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}\nqueue: {:?}",
+        final_record.error,
+        fixture.transport.queued_fragments(),
+    );
+
+    // Both sessions were acknowledged (Pebble-style CAs validate every
+    // offered challenge — all supportable ones must be triggered).
+    assert_eq!(
+        fixture.transport.post_count("challenge"),
+        2,
+        "every prepared session must be acknowledged"
+    );
+
+    // Cleanup covered every session's resource.
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    assert!(
+        sessions
+            .iter()
+            .all(|s| s.value.state == acmex::challenge::ChallengeSessionState::Cleaned),
+        "every session must be cleaned, got: {:?}",
+        sessions.iter().map(|s| s.value.state).collect::<Vec<_>>()
+    );
+    assert_eq!(dns.resource_count().await, 0);
+    assert_eq!(http.resource_count().await, 0);
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// Compatibility: the same dual-offer CA with the flag ABSENT keeps the
+/// historical single-prepare behavior exactly — one session, the first
+/// CA-offered challenge within the allowed set, one acknowledgement.
+#[tokio::test]
+async fn single_prepare_remains_the_default_when_flag_is_absent() {
+    let ca = test_ca("acmex test ca");
+    let challenges = serde_json::json!([
+        {
+            "type": "http-01",
+            "url": "https://acme.example/authz/a/challenge-http",
+            "token": "token-h",
+            "status": "pending"
+        },
+        {
+            "type": "dns-01",
+            "url": "https://acme.example/authz/a/challenge-dns",
+            "token": "token-d",
+            "status": "pending"
+        }
+    ]);
+    let dns = MemoryPresenter::dns01(MemoryPresenterBehavior::default());
+    let http = MemoryPresenter::http01(MemoryPresenterBehavior::default());
+    let mut presenters = acmex::challenge::PresenterRegistry::new();
+    presenters.register(dns.clone());
+    presenters.register(http.clone());
+    let fixture = build_challenge_mode_fixture(
+        challenges,
+        presenters,
+        dns.clone(),
+        Default::default(),
+        vec![ca.pem()],
+    )
+    .await;
+
+    let op_id = OperationId::new("op_spine_single_prepare").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_single_prepare",
+            "spine-single-prepare",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    let csr_key = fixture.drive_until_csr(&op_id).await;
+    assert_eq!(
+        http.resource_count().await,
+        1,
+        "the CA-offered order selects http-01 within the allowed set"
+    );
+    assert_eq!(dns.resource_count().await, 0, "dns-01 is not prepared");
+
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1, "single mode prepares one session");
+    assert_eq!(
+        sessions[0].value.challenge_type,
+        acmex::types::ChallengeType::Http01
+    );
+
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}",
+        final_record.error
+    );
+    assert_eq!(
+        fixture.transport.post_count("challenge"),
+        1,
+        "exactly one acknowledgement"
+    );
+    assert_eq!(http.resource_count().await, 0, "the resource is cleaned");
 
     cleanup_dir(&fixture.key_store_dir);
 }

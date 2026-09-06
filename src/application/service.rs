@@ -32,11 +32,13 @@ pub struct ApplicationServiceBuilder {
 }
 
 impl ApplicationServiceBuilder {
-    /// Starts with an in-memory repository and all built-in challenges offered.
+    /// Starts with an in-memory repository and every understood challenge
+    /// offered (including opt-in `dns-persist-01`, which individual intents
+    /// must still explicitly allow to be planned).
     pub fn new() -> Self {
         Self {
             repositories: None,
-            offered_challenges: ChallengeSet::all(),
+            offered_challenges: ChallengeSet::understood(),
         }
     }
 
@@ -121,7 +123,10 @@ impl RepositoryCertificateApplication {
     pub fn new(repositories: RepositorySet) -> Self {
         Self {
             repositories,
-            offered_challenges: ChallengeSet::all(),
+            // Capacity default: every understood challenge may be offered.
+            // Planning still excludes the persistent dns-persist-01 unless
+            // the intent's validation policy explicitly allows it.
+            offered_challenges: ChallengeSet::understood(),
         }
     }
 
