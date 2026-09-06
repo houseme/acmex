@@ -48,8 +48,6 @@ use acmex::protocol::Jwk;
 use acmex::repository::{Clock, FakeClock, FileSecretStore, MemoryRepository};
 use acmex::server::worker::{WorkflowWorkerComponents, WorkflowWorkerSettings, register_executors};
 use acmex::workflow::{EngineConfig, WorkflowEngine};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 const DOMAIN: &str = "example.com";
@@ -135,15 +133,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     presenters.register(presenter.clone());
     // The ACME account key and the CA backend over the fake transport.
     let account_key = Arc::new(KeyPair::generate()?);
-    let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
-    let backend: Arc<dyn acmex::ca_backend::CaBackend> =
-        Arc::new(AcmeCaBackend::with_fake_transport(
-            "demo-ca",
-            DIRECTORY_URL,
-            transport.clone(),
-            account_key,
-            repositories.clone(),
-        ));
+    let account_jwk =
+        acmex::ca_backend::backend::AccountJwkHandle::new(Jwk::for_key_pair(&account_key.0)?);
+    let acme_backend = AcmeCaBackend::with_fake_transport(
+        "demo-ca",
+        DIRECTORY_URL,
+        transport.clone(),
+        account_key,
+        repositories.clone(),
+    );
+    // Key authorizations read the thumbprint through this handle; the
+    // backend refreshes it when an account key rollover completes.
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn acmex::ca_backend::CaBackend> = Arc::new(acme_backend);
     // The durable file sink for the intent's delivery target.
     let orchestrator = DeploymentOrchestrator::new(repositories.clone()).register_sink(
         DeliveryTargetKind::File,

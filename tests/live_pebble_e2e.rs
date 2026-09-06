@@ -688,14 +688,20 @@ async fn run_pebble_issue(
     // rejects Ed25519 account keys. `Jwk::for_key_pair` below must describe
     // the actual key, so the thumbprint (key authorization) matches.
     let account_key = Arc::new(KeyPair::generate().unwrap());
-    let backend: Arc<dyn CaBackend> = Arc::new(AcmeCaBackend::new(
+    let account_jwk = acmex::ca_backend::backend::AccountJwkHandle::new(
+        Jwk::for_key_pair(&account_key.0).unwrap(),
+    );
+    let acme_backend = AcmeCaBackend::new(
         "pebble",
         env.directory_url.clone(),
         Arc::new(InsecurePebbleTransport::new()),
-        account_key.clone(),
+        account_key,
         repositories.clone(),
-    ));
-    let account_jwk = Jwk::for_key_pair(&account_key.0).unwrap();
+    );
+    // Key authorizations read the thumbprint through this handle; the
+    // backend refreshes it when an account key rollover completes.
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn CaBackend> = Arc::new(acme_backend);
 
     let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
         FileSecretStore::new(key_dir.clone()),

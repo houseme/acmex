@@ -55,6 +55,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ca_backend::backend::AccountJwkHandle;
 use crate::ca_backend::{AcmeCaBackend, InstrumentedAcmeTransport, ReqwestAcmeTransport};
 use crate::challenge::{
     AcknowledgeChallengesStep, ChallengePresenter, ChallengeStepDeps, CleanupChallengesStep,
@@ -143,8 +144,12 @@ pub fn default_secret_store_dir(config: &Config) -> std::path::PathBuf {
 pub struct WorkflowWorkerComponents {
     /// The CA backend every ACME step talks to.
     pub backend: Arc<dyn crate::ca_backend::CaBackend>,
-    /// The account key's JWK (key authorizations).
-    pub account_jwk: Jwk,
+    /// The account key's JWK handle (key authorizations). Shared with the
+    /// pipeline: attach the same handle to an `AcmeCaBackend` via
+    /// [`AcmeCaBackend::attach_jwk_handle`] so an account key rollover
+    /// refreshes it; otherwise `EnsureAccountStep` still re-syncs it from
+    /// the backend on every issuance.
+    pub account_jwk: AccountJwkHandle,
     /// Presenters by challenge type.
     pub presenters: PresenterRegistry,
     /// Managed key and CSR source.
@@ -621,20 +626,26 @@ pub async fn build_engine_from_config(
     let account_key_type = config.ca.resolve_account_key_type()?;
     let key_pair =
         Arc::new(load_or_create_account_key(&secret_store, &ca_label, account_key_type).await?);
-    let account_jwk = Jwk::for_key_pair(&key_pair.0)?;
+    // Key authorizations read the thumbprint through this handle; the
+    // backend refreshes it whenever an in-process account key rollover
+    // completes (RFC 8555 §7.3.5), and EnsureAccountStep re-syncs it from
+    // the backend before every issuance.
+    let account_jwk = AccountJwkHandle::new(Jwk::for_key_pair(&key_pair.0)?);
 
     let transport = InstrumentedAcmeTransport::wrap(
         ca_label.clone(),
         Arc::new(ReqwestAcmeTransport::new()),
         metrics.clone(),
     );
-    let backend: Arc<dyn crate::ca_backend::CaBackend> = Arc::new(AcmeCaBackend::new(
+    let acme_backend = Arc::new(AcmeCaBackend::new(
         ca_label,
         config.acme.directory.clone(),
         transport,
         key_pair,
         repositories.clone(),
     ));
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn crate::ca_backend::CaBackend> = acme_backend;
 
     // An explicit `kms-aws` backend that cannot be assembled fails startup:
     // silently issuing with local keys would defeat the point of the

@@ -1242,6 +1242,67 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     );
 }
 
+/// Review P3-6 regression: a successful RFC 8555 §7.3.5 rollover publishes
+/// the NEW key's JWK through the attached pipeline handle, so key
+/// authorizations computed afterwards use the new thumbprint. The trait
+/// re-sync source (`current_account_jwk`) tracks the same key.
+#[tokio::test]
+async fn key_rollover_refreshes_the_attached_account_jwk_handle() {
+    use acmex::ca_backend::backend::AccountJwkHandle;
+    use acmex::protocol::Jwk;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/96".to_string()),
+            ),
+    );
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+
+    let old_key = ed25519_key();
+    let new_key = ed25519_key();
+    let old_jwk = Jwk::for_key_pair(&old_key.0).unwrap();
+    let new_jwk = Jwk::for_key_pair(&new_key.0).unwrap();
+
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport,
+        old_key,
+        MemoryRepository::new().into_set(),
+    );
+    let handle = AccountJwkHandle::new(old_jwk.clone());
+    backend.attach_jwk_handle(handle.clone());
+    assert_eq!(handle.get(), old_jwk);
+    assert_eq!(
+        backend.current_account_jwk().await.unwrap(),
+        old_jwk,
+        "the re-sync source matches the pinned handle before the rollover"
+    );
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap();
+
+    // The handle now serves the NEW key's JWK: the thumbprint every key
+    // authorization is built from has moved with the signing key.
+    assert_eq!(handle.get(), new_jwk);
+    assert_ne!(
+        handle.thumbprint_sha256().unwrap(),
+        old_jwk.thumbprint_sha256().unwrap()
+    );
+    assert_eq!(backend.current_account_jwk().await.unwrap(), new_jwk);
+}
+
 #[tokio::test]
 async fn key_rollover_failure_keeps_the_old_key_and_sessions_intact() {
     let transport = standard_transport();
@@ -1283,6 +1344,13 @@ async fn key_rollover_failure_keeps_the_old_key_and_sessions_intact() {
         repositories.clone(),
     );
 
+    // The pipeline handle is attached: a failed rollover must leave it on
+    // the old key's JWK too (no partial switch, pipeline included).
+    let handle = acmex::ca_backend::backend::AccountJwkHandle::new(
+        acmex::protocol::Jwk::for_key_pair(&old_key.0).unwrap(),
+    );
+    backend.attach_jwk_handle(handle.clone());
+
     let account = backend.ensure_account(&account_ref()).await.unwrap();
     let err = backend
         .roll_account_key(&account, new_key.clone())
@@ -1291,6 +1359,11 @@ async fn key_rollover_failure_keeps_the_old_key_and_sessions_intact() {
     assert!(
         err.to_string().contains("ACME_HTTP_400"),
         "classified HTTP error expected, got: {err}"
+    );
+    assert_eq!(
+        handle.get(),
+        acmex::protocol::Jwk::for_key_pair(&old_key.0).unwrap(),
+        "the pipeline handle must keep the old key's JWK after a failed rollover"
     );
     assert_eq!(
         jws_posts_to(&transport, "key-change").len(),
