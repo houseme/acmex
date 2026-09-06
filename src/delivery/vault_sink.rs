@@ -316,6 +316,13 @@ impl VaultKvSink {
     }
 
     /// Hard delete of a path's metadata (staging cleanup only).
+    ///
+    /// Note (observed live against Vault 1.20): Vault answers `204` for a
+    /// metadata DELETE whether or not the path existed, so `AlreadyClean`
+    /// cannot be distinguished from `Cleaned` on this engine — an absent
+    /// path is reported as `Cleaned`, which still satisfies the "absent
+    /// counts as clean" contract. The 404 arm covers engines/proxies that
+    /// do surface absence.
     async fn delete_metadata(&self, path: &str) -> Result<CleanupOutcome> {
         let response = self
             .send(reqwest::Method::DELETE, &self.metadata_url(path), None)
