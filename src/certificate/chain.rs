@@ -372,8 +372,8 @@ fn verify_ecdsa_signature(
                      `ring-crypto` backend",
                 ));
             };
-            let key = ring::signature::UnparsedPublicKey::new(algorithm, public_key);
-            return Ok(key.verify(tbs, signature_der).is_ok());
+        let key = ring::signature::UnparsedPublicKey::new(algorithm, public_key);
+        return Ok(key.verify(tbs, signature_der).is_ok());
     }
     #[cfg(not(any(feature = "aws-lc-rs", feature = "ring-crypto")))]
     {

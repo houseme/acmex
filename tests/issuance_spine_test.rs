@@ -331,6 +331,10 @@ struct FixtureVerification {
     skip_certificate_trust_check: bool,
 }
 
+/// File-level counter shared by every fixture builder: per-function counters
+/// collide when different builders run concurrently (same key-store dir).
+static FIXTURE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
 async fn build_fixture(
     identifiers: &IdentifierSet,
     delivery_targets: Vec<DeliveryTarget>,
@@ -392,7 +396,6 @@ async fn build_fixture_with_verification(
     // Real components: file-backed keys, in-memory DNS-01 presenter.
     // Unique per fixture: tests run in parallel within one process and the
     // fake clock is frozen, so process id + time is NOT unique.
-    static FIXTURE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let fixture_seq = FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let key_store_dir =
         std::env::temp_dir().join(format!("acmex-spine-{}-{fixture_seq}", std::process::id()));
@@ -505,7 +508,6 @@ async fn build_dns_account01_fixture(
     ca.finalize_ok();
     ca.order_processing_then_valid(&domain);
 
-    static FIXTURE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let fixture_seq = FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let key_store_dir =
         std::env::temp_dir().join(format!("acmex-spine-{}-{fixture_seq}", std::process::id()));
