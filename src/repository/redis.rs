@@ -662,6 +662,13 @@ impl EntityStore for RedisEntityStore {
 
     async fn env_list(&self, aggregate: &str) -> Result<Vec<Envelope>> {
         let keys = scan_keys(&self.conn, &aggregate_pattern(aggregate)).await?;
+        // An empty aggregate has nothing to fetch; issuing the pipeline anyway
+        // sends a zero-command request, which the redis client rejects with
+        // "empty command" (exposed by the live dual-instance fencing run on a
+        // fresh database, where the operations aggregate starts empty).
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut conn = self.conn.clone();
         let mut pipe = redis::pipe();
         for key in &keys {
@@ -1050,6 +1057,11 @@ impl MigrationManifestStore for RedisRepository {
 
     async fn entries(&self) -> Result<Vec<MigrationManifestEntry>> {
         let keys = scan_keys(&self.conn, &entries_scan_pattern()).await?;
+        // Same empty-aggregate guard as `env_list`: a zero-command pipeline is
+        // rejected by the redis client.
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut conn = self.conn.clone();
         let mut pipe = redis::pipe();
         for key in &keys {
