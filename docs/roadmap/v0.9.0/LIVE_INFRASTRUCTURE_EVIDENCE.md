@@ -99,3 +99,39 @@ be copied into artifacts.
   documenting the limitation in `src/delivery/vault_sink.rs` and asserting
   the observable property (slot really absent, raw 404) in the live test.
   Behavior and protocol are unchanged.
+
+### 2026-09-06 — dual-process-fencing (two instances, Redis repository)
+
+* **Environment**: local `redis-server` 8.10.1 on `127.0.0.1:6405`, disposable
+  DB 15 (`--save ''`, flushed before the run), reached via
+  `ACMEX_TEST_REDIS_URL=redis://127.0.0.1:6405/15`. Two "instances" each hold
+  their own `RedisRepository` connection (every state transition crosses the
+  wire like two separate processes sharing one repository).
+* **Command**: `ACMEX_TEST_REDIS_URL=redis://127.0.0.1:6405/15 \
+  cargo test --features redis --test dual_instance_fencing_live -- --ignored \
+  --nocapture` (`tests/dual_instance_fencing_live.rs`, `#[ignore]`-gated,
+  SKIPs without the variable).
+* **Scenario 1 (renewal mutual exclusion)**: one tenant seeded with a due
+  lineage (issued 80 days ago, expires in 2 days → `LifetimeFraction` window,
+  priority `Critical`); both instances scan concurrently via `tokio::join!`.
+  Reports: instance-a `operations_created: 0, leases_skipped: 1`, instance-b
+  `operations_created: 1` — sum exactly 1. The persisted operation
+  (`op_5eca0454…`, kind `Renew`, subject lineage matches) is unique across all
+  active statuses when read back through *both* connections.
+* **Scenario 2 (lease contention + fencing tokens)**: three rounds of both
+  instances acquiring the same `renewal/lineage/<id>` lease: loser always
+  `HeldByOther`; after injected expiry the takeover grant draws a strictly
+  higher fencing token (1→2, 3→4, 5→6), the stale owner cannot renew, the
+  current owner can.
+* **Result**: PASS (`test result: ok. 2 passed`). Keys live under the
+  `acmex:v1:` prefix with run-unique ids in DB 15. Evidence log:
+  `target/live-infra/fencing-final/run.log` (untracked).
+* **Bug found and fixed** (separate commit): on a fresh database the renewal
+  scan crashed with `redis MGET failed: empty command - Client` —
+  `RedisEntityStore::env_list` built a zero-command pipeline when the
+  aggregate (here: operations) had no keys, and the redis client rejects
+  empty pipelines. Live-exposed; both `env_list` and the identically-shaped
+  migration-manifest `entries()` now return early on an empty SCAN result.
+  Until this fix, *any* Redis-backed renewal scan on an empty operations
+  table failed, which is the default state of a fresh deployment.
+
