@@ -1067,17 +1067,33 @@ async fn es256_to_ed25519_key_rollover_derives_each_alg_from_its_own_key() {
 
     let old_jwk = Jwk::for_key_pair(&old_key.0).unwrap();
     let new_jwk = Jwk::for_key_pair(&new_key.0).unwrap();
-    // RFC 8555 §7.3.5: the outer payload is a JSON string containing the
-    // inner flattened JWS.
-    let inner = outer_payload
-        .as_str()
-        .expect("inner JWS carried as a JSON string");
-    let (inner_header, inner_payload, _) = decode_jws(inner);
+    // RFC 8555 §7.3.5: the outer payload IS the inner JWS object (verified
+    // against Let's Encrypt staging — a JSON-string wrapping is rejected).
+    assert!(outer_payload.is_object());
+    let inner_protected = outer_payload["protected"].as_str().unwrap();
+    let inner_payload_b64 = outer_payload["payload"].as_str().unwrap();
+    let inner_signature = outer_payload["signature"].as_str().unwrap();
+    let inner_header = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_protected).unwrap(),
+    )
+    .unwrap();
+    let inner_payload = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_payload_b64).unwrap(),
+    )
+    .unwrap();
     assert_eq!(inner_header["alg"], "EdDSA");
     assert_eq!(inner_header["jwk"], new_jwk.to_value());
     assert_eq!(inner_payload["oldKey"], old_jwk.to_value());
-    // The inner signature is the deterministic new key's (and only its).
-    assert_eq!(resign_jws(inner, &new_key), inner);
+    // The inner signature is the deterministic new key's (and only its):
+    // re-signing the inner protected.payload reproduces the inner signature.
+    let inner_envelope = serde_json::json!({
+        "protected": inner_protected,
+        "payload": inner_payload_b64,
+        "signature": inner_signature,
+    })
+    .to_string();
+    let resign_segments = jws_segments(&resign_jws(&inner_envelope, &new_key));
+    assert_eq!(resign_segments.2, inner_signature);
 
     // Post-rollover requests sign with the new Ed25519 key.
     backend
@@ -1183,12 +1199,17 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
     let old_jwk_value =
         Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes())).to_value();
-    // RFC 8555 §7.3.5: the outer payload is a JSON string containing the
-    // inner flattened JWS.
-    let inner = outer_payload
-        .as_str()
-        .expect("inner JWS carried as a JSON string");
-    let (inner_header, inner_payload, _) = decode_jws(inner);
+    // RFC 8555 §7.3.5: the outer payload IS the inner JWS object.
+    let inner_protected2 = outer_payload["protected"].as_str().unwrap();
+    let inner_payload_b64 = outer_payload["payload"].as_str().unwrap();
+    let inner_header = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_protected2).unwrap(),
+    )
+    .unwrap();
+    let inner_payload = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_payload_b64).unwrap(),
+    )
+    .unwrap();
     assert_eq!(inner_header["alg"], "EdDSA");
     assert_eq!(inner_header["jwk"], new_jwk.to_value());
     assert_eq!(inner_header["url"], "https://acme.example/key-change");
@@ -1197,9 +1218,17 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     assert!(inner_header.get("kid").is_none());
     assert_eq!(inner_payload["account"], "https://acme.example/acct/77");
     assert_eq!(inner_payload["oldKey"], old_jwk_value);
-    // The inner signature verifies against the NEW key (and only it).
-    assert_eq!(resign_jws(inner, &new_key), inner);
-    assert_ne!(resign_jws(inner, &old_key), inner);
+    // The inner signature verifies against the NEW key (and only it):
+    // deterministic Ed25519 re-signing over the inner protected.payload
+    // reproduces the captured inner signature byte for byte.
+    let inner_envelope = serde_json::json!({
+        "protected": inner_protected2,
+        "payload": inner_payload_b64,
+        "signature": outer_payload["signature"].as_str().unwrap(),
+    })
+    .to_string();
+    assert_eq!(resign_jws(&inner_envelope, &new_key), inner_envelope);
+    assert_ne!(resign_jws(&inner_envelope, &old_key), inner_envelope);
 
     // (c) A follow-up request is signed by the NEW key. The JWS header keeps
     // the unchanged account kid, so prove the signer via deterministic

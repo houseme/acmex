@@ -22,8 +22,8 @@ use acmex::ca_backend::{
     AccountHandle, AcmeCaBackend, CaBackend, FakeAcmeTransport, ScriptedResponse,
 };
 use acmex::challenge::{
-    MemoryPresenter, MemoryPresenterBehavior, dns_account01_validation_value,
-    dns01_validation_value,
+    MemoryPresenter, MemoryPresenterBehavior, dns_account01_record_name,
+    dns_account01_validation_value, dns01_validation_value,
 };
 use acmex::domain::{
     CertificateIntent, CertificateLineage, CertificateVersion, DeliveryTarget, DeliveryTargetKind,
@@ -321,6 +321,8 @@ struct SpineFixture {
     transport: Arc<FakeAcmeTransport>,
     /// The concrete backend (rollover tests call `roll_account_key` on it).
     backend: Arc<AcmeCaBackend>,
+    /// Account JWK handle for computing key authorizations in assertions.
+    account_jwk: acmex::ca_backend::backend::AccountJwkHandle,
 }
 
 #[derive(Default)]
@@ -451,7 +453,7 @@ async fn build_fixture_with_verification(
         },
         acmex::server::worker::WorkflowWorkerComponents {
             backend,
-            account_jwk,
+            account_jwk: account_jwk.clone(),
             presenters,
             key_provider,
             orchestrator,
@@ -466,6 +468,7 @@ async fn build_fixture_with_verification(
         key_store_dir,
         transport: ca.transport,
         backend: acme_backend,
+        account_jwk: account_jwk.clone(),
     }
 }
 
@@ -553,7 +556,7 @@ async fn build_dns_account01_fixture(
         },
         acmex::server::worker::WorkflowWorkerComponents {
             backend,
-            account_jwk,
+            account_jwk: account_jwk.clone(),
             presenters,
             key_provider,
             orchestrator,
@@ -568,6 +571,7 @@ async fn build_dns_account01_fixture(
         key_store_dir,
         transport: ca.transport,
         backend: acme_backend,
+        account_jwk: account_jwk.clone(),
     }
 }
 
@@ -859,22 +863,30 @@ async fn dns_account01_spine_publishes_account_bound_txt_value() {
         .unwrap();
 
     // PrepareChallenges runs before the CSR step, so the TXT resource exists
-    // once the CSR is available. Its value must be the draft's account-URL
-    // digest — NOT the dns-01 key-authorization digest.
-    let expected_txt = dns_account01_validation_value("https://acme.example/acct/1", "token-x");
-    assert_ne!(
+    // once the CSR is available. Per draft-ietf-acme-dns-account-01 the TXT
+    // VALUE matches dns-01 (key-authorization digest), but the RECORD NAME
+    // carries the account binding
+    // (_acme-challenge_<base32(SHA256(account URL))[..10]>.<domain>).
+    let key_authorization = format!(
+        "token-x.{}",
+        fixture.account_jwk.thumbprint_sha256().unwrap()
+    );
+    let expected_txt = dns_account01_validation_value(&key_authorization);
+    assert_eq!(
         expected_txt,
-        dns01_validation_value("token-x.some-thumbprint"),
-        "the account-URL binding must change the value"
+        dns01_validation_value(&key_authorization),
+        "the draft reuses the DNS-01 value"
     );
     let expected_hash = acmex::dns::record::txt_value_hash(&expected_txt);
+    let expected_record = dns_account01_record_name("https://acme.example/acct/1", "example.com");
+    assert!(expected_record.starts_with("_acme-challenge_"));
     let csr_key = fixture.drive_until_csr(&op_id).await;
     assert!(
         fixture
             .presenter
-            .has_resource("_acme-challenge.example.com", &expected_hash)
+            .has_resource(&expected_record, &expected_hash)
             .await,
-        "dns-account-01 TXT resource with account-bound value must be presented"
+        "dns-account-01 TXT resource must be presented at {expected_record}"
     );
 
     // The planned session really is dns-account-01.
@@ -932,7 +944,7 @@ async fn dns_account01_spine_publishes_account_bound_txt_value() {
             value_hash,
             ..
         } => {
-            assert_eq!(record_name, "_acme-challenge.example.com");
+            assert_eq!(record_name.as_str(), expected_record);
             assert_eq!(value_hash, &expected_hash);
         }
         other => panic!("dns locator expected, got {other:?}"),

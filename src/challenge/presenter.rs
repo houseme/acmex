@@ -37,28 +37,43 @@ pub fn dns01_validation_value(key_authorization: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest.finalize())
 }
 
-/// DNS-ACCOUNT-01 TXT value (draft-ietf-acme-dns-account-01).
+/// DNS-ACCOUNT-01 TXT value (draft-ietf-acme-dns-account-01 §3).
 ///
-/// The record name is the same `_acme-challenge.<domain>` used by DNS-01,
-/// but the TXT value replaces the key authorization with the *account URL*:
-///
-/// ```text
-/// TXT = base64url(SHA256(Concat(accountUrl, ".", token)))
-/// ```
-///
-/// Because the digest never involves the account key thumbprint, account
-/// key rollover cannot invalidate authorizations that are waiting for this
-/// challenge — the whole point of the draft.
-pub fn dns_account01_validation_value(account_url: &str, token: &str) -> String {
+/// Per the draft, the TXT value is computed exactly like DNS-01 —
+/// `base64url(SHA256(key authorization))`; what differs is the **record
+/// name**, which is derived from the ACME account URL (see
+/// [`dns_account01_record_name`]). That makes existing authorizations
+/// survive account key rollover: the record does not depend on the
+/// account key thumbprint at all.
+pub fn dns_account01_validation_value(key_authorization: &str) -> String {
+    dns01_validation_value(key_authorization)
+}
+
+/// DNS-ACCOUNT-01 record name (draft-ietf-acme-dns-account-01 §3):
+/// `_acme-challenge_` + base32(SHA-256(account URL))[..10] + "." + domain
+/// (RFC 4648 base32, lowercase, no padding).
+pub fn dns_account01_record_name(account_url: &str, domain: &str) -> String {
     use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use sha2::{Digest, Sha256};
 
-    let mut digest = Sha256::new();
-    digest.update(account_url.as_bytes());
-    digest.update(b".");
-    digest.update(token.as_bytes());
-    URL_SAFE_NO_PAD.encode(digest.finalize())
+    const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let digest = Sha256::digest(account_url.as_bytes());
+    let mut encoded = String::with_capacity(16);
+    let prefix = &digest[..10];
+    let mut bits: u32 = 0;
+    let mut acc: u32 = 0;
+    for &byte in prefix {
+        acc = (acc << 8) | byte as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            encoded.push(BASE32_ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        encoded.push(BASE32_ALPHABET[((acc << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    format!("_acme-challenge_{encoded}.{domain}")
 }
 
 /// The ACME token part of a key authorization (`token.thumbprint`).
@@ -251,12 +266,17 @@ impl ChallengePresenter for MemoryPresenter {
 
     async fn prepare(&self, request: PrepareChallenge) -> Result<ChallengeLease> {
         let value = match self.kind {
-            ChallengeType::Dns01 => dns01_validation_value(&request.key_authorization),
-            ChallengeType::DnsAccount01 => dns_account01_validation_value(
-                &request.account_url,
-                token_from_key_authorization(&request.key_authorization),
-            ),
+            ChallengeType::Dns01 | ChallengeType::DnsAccount01 => {
+                dns01_validation_value(&request.key_authorization)
+            }
             ChallengeType::Http01 | ChallengeType::TlsAlpn01 => request.key_authorization.clone(),
+        };
+        let record_name = match self.kind {
+            ChallengeType::DnsAccount01 => dns_account01_record_name(
+                &request.account_url,
+                &request.session.identifier.acme_value(),
+            ),
+            _ => format!("_acme-challenge.{}", request.session.identifier),
         };
         let value_hash = crate::dns::record::txt_value_hash(&value);
 
@@ -273,13 +293,7 @@ impl ChallengePresenter for MemoryPresenter {
                 ));
             }
             let mut resources = self.resources.lock().await;
-            resources.insert(
-                (
-                    format!("_acme-challenge.{}", request.session.identifier),
-                    value_hash.clone(),
-                ),
-                value,
-            );
+            resources.insert((record_name.clone(), value_hash.clone()), value);
         }
 
         let now = jiff::Timestamp::now();
@@ -291,7 +305,7 @@ impl ChallengePresenter for MemoryPresenter {
             locator: ChallengeLeaseLocator::Dns {
                 provider_id: "memory".to_string(),
                 zone: "example.com".to_string(),
-                record_name: format!("_acme-challenge.{}", request.session.identifier),
+                record_name: record_name.clone(),
                 record_id: None,
                 value_hash,
             },
@@ -472,31 +486,52 @@ impl ChallengePresenter for LegacySolverPresenter {
 mod tests {
     use super::*;
 
-    /// draft-ietf-acme-dns-account-01 §4: TXT =
-    /// base64url(SHA256(Concat(accountUrl, ".", token))).
-    ///
-    /// Precomputed reference vector:
-    /// base64url(SHA256("https://acme.example/acct/1.token-x"))
-    /// = "mAFU-jezutN5v0UDMEtlV9sORu1WvZCjZvu-Fwxa8Yg".
+    /// draft-ietf-acme-dns-account-01 §3: the TXT value matches DNS-01
+    /// (`base64url(SHA256(key authorization))`); the record name carries the
+    /// account binding: `_acme-challenge_` + base32(SHA256(account
+    /// URL))[..10] + "." + domain.
     #[test]
     fn dns_account_01_txt_value_matches_draft_formula() {
+        let account_url = "https://acme.example/acct/1";
+        let key_authorization = "token-x.j68840FFDaInnExATgsUGAZZMFVHUYy3Jbh7AomMWPE";
         assert_eq!(
-            dns_account01_validation_value("https://acme.example/acct/1", "token-x"),
-            "mAFU-jezutN5v0UDMEtlV9sORu1WvZCjZvu-Fwxa8Yg"
+            dns_account01_validation_value(key_authorization),
+            dns01_validation_value(key_authorization),
+            "the draft reuses the DNS-01 TXT value"
         );
-        assert_eq!(
-            dns_account01_validation_value("https://acme.example/acct/1", "token-b"),
-            "ZQ_Ypci894gyJlLV_QDZHKGNTzrOS6QxXaJ_mvLuQVE"
+        // base32(SHA256("https://acme.example/acct/1"))[..10], lowercase.
+        let record = dns_account01_record_name(account_url, "example.com");
+        assert!(
+            record.starts_with("_acme-challenge_"),
+            "record name: {record}"
+        );
+        assert!(record.ends_with(".example.com"), "record name: {record}");
+        let label = record
+            .trim_start_matches("_acme-challenge_")
+            .split('.')
+            .next()
+            .unwrap();
+        assert_eq!(label.len(), 16, "10 bytes = 16 base32 chars");
+        assert!(
+            label
+                .chars()
+                .all(|c| "abcdefghijklmnopqrstuvwxyz234567".contains(c)),
+            "record label must be lowercase base32: {record}"
         );
     }
 
     #[test]
     fn dns_account_01_value_differs_from_dns_01_for_same_token() {
-        // The account URL replaces `token.thumbprint`, so the same token
-        // must NOT produce the DNS-01 value (that is the rollover safety).
-        let dns01 = dns01_validation_value("token-x.thumbprint");
-        let account = dns_account01_validation_value("https://acme.example/acct/1", "token-x");
-        assert_ne!(dns01, account);
+        // Same token, different account URL -> same TXT value (the value is
+        // account-independent); the ACCOUNT BINDING lives in the record name.
+        let ka = "token-b.j68840FFDaInnExATgsUGAZZMFVHUYy3Jbh7AomMWPE";
+        assert_eq!(
+            dns_account01_validation_value(ka),
+            dns01_validation_value(ka)
+        );
+        let record_a = dns_account01_record_name("https://acme.example/acct/1", "example.com");
+        let record_b = dns_account01_record_name("https://acme.example/acct/2", "example.com");
+        assert_ne!(record_a, record_b, "the account binding is in the name");
     }
 
     #[test]

@@ -529,9 +529,13 @@ impl CaBackend for AcmeCaBackend {
         // Outer JWS: the ordinary account-authenticated request path signs
         // it with the OLD key (kid = account URL, url = keyChange) — nonce
         // handling, badNonce recovery, Replay-Nonce capture and status
-        // classification included. Its payload is the inner JWS object.
+        // classification included. Its payload IS the inner JWS object
+        // (verified against Let's Encrypt staging: a JSON-string wrapping
+        // is rejected with "payload did not parse as JSON").
+        let inner_object: serde_json::Value = serde_json::from_str(&inner_jws)
+            .map_err(|e| AcmeError::protocol(format!("inner key-change JWS: {e}")))?;
         session
-            .execute_jws(&key_change_url, JwsPayload::Object(json!(inner_jws)))
+            .execute_jws(&key_change_url, JwsPayload::Object(inner_object))
             .await?;
 
         // ---- keyChange accepted: switch everything to the new key. ----

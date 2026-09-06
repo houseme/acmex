@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use acmex::challenge::{
-    ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge,
+    ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge, dns_account01_record_name,
     dns_account01_validation_value, dns01_validation_value,
 };
 use acmex::dns::factory::{DefaultDnsProviderFactory, DnsProviderFactory};
@@ -105,11 +105,29 @@ fn dns01_validation_value_uses_rfc8555_digest() {
 }
 
 #[test]
-fn dns_account01_validation_value_uses_account_url_digest() {
-    // draft-ietf-acme-dns-account-01: base64url(SHA256(accountUrl "." token)).
+fn dns_account01_validation_value_matches_draft_and_record_name_binds_account() {
+    // draft-ietf-acme-dns-account-01 §3: the TXT value is the DNS-01 digest
+    // of the key authorization; the ACCOUNT BINDING lives in the record
+    // name (base32(SHA256(account URL))[..10] after _acme-challenge_).
+    let key_authorization = "token-x.some-thumbprint";
     assert_eq!(
-        dns_account01_validation_value("https://acme.example/acct/1", "token-x"),
-        "mAFU-jezutN5v0UDMEtlV9sORu1WvZCjZvu-Fwxa8Yg"
+        dns_account01_validation_value(key_authorization),
+        dns01_validation_value(key_authorization)
+    );
+    let account_url = "https://acme.example/acct/1";
+    let record = dns_account01_record_name(account_url, "example.com");
+    assert!(record.starts_with("_acme-challenge_"), "record: {record}");
+    assert!(record.ends_with(".example.com"), "record: {record}");
+    let label = record
+        .trim_start_matches("_acme-challenge_")
+        .split('.')
+        .next()
+        .unwrap();
+    assert_eq!(label.len(), 16, "10 bytes -> 16 base32 chars: {record}");
+    // A different account must produce a different record name.
+    assert_ne!(
+        record,
+        dns_account01_record_name("https://acme.example/acct/2", "example.com")
     );
 }
 
@@ -321,8 +339,9 @@ async fn dns_account01_presenter_end_to_end_with_fakes() {
         last_error: None,
     };
 
-    // The token is recovered from the key authorization's token prefix.
-    let expected_txt = dns_account01_validation_value("https://acme.example/acct/1", "token-x");
+    // The TXT value follows the DNS-01 digest of the key authorization; the
+    // record name carries the account-URL binding.
+    let expected_txt = dns_account01_validation_value("token-x.thumbprint-part");
     let lease = presenter
         .prepare(PrepareChallenge {
             session,
@@ -343,7 +362,11 @@ async fn dns_account01_presenter_end_to_end_with_fakes() {
             ..
         } => {
             assert_eq!(zone, "example.com");
-            assert_eq!(record_name, "_acme-challenge.example.com");
+            // The record name carries the account-URL binding.
+            assert_eq!(
+                record_name,
+                &dns_account01_record_name("https://acme.example/acct/1", "example.com")
+            );
             assert_eq!(*value_hash, txt_value_hash(&expected_txt));
         }
         other => panic!("dns locator expected, got {other:?}"),

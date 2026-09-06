@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 
 use crate::challenge::presenter::{
-    CleanupOutcome, Observation, PrepareChallenge, dns_account01_validation_value,
-    dns01_validation_value, token_from_key_authorization,
+    CleanupOutcome, Observation, PrepareChallenge, dns_account01_record_name,
+    dns_account01_validation_value, dns01_validation_value, token_from_key_authorization,
 };
 use crate::challenge::{ChallengePresenter, ChallengeSession};
 use crate::domain::challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
@@ -132,14 +132,21 @@ impl ChallengePresenter for Dns01Presenter {
             .router
             .route(&resolution.zone_apex, self.selector.as_deref())?;
 
-        // dns-01: base64url(SHA256(token.thumbprint)); dns-account-01:
-        // base64url(SHA256(accountUrl "." token)) — no thumbprint involved.
+        // dns-01: TXT at _acme-challenge.<domain> carrying
+        // base64url(SHA256(token.thumbprint)). dns-account-01: same TXT
+        // value, but the record name is derived from the account URL so
+        // authorizations survive account key rollover.
         let value = match challenge_type {
-            ChallengeType::DnsAccount01 => dns_account01_validation_value(
-                &request.account_url,
-                token_from_key_authorization(&request.key_authorization),
-            ),
+            ChallengeType::DnsAccount01 => {
+                dns_account01_validation_value(&request.key_authorization)
+            }
             _ => dns01_validation_value(&request.key_authorization),
+        };
+        let record_name = match challenge_type {
+            ChallengeType::DnsAccount01 => {
+                dns_account01_record_name(&request.account_url, &identifier.base_name())
+            }
+            _ => record_name.clone(),
         };
 
         let locator = provider

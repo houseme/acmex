@@ -182,11 +182,12 @@ pub enum ChallengeType {
     Dns01,
     /// Validation via a specific TLS extension.
     TlsAlpn01,
-    /// Validation via a DNS TXT record bound to the account URL
-    /// (draft-ietf-acme-dns-account-01). Same record name as DNS-01, but the
-    /// TXT value is `base64url(SHA256(accountUrl "." token))` — it does not
-    /// depend on the account key thumbprint, so account key rollover never
-    /// invalidates in-flight authorizations.
+    /// Validation via a DNS TXT record bound to the ACME account URL
+    /// (draft-ietf-acme-dns-account-01). The TXT value matches DNS-01
+    /// (`base64url(SHA256(key authorization))`), but the record lives at
+    /// `_acme-challenge_<base32(SHA256(account URL))[..10]>.<domain>` — it
+    /// does not depend on the account key thumbprint, so account key
+    /// rollover never invalidates in-flight authorizations.
     DnsAccount01,
 }
 
