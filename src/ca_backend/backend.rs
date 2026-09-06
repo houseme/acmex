@@ -758,15 +758,15 @@ pub fn account_key_id(public_key: &[u8]) -> String {
 /// The domain key algorithm recorded for an account key in the persisted
 /// [`AccountRecord`]. The key id already derives from the public key bytes
 /// (type-agnostic); this mapping only fixes the informational algorithm
-/// label. The v0.9 `KeyAlgorithm` enum has no P-521 variant yet, so P-521
-/// keys record `EcP384` — metadata only, never a protocol input: JWS
-/// signing always derives the algorithm from the actual key.
+/// label. Metadata only, never a protocol input: JWS signing always derives
+/// the algorithm from the actual key.
 fn domain_key_algorithm(key: &KeyPair) -> Result<KeyAlgorithm> {
     let key_type = KeyType::for_key_pair(&key.0)?;
     Ok(match key_type {
         KeyType::Ed25519 => KeyAlgorithm::Ed25519,
         KeyType::EcdsaP256 => KeyAlgorithm::EcP256,
-        KeyType::EcdsaP384 | KeyType::EcdsaP521 => KeyAlgorithm::EcP384,
+        KeyType::EcdsaP384 => KeyAlgorithm::EcP384,
+        KeyType::EcdsaP521 => KeyAlgorithm::EcP521,
         KeyType::Rsa2048 => KeyAlgorithm::Rsa2048,
         KeyType::Rsa4096 => KeyAlgorithm::Rsa4096,
     })

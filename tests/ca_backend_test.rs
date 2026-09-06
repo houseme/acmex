@@ -992,6 +992,85 @@ async fn rs256_account_registration_carries_rsa_jwk() {
     assert_eq!(e, vec![0x01, 0x00, 0x01], "exponent 65537 as AQAB");
 }
 
+/// ES512 (P-521) account registration: the protected header derives
+/// `alg: ES512` and an EC JWK with `crv: P-521` and 66-octet coordinates, and
+/// the persisted account record labels the key `EcP521` — P-521 keys used to
+/// be mislabeled `EcP384` while the enum had no P-521 variant.
+#[tokio::test]
+async fn es512_account_registration_carries_p521_jwk_and_ecp521_record() {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/94".to_string()),
+            ),
+    );
+    let key = typed_key(&rcgen::PKCS_ECDSA_P521_SHA512);
+    let repositories = MemoryRepository::new().into_set();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        key.clone(),
+        repositories.clone(),
+    );
+
+    let handle = backend.ensure_account(&account_ref()).await.unwrap();
+    assert_eq!(handle.account_url, "https://acme.example/acct/94");
+
+    let requests = transport.requests();
+    let post = requests
+        .iter()
+        .find(|r| r.url.contains("new-account") && r.method == AcmeMethod::Post)
+        .expect("newAccount POST");
+    let jws = String::from_utf8(post.body.clone().unwrap()).unwrap();
+    let (protected, _payload_b64, signature_b64) = jws_segments(&jws);
+    let header: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected).unwrap()).unwrap();
+
+    assert_eq!(header["alg"], "ES512");
+    assert_eq!(header["jwk"]["kty"], "EC");
+    assert_eq!(header["jwk"]["crv"], "P-521");
+    let x: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["x"].as_str().unwrap())
+        .unwrap();
+    let y: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["y"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(x.len(), 66, "P-521 coordinates are 66 octets");
+    assert_eq!(y.len(), 66, "P-521 coordinates are 66 octets");
+    // The JWK coordinates are the halves of the uncompressed point.
+    let point = key.public_key_bytes();
+    assert_eq!(point[0], 0x04);
+    assert_eq!(&point[1..67], x.as_slice());
+    assert_eq!(&point[67..], y.as_slice());
+    // Raw R||S: exactly 132 octets (never the DER encoding).
+    let signature = URL_SAFE_NO_PAD.decode(signature_b64).unwrap();
+    assert_eq!(signature.len(), 132, "ES512 JWS signatures are raw R||S");
+
+    // The persisted record labels the account key EcP521 (not EcP384).
+    let record = repositories
+        .accounts
+        .get(&acmex::domain::AccountRecord::compute_id(
+            &acmex::domain::TenantId::default_tenant(),
+            "test-ca",
+        ))
+        .await
+        .unwrap()
+        .expect("persisted account record");
+    assert_eq!(
+        record.value.key_ref.algorithm,
+        acmex::domain::KeyAlgorithm::EcP521,
+        "P-521 account keys must persist as EcP521"
+    );
+    assert_eq!(record.value.key_ref.key_id.as_str(), handle.key_id);
+}
+
 /// Mixed-algorithm RFC 8555 §7.3.5 rollover: the outer JWS (old key) claims
 /// `alg: ES256` while the inner JWS (new key) claims `alg: EdDSA` with the
 /// OKP JWK — each side derives its algorithm from its own key. After the
