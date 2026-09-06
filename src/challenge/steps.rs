@@ -643,6 +643,15 @@ impl StepExecutor for PrepareChallengesStep {
             Err(_) => return policy_error("LoadAuthorizations has not completed yet"),
         };
         let repositories = ctx.repositories;
+        // The account URL (kid) rides along on every prepare request:
+        // dns-account-01 binds its TXT value to it. It is re-read from the
+        // persisted EnsureAccount payload on every (re)execution, so it does
+        // not need separate persistence.
+        let account =
+            match read_payload::<AccountPayload>(ctx.operation, WorkflowStepKind::EnsureAccount) {
+                Ok(payload) => payload.account,
+                Err(_) => return policy_error("EnsureAccount has not completed yet"),
+            };
 
         // Per-identifier validation plan rejects impossible combinations
         // before creating any external resource.
@@ -776,6 +785,7 @@ impl StepExecutor for PrepareChallengesStep {
                 .prepare(PrepareChallenge {
                     session: session.clone(),
                     key_authorization,
+                    account_url: account.account_url.clone(),
                 })
                 .await
             {

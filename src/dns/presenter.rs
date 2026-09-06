@@ -1,9 +1,14 @@
-//! DNS-01 presenter over the factory/zone/observer/router stack.
+//! DNS-01 / DNS-ACCOUNT-01 presenter over the factory/zone/observer/router
+//! stack.
 //!
 //! `prepare` resolves the zone (SOA walk-up + delegation), routes to the
 //! owning provider, presents the TXT and returns a lease whose locator
 //! names the exact record; `observe` consults the propagation observer;
 //! `cleanup` removes exactly this lease's value.
+//!
+//! Both dns-01 and dns-account-01 (draft-ietf-acme-dns-account-01) use the
+//! same `_acme-challenge.<domain>` TXT record; only the value formula
+//! differs, so one presenter serves both kinds.
 
 use std::sync::Arc;
 
@@ -12,7 +17,8 @@ use async_trait::async_trait;
 use jiff::Timestamp;
 
 use crate::challenge::presenter::{
-    CleanupOutcome, Observation, PrepareChallenge, dns01_validation_value,
+    CleanupOutcome, Observation, PrepareChallenge, dns_account01_validation_value,
+    dns01_validation_value, token_from_key_authorization,
 };
 use crate::challenge::{ChallengePresenter, ChallengeSession};
 use crate::domain::challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
@@ -65,7 +71,7 @@ impl Dns01Presenter {
             id: crate::domain::ChallengeLeaseId::generate(),
             operation_id: session.operation_id.clone(),
             identifier: session.identifier.clone(),
-            challenge_type: ChallengeType::Dns01,
+            challenge_type: session.challenge_type,
             locator: ChallengeLeaseLocator::Dns {
                 provider_id: locator.provider_id,
                 zone: locator.zone,
@@ -91,7 +97,23 @@ impl ChallengePresenter for Dns01Presenter {
         ChallengeType::Dns01
     }
 
+    fn supported_kinds(&self) -> Vec<ChallengeType> {
+        // Same TXT record name, same observation and cleanup paths — only
+        // the value formula differs per kind.
+        vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+    }
+
     async fn prepare(&self, request: PrepareChallenge) -> Result<ChallengeLease> {
+        let challenge_type = request.session.challenge_type;
+        if !matches!(
+            challenge_type,
+            ChallengeType::Dns01 | ChallengeType::DnsAccount01
+        ) {
+            return Err(crate::error::AcmeError::InvalidInput(format!(
+                "the DNS presenter only prepares dns-01/dns-account-01, not `{challenge_type}`"
+            )));
+        }
+
         let identifier = request
             .session
             .identifier
@@ -110,11 +132,21 @@ impl ChallengePresenter for Dns01Presenter {
             .router
             .route(&resolution.zone_apex, self.selector.as_deref())?;
 
+        // dns-01: base64url(SHA256(token.thumbprint)); dns-account-01:
+        // base64url(SHA256(accountUrl "." token)) — no thumbprint involved.
+        let value = match challenge_type {
+            ChallengeType::DnsAccount01 => dns_account01_validation_value(
+                &request.account_url,
+                token_from_key_authorization(&request.key_authorization),
+            ),
+            _ => dns01_validation_value(&request.key_authorization),
+        };
+
         let locator = provider
             .present_txt(PresentTxt {
                 zone: resolution.zone_apex.clone(),
                 record_name: record_name.clone(),
-                value: dns01_validation_value(&request.key_authorization),
+                value,
                 idempotency_key: request.session.id.clone(),
             })
             .await?;
