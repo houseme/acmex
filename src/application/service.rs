@@ -179,16 +179,23 @@ impl RepositoryCertificateApplication {
         Ok(None)
     }
 
-    async fn lineage_for_intent(&self, intent: &CertificateIntent) -> Result<CertificateLineage> {
-        if let Some(stored) = self
+    async fn find_lineage_by_intent(
+        &self,
+        intent_id: &IntentId,
+    ) -> Result<Option<CertificateLineage>> {
+        Ok(self
             .repositories
             .lineages
             .list()
             .await?
             .into_iter()
-            .find(|stored| stored.value.intent_id == intent.id)
-        {
-            return Ok(stored.value);
+            .find(|stored| stored.value.intent_id == *intent_id)
+            .map(|stored| stored.value))
+    }
+
+    async fn lineage_for_intent(&self, intent: &CertificateIntent) -> Result<CertificateLineage> {
+        if let Some(stored) = self.find_lineage_by_intent(&intent.id).await? {
+            return Ok(stored);
         }
 
         let lineage = CertificateLineage::new(
@@ -200,6 +207,100 @@ impl RepositoryCertificateApplication {
         match self.repositories.lineages.create(lineage.clone()).await? {
             CreateOutcome::Created | CreateOutcome::AlreadyExists => Ok(lineage),
         }
+    }
+
+    /// Replay guard for the external-CSR part of the create payload (the
+    /// stored intent cannot reproduce the material itself, so it is verified
+    /// against the CSR durably recorded by the intent's first issue).
+    ///
+    /// * mode exclusivity is enforced exactly like on the create path;
+    /// * a replay carrying material that differs from the recorded CSR is a
+    ///   conflict instead of silently returning the original intent;
+    /// * before any issuance has consumed the material nothing is recorded
+    ///   yet, so a replay cannot be proven different and resolves to the
+    ///   same intent like any other pre-issuance replay.
+    async fn ensure_external_csr_replay(
+        &self,
+        intent: &CertificateIntent,
+        external_csr: Option<&str>,
+    ) -> Result<()> {
+        validate_external_csr_mode(&intent.key_policy, external_csr)?;
+        let Some(pem) = external_csr else {
+            return Ok(());
+        };
+        let replayed = crate::key::ExternalCsr::from_pem(pem)?;
+        let Some(recorded) = self.recorded_external_csr_der(intent).await? else {
+            return Ok(());
+        };
+        if recorded != replayed.csr_der {
+            return Err(AcmeError::conflict(
+                "Idempotency-Key was already used with a different request payload \
+                 (external_csr material differs from the recorded CSR)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The external CSR durably recorded for an intent, if any: the first
+    /// Issue operation of the intent's lineage carries it in its `CreateCsr`
+    /// step payload (initialization PEM until the step first succeeds, then
+    /// base64 DER). `None` before the first issuance pins the material.
+    async fn recorded_external_csr_der(
+        &self,
+        intent: &CertificateIntent,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(lineage) = self.find_lineage_by_intent(&intent.id).await? else {
+            return Ok(None);
+        };
+        for status in [
+            OperationStatus::Queued,
+            OperationStatus::Running,
+            OperationStatus::Waiting,
+            OperationStatus::Succeeded,
+            OperationStatus::Failed,
+            OperationStatus::CancelRequested,
+            OperationStatus::Cancelled,
+            OperationStatus::Compensating,
+            OperationStatus::CompensationFailed,
+        ] {
+            for stored in self
+                .repositories
+                .operations
+                .list_by_status(status, 500)
+                .await?
+            {
+                let operation = stored.value;
+                if operation.kind != OperationKind::Issue
+                    || operation.subject.lineage_id.as_ref() != Some(&lineage.id)
+                {
+                    continue;
+                }
+                let Some(step) = operation
+                    .steps
+                    .iter()
+                    .find(|s| s.kind == crate::domain::WorkflowStepKind::CreateCsr)
+                else {
+                    continue;
+                };
+                let Some(raw) = step.output_ref.as_deref() else {
+                    continue;
+                };
+                let Ok(payload) = serde_json::from_str::<PersistedCsrOutput>(raw) else {
+                    continue;
+                };
+                if let Some(pem) = payload.external_csr_pem
+                    && let Ok(external) = crate::key::ExternalCsr::from_pem(&pem)
+                {
+                    return Ok(Some(external.csr_der));
+                }
+                if let Some(csr_der) = payload.csr_der
+                    && let Ok(der) = BASE64.decode(csr_der.as_bytes())
+                {
+                    return Ok(Some(der));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn resolve_lineage_for_renew(
@@ -548,6 +649,12 @@ impl CertificateApplication for RepositoryCertificateApplication {
 
         if let Some(existing) = self.find_intent_by_idempotency(&idempotency_key).await? {
             if Self::intent_payload_hash(&existing.value)? == request_hash {
+                // Part of the create payload hash that the stored intent
+                // cannot reproduce: the external CSR material itself. Replays
+                // must carry the recorded material once one exists (aligned
+                // with the issue idempotency semantics).
+                self.ensure_external_csr_replay(&existing.value, command.external_csr.as_deref())
+                    .await?;
                 return Ok(existing.into());
             }
             return Err(AcmeError::conflict(
@@ -1361,13 +1468,90 @@ mod tests {
     #[tokio::test]
     async fn external_csr_intent_is_accepted_and_replayed_idempotently() {
         let service = service().await;
-        let intent = service
-            .create_intent(external_csr_command("extcsr-ok", "example.com"))
+        // Identical material on both calls: a true replay of the same
+        // request, not a fresh CSR under the same key.
+        let csr_pem = test_csr_pem("example.com");
+        let mut command = external_csr_command("extcsr-ok", "example.com");
+        command.external_csr = Some(csr_pem.clone());
+        let intent = service.create_intent(command).await.unwrap();
+        let mut replay = external_csr_command("extcsr-ok", "example.com");
+        replay.external_csr = Some(csr_pem);
+        let replay = service.create_intent(replay).await.unwrap();
+        assert_eq!(intent.id, replay.id);
+    }
+
+    /// A create replay with different external-CSR material is a conflict
+    /// once the material is recorded (i.e. once an issue consumed it) —
+    /// the same semantics as a replayed issue with a different CSR.
+    #[tokio::test]
+    async fn create_intent_replay_with_different_external_csr_conflicts() {
+        let service = service().await;
+        let original = test_csr_pem("example.com");
+        let mut command = external_csr_command("extcsr-hash", "example.com");
+        command.external_csr = Some(original.clone());
+        let intent = service.create_intent(command).await.unwrap();
+        // The first issue pins the original material durably.
+        service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id.clone(),
+                external_csr: Some(original),
+                idempotency_key: "issue-extcsr-hash".to_string(),
+            })
             .await
             .unwrap();
-        // Same key + same material replays to the same intent.
+        // external_csr_command generates a fresh CSR (new key material), so
+        // this replay differs from the recorded original.
+        let err = service
+            .create_intent(external_csr_command("extcsr-hash", "example.com"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcmeError::Conflict(_)),
+            "different CSR must conflict, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("external_csr material differs"),
+            "the conflict must name the CSR mismatch: {err}"
+        );
+    }
+
+    /// A create replay carrying the recorded material stays idempotent.
+    #[tokio::test]
+    async fn create_intent_replay_with_same_external_csr_is_idempotent() {
+        let service = service().await;
+        let csr_pem = test_csr_pem("example.com");
+        let mut command = external_csr_command("extcsr-same", "example.com");
+        command.external_csr = Some(csr_pem.clone());
+        let intent = service.create_intent(command).await.unwrap();
+        service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id.clone(),
+                external_csr: Some(csr_pem.clone()),
+                idempotency_key: "issue-extcsr-same".to_string(),
+            })
+            .await
+            .unwrap();
+        let mut replay = external_csr_command("extcsr-same", "example.com");
+        replay.external_csr = Some(csr_pem);
+        let replay = service.create_intent(replay).await.unwrap();
+        assert_eq!(intent.id, replay.id);
+    }
+
+    /// Before the first issue pins the material nothing is recorded, so a
+    /// replay cannot be proven different and resolves to the same intent —
+    /// the documented pre-issuance window (byte-identical retries must keep
+    /// succeeding).
+    #[tokio::test]
+    async fn create_intent_replay_before_first_issue_cannot_conflict_on_csr() {
+        let service = service().await;
+        let intent = service
+            .create_intent(external_csr_command("extcsr-pre", "example.com"))
+            .await
+            .unwrap();
         let replay = service
-            .create_intent(external_csr_command("extcsr-ok", "example.com"))
+            .create_intent(external_csr_command("extcsr-pre", "example.com"))
             .await
             .unwrap();
         assert_eq!(intent.id, replay.id);
