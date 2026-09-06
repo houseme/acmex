@@ -25,6 +25,11 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PEBBLE_DIRECTORY_URL="${PEBBLE_DIRECTORY_URL:-https://127.0.0.1:14000/dir}"
 export PEBBLE_CHALLTESTSRV_ADMIN="${PEBBLE_CHALLTESTSRV_ADMIN:-http://127.0.0.1:8055}"
 export PEBBLE_E2E_DOMAIN="${PEBBLE_E2E_DOMAIN:-acmex-test.example.com}"
+# reqwest picks up the OS-level proxy configuration (macOS system proxy) and
+# would route loopback traffic through it, which fails with 400. The gate
+# only ever talks to localhost.
+export NO_PROXY="127.0.0.1,localhost"
+export no_proxy="127.0.0.1,localhost"
 export PEBBLE_E2E_ARTIFACT_DIR="${PEBBLE_E2E_ARTIFACT_DIR:-$REPO_DIR/target/pebble-e2e/$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$PEBBLE_E2E_ARTIFACT_DIR"
 PEBBLE_TRUST_ANCHOR_TEMP="${PEBBLE_TRUST_ANCHOR_PEM_FILE:-$(mktemp "${TMPDIR:-/tmp}/acmex-pebble-root.XXXXXX.pem")}"
@@ -51,9 +56,10 @@ echo "== starting pebble + challtestsrv"
 docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" up -d --wait
 
 if [[ ! -s "$PEBBLE_TRUST_ANCHOR_PEM_FILE" ]]; then
-  echo "== extracting Pebble trust anchor to $PEBBLE_TRUST_ANCHOR_PEM_FILE"
-  docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" cp \
-    pebble:/test/certs/pebble.minica.pem "$PEBBLE_TRUST_ANCHOR_PEM_FILE"
+  # The issuance root is generated at Pebble startup and served by its
+  # management API — `pebble.minica.pem` only covers Pebble's own TLS cert.
+  echo "== extracting the runtime issuance root to $PEBBLE_TRUST_ANCHOR_PEM_FILE"
+  curl -sk "https://127.0.0.1:15000/roots/0" > "$PEBBLE_TRUST_ANCHOR_PEM_FILE"
 fi
 
 echo "== waiting for the pebble directory at $PEBBLE_DIRECTORY_URL"

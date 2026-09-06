@@ -123,5 +123,6 @@ required-features = ["dns-cloudflare"]
 
 [dev-dependencies]
 mockito = "1.7.2"
+hickory-resolver = { version = "0.26.1", features = ["serde"] }
 hex = "0.4.3"
 tower = { version = "0.5.3", features = ["util"] }

@@ -67,7 +67,7 @@ impl<'a> KeyRollover<'a> {
         let outer_jws = self
             .account_manager
             .get_signer()
-            .sign(&outer_header, &inner_jws_obj)?;
+            .sign(&outer_header, &json!(inner_jws_obj))?;
 
         // 4. Send request to the keyChange endpoint
         tracing::info!("Sending keyChange request to: {}", key_change_url);

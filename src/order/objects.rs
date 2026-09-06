@@ -19,7 +19,11 @@ pub struct Challenge {
     /// The current status of the challenge (e.g., "pending", "processing", "valid", "invalid").
     pub status: String,
 
-    /// A token used to construct the key authorization string.
+    /// A token used to construct the key authorization string. Optional:
+    /// servers may advertise challenge types AcmeX does not know (Pebble
+    /// already offers `dns-persist-01` without a token), and a strict field
+    /// would make the whole authorization fail to deserialize.
+    #[serde(default)]
     pub token: String,
 
     /// The computed key authorization string, if available.

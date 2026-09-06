@@ -262,6 +262,7 @@ fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .build()

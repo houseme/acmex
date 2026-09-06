@@ -77,7 +77,10 @@ impl AcmeClient {
             "Creating new AcmeClient with directory: {}",
             config.directory_url
         );
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let key_pair = Arc::new(KeyPair::generate()?);
 
         Ok(Self {
@@ -92,7 +95,10 @@ impl AcmeClient {
     /// Creates an ACME client with an existing key pair.
     pub fn with_key_pair(config: AcmeConfig, key_pair: KeyPair) -> Self {
         tracing::debug!("Creating AcmeClient with existing key pair");
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         Self {
             config,

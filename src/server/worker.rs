@@ -93,6 +93,9 @@ pub struct WorkflowWorkerSettings {
     pub terms_agreed: bool,
     /// External Account Binding used when the CA requires EAB.
     pub external_account_binding: Option<crate::ca_backend::ExternalAccountBindingRef>,
+    /// Challenge types the worker may plan for. Empty (default) = every
+    /// challenge compatible with the identifier.
+    pub allowed_challenges: crate::domain::ChallengeSet,
     /// Directory holding the account key and managed certificate keys.
     pub secret_store_dir: std::path::PathBuf,
     /// HTTP-01 listen address (None disables the local HTTP-01 presenter).
@@ -114,6 +117,7 @@ impl Default for WorkflowWorkerSettings {
             skip_certificate_trust_check: false,
             terms_agreed: true,
             external_account_binding: None,
+            allowed_challenges: crate::domain::ChallengeSet::all(),
             secret_store_dir: std::path::PathBuf::from(".acmex/secrets"),
             http01_listen: None,
             tls_alpn_listen: None,
@@ -169,7 +173,7 @@ pub fn register_executors(
         backend: backend.clone(),
         presenters,
         account_jwk,
-        allowed_challenges: Default::default(),
+        allowed_challenges: settings.allowed_challenges.clone(),
         propagation_timeout: settings.propagation_timeout,
         poll_interval: settings.challenge_poll_interval,
     });

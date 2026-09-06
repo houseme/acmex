@@ -151,6 +151,7 @@ impl VaultKvSink {
     /// Builds a sink for the KV v2 mount at `config`.
     pub fn new(config: VaultKvConfig, auth: VaultAuth) -> Result<Self> {
         let client = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(config.connect_timeout_secs.max(1)))
             .timeout(Duration::from_secs(config.request_timeout_secs.max(1)))
             .build()

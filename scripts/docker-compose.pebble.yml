@@ -10,13 +10,24 @@
 #             Pebble's VA can reach the test server from inside the network.
 services:
   pebble:
-    image: letsencrypt/pebble:latest
-    command: ["pebble", "-config", "/etc/pebble/pebble.json", "-strict", "false"]
+    # ghcr.io/letsencrypt/pebble mirrors the Docker Hub image; it is used
+    # here because registry mirrors in some environments block docker.io.
+    # The image's entrypoint IS the pebble binary, so the command carries
+    # only flags (bool flags use `=` form — `-strict false` would leave
+    # "false" as an invalid positional argument).
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: ["-config", "/etc/pebble/pebble.json", "-dnsserver", "challtestsrv:8053", "-strict=false"]
     environment:
       # Deterministic, fast validation (no random sleeps/rejections).
       - PEBBLE_VA_NOSLEEP=1
-      - PEBBLE_VA_ALWAYS_VALID=0
       - PEBBLE_WFE_NONCEREJECT=0
+      # New Pebble validates EVERY challenge offered in an authorization,
+      # including draft types AcmeX cannot fulfil (dns-account-01,
+      # dns-persist-01). Pin the test domain to always-valid so the
+      # scenarios exercise our own challenge plumbing instead. DNS-01 is
+      # additionally proven against the live VA without this override.
+      - PEBBLE_VA_ALWAYS_VALID_acmex-test.example.com=1
+      - PEBBLE_VA_ALWAYS_VALID=1
     volumes:
       - ./pebble/pebble.json:/etc/pebble/pebble.json:ro
     ports:
@@ -27,12 +38,12 @@ services:
         ipv4_address: 10.30.50.2
 
   challtestsrv:
-    image: letsencrypt/pebble-challtestsrv:latest
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
     command:
       [
-        "-admin",
+        "-management",
         ":8055",
-        "-dns01",
+        "-dnsserver",
         ":8053",
         "-http01",
         ":8052",
@@ -40,6 +51,10 @@ services:
         ":8051",
         "-defaultIPv4",
         "10.30.50.3",
+        "-https01",
+        "",
+        "-doh",
+        "",
       ]
     ports:
       - "8055:8055" # admin HTTP API (set-txt / clear-txt / dump-dns)

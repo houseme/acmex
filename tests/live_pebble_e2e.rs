@@ -25,8 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 use acmex::account::KeyPair;
@@ -109,6 +107,7 @@ impl InsecurePebbleTransport {
     fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
+                .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
                 .danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true)
                 .timeout(Duration::from_secs(30))
@@ -181,7 +180,10 @@ impl ChalltestsrvAdmin {
     fn new(admin: String) -> Self {
         Self {
             admin,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("admin http client"),
         }
     }
 
@@ -203,20 +205,13 @@ impl ChalltestsrvAdmin {
         Ok(())
     }
 
-    async fn get_text(&self, path: &str) -> acmex::error::Result<String> {
-        let response = self
-            .client
-            .get(format!("{}{path}", self.admin))
-            .send()
-            .await
-            .map_err(|e| acmex::error::AcmeError::transport(format!("challtestsrv: {e}")))?;
-        Ok(response.text().await.unwrap_or_default())
-    }
 }
 
 #[derive(Clone)]
 struct ChalltestsrvDnsPresenter {
     admin: ChalltestsrvAdmin,
+    /// challtestsrv DNS endpoint (`host:8053`) for the real TXT lookup.
+    dns_server: String,
     /// record name + value hash → TXT value. This is an optimization for the
     /// single-process E2E path; observe still falls back to the challtestsrv
     /// dump so rebuilt presenters can verify by the persisted hash alone.
@@ -225,9 +220,69 @@ struct ChalltestsrvDnsPresenter {
 
 impl ChalltestsrvDnsPresenter {
     fn new(admin: String) -> Self {
+        // The DNS server shares the management host; compose maps
+        // management on :8055 and DNS on :8053.
+        let dns_server = {
+            let url = reqwest::Url::parse(&admin).expect("challtestsrv admin URL");
+            let host = url.host_str().unwrap_or("127.0.0.1");
+            format!("{host}:8053")
+        };
         Self {
             admin: ChalltestsrvAdmin::new(admin),
+            dns_server,
             txt_values: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Real DNS TXT lookup against the challtestsrv DNS server: the new
+    /// challtestsrv removed the `/dump-dns` endpoint this used to fall back
+    /// to, and a live query is the honest check anyway.
+    async fn txt_value_visible(&self, record_name: &str, value_hash: &str) -> bool {
+        let addr: std::net::SocketAddr = match self.dns_server.parse() {
+            Ok(addr) => addr,
+            Err(err) => {
+                eprintln!("bad challtestsrv DNS address {}: {err}", self.dns_server);
+                return false;
+            }
+        };
+        let mut udp = hickory_resolver::config::ConnectionConfig::udp();
+        udp.port = addr.port();
+        let mut tcp = hickory_resolver::config::ConnectionConfig::tcp();
+        tcp.port = addr.port();
+        let config = hickory_resolver::config::ResolverConfig::from_parts(
+            None,
+            Vec::new(),
+            vec![hickory_resolver::config::NameServerConfig::new(
+                addr.ip(),
+                true,
+                vec![udp, tcp],
+            )],
+        );
+        let resolver = hickory_resolver::TokioResolver::builder_with_config(
+            config,
+            hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+        )
+        .build()
+        .expect("challtestsrv TXT resolver");
+        let lookup = resolver
+            .lookup(
+                record_name.to_string(),
+                hickory_resolver::proto::rr::RecordType::TXT,
+            )
+            .await;
+        match lookup {
+            Ok(records) => records.answers().iter().any(|record| match &record.data {
+                hickory_resolver::proto::rr::RData::TXT(txt) => {
+                    let value: String = txt
+                        .txt_data
+                        .iter()
+                        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+                        .collect();
+                    acmex::dns::record::txt_value_hash(&value) == value_hash
+                }
+                _ => false,
+            }),
+            Err(_) => false,
         }
     }
 }
@@ -311,18 +366,8 @@ impl ChallengePresenter for ChalltestsrvDnsPresenter {
                 });
             }
         };
-        let body = self.admin.get_text("/dump-dns").await?;
-        let expected_visible = cached_value
-            .as_deref()
-            .is_some_and(|value| body.contains(record_name.as_str()) && body.contains(value));
-        let expected_hash_visible = body
-            .split(|ch: char| {
-                ch == '"' || ch == '[' || ch == ']' || ch == ',' || ch.is_whitespace()
-            })
-            .any(|value| {
-                !value.is_empty() && acmex::dns::record::txt_value_hash(value) == value_hash
-            });
-        if expected_visible || expected_hash_visible {
+        let _ = cached_value;
+        if self.txt_value_visible(&record_name, &value_hash).await {
             Ok(Observation::Propagated)
         } else {
             Ok(Observation::NotYet {
@@ -563,6 +608,7 @@ async fn run_pebble_issue(
 
     // Readiness probe with an actionable message.
     match reqwest::Client::builder()
+        .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
         .danger_accept_invalid_certs(true)
         .build()
         .unwrap()
@@ -571,10 +617,15 @@ async fn run_pebble_issue(
         .await
     {
         Ok(response) if response.status().is_success() => {}
-        Ok(response) => panic!(
-            "Pebble answered HTTP {} — check the pebble config",
-            response.status()
-        ),
+        Ok(response) => {
+            let status = response.status();
+            let version = format!("{:?}", response.version());
+            let body = response.text().await.unwrap_or_default();
+            panic!(
+                "Pebble answered HTTP {status} ({version}) body: {} — check the pebble config",
+                &body[..body.len().min(300)]
+            );
+        }
         Err(err) => panic!(
             "Pebble unreachable at {}: {err} — start it with \
              `docker compose -f scripts/docker-compose.pebble.yml up -d`",
@@ -634,6 +685,9 @@ async fn run_pebble_issue(
             .unwrap()
             .as_nanos()
     ));
+    // ES256 (P-256): Pebble supports only [RS256 ES256 ES384 ES512] and
+    // rejects Ed25519 account keys. `Jwk::for_key_pair` below must describe
+    // the actual key, so the thumbprint (key authorization) matches.
     let account_key = Arc::new(KeyPair::generate().unwrap());
     let backend: Arc<dyn CaBackend> = Arc::new(AcmeCaBackend::new(
         "pebble",
@@ -642,7 +696,7 @@ async fn run_pebble_issue(
         account_key.clone(),
         repositories.clone(),
     ));
-    let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
+    let account_jwk = Jwk::for_key_pair(&account_key.0).unwrap();
 
     let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
         FileSecretStore::new(key_dir.clone()),
@@ -662,6 +716,7 @@ async fn run_pebble_issue(
                 challenge_poll_interval: Duration::from_secs(2),
                 trust_anchor_pems: vec![trust_anchor_pem.clone()],
                 terms_agreed: true,
+                allowed_challenges: ChallengeSet::new([challenge_type]),
                 ..Default::default()
             },
             WorkflowWorkerComponents {
@@ -754,7 +809,8 @@ async fn run_pebble_issue(
     assert_eq!(
         record.status,
         acmex::domain::OperationStatus::Succeeded,
-        "steps: {:#?}",
+        "op error: {:#?}; steps: {:#?}",
+        record.error,
         record.steps
     );
 
@@ -786,7 +842,12 @@ async fn run_pebble_issue(
             .value;
         assert_eq!(deployment.state, DeploymentState::Active);
         let staged_ref = deployment.staged_ref.expect("deployment staged ref");
-        let metadata = std::path::Path::new(&staged_ref).join("metadata.json");
+        // The record's staged_ref is the serialized StagedDeployment (it
+        // also carries the rollback retry baseline); the sink-local staged
+        // reference inside it is the version directory.
+        let staged: acmex::delivery::StagedDeployment =
+            serde_json::from_str(&staged_ref).unwrap();
+        let metadata = std::path::Path::new(&staged.staged_ref).join("metadata.json");
         let mut payload: serde_json::Value =
             serde_json::from_slice(&tokio::fs::read(&metadata).await.unwrap()).unwrap();
         payload["leaf_sha256"] = serde_json::json!("corrupted-by-pebble-rollback-test");
@@ -875,7 +936,8 @@ async fn run_pebble_issue(
         assert_eq!(
             renewed_record.status,
             acmex::domain::OperationStatus::Succeeded,
-            "renew steps: {:#?}",
+            "renew op error: {:#?}; renew steps: {:#?}",
+            renewed_record.error,
             renewed_record.steps
         );
         let renewed_version_id = VersionId::new(format!("ver_{renew_op}")).unwrap();

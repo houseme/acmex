@@ -1029,7 +1029,45 @@ impl StepExecutor for AcknowledgeChallengesStep {
                             .await;
                     }
                 }
-                Err(err) => return retryable(err.to_string()),
+                // A 400 on the ack POST usually means the CA already moved
+                // the challenge past `pending` (proactive validation, or a
+                // parallel worker acked first). Re-check the authorization:
+                // `valid` means the challenge succeeded and the ack is
+                // moot; anything else keeps the original retryable error.
+                Err(err) => {
+                    let already_valid = self
+                        .deps
+                        .backend
+                        .get_authorization(
+                            &account,
+                            &AuthorizationRef {
+                                url: session.authorization_url.clone(),
+                            },
+                        )
+                        .await
+                        .ok()
+                        .is_some_and(|authz| {
+                            authz.authorization.status == "valid"
+                        });
+                    if already_valid {
+                        let acknowledged = session
+                            .transition(ChallengeSessionState::Acknowledged)
+                            .expect("propagated -> acknowledged");
+                        if let Some(fresh) = repositories
+                            .challenge_sessions
+                            .get(&session.id)
+                            .await
+                            .unwrap()
+                        {
+                            let _ = repositories
+                                .challenge_sessions
+                                .update(fresh.revision, acknowledged)
+                                .await;
+                        }
+                        continue;
+                    }
+                    return retryable(err.to_string());
+                }
             }
         }
         StepResult::done()

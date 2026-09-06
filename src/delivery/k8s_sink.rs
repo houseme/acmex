@@ -173,6 +173,7 @@ impl KubernetesSecretSink {
             ),
         };
         let mut builder = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(config.connect_timeout_secs.max(1)))
             .timeout(Duration::from_secs(config.request_timeout_secs.max(1)));
         if let Some(ca_path) = config.ca_path.or(default_ca).as_ref() {

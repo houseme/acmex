@@ -4,7 +4,7 @@ use crate::error::{AcmeError, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rcgen::{KeyPair, SigningKey};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// JWS Signer for signing ACME requests
 pub struct JwsSigner<'a> {
@@ -66,10 +66,15 @@ impl<'a> JwsSigner<'a> {
 
         let signature_encoded = URL_SAFE_NO_PAD.encode(&signature);
 
-        Ok(format!(
-            "{}.{}.{}",
-            header_encoded, payload_encoded, signature_encoded
-        ))
+        // ACME (RFC 8555 §6.2) requires the flattened JSON serialization:
+        // the POST body is a JSON object, not the compact `a.b.c` form. The
+        // compact serialization is only an intermediate for signing.
+        Ok(json!({
+            "protected": header_encoded,
+            "payload": payload_encoded,
+            "signature": signature_encoded,
+        })
+        .to_string())
     }
 
     /// Sign empty payload (for some ACME operations)
@@ -89,11 +94,21 @@ mod tests {
     use crate::crypto::keypair::{KeyPairGenerator, KeyType};
     use crate::protocol::Jwk;
 
+    /// Parses the flattened JSON envelope into its base64url segments.
+    fn jws_segments(jws: &str) -> (String, String, String) {
+        let object: serde_json::Value = serde_json::from_str(jws).expect("flattened JSON JWS");
+        (
+            object["protected"].as_str().unwrap().to_string(),
+            object["payload"].as_str().unwrap().to_string(),
+            object["signature"].as_str().unwrap().to_string(),
+        )
+    }
+
     fn decode_signature(jws: &str) -> Vec<u8> {
-        let parts: Vec<&str> = jws.split('.').collect();
+        let (_, _, signature) = jws_segments(jws);
         URL_SAFE_NO_PAD
-            .decode(parts[2])
-            .expect("signature segment is base64url")
+            .decode(signature)
+            .expect("signature is base64url")
     }
 
     #[test]
@@ -112,16 +127,15 @@ mod tests {
         });
 
         let jws = signer.sign(&header, &payload).expect("Failed to sign JWS");
-        let parts: Vec<&str> = jws.split('.').collect();
-        assert_eq!(parts.len(), 3, "JWS should have 3 parts");
 
-        // Verify parts are valid base64url
-        for part in parts {
-            if !part.is_empty() {
-                let decoded = URL_SAFE_NO_PAD.decode(part);
-                assert!(decoded.is_ok(), "JWS part should be valid base64url");
-            }
-        }
+        // RFC 8555 §6.2: the POST body is the flattened JSON serialization.
+        let (protected, payload_encoded, _) = jws_segments(&jws);
+        let decoded_header: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected).unwrap()).unwrap();
+        assert_eq!(decoded_header["nonce"], "test-nonce");
+        let decoded_payload: Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload_encoded).unwrap()).unwrap();
+        assert_eq!(decoded_payload["termsOfServiceAgreed"], true);
     }
 
     #[test]
@@ -138,9 +152,8 @@ mod tests {
         let jws = signer
             .sign_empty(&header)
             .expect("Failed to sign empty JWS");
-        let parts: Vec<&str> = jws.split('.').collect();
-        assert_eq!(parts.len(), 3, "JWS should have 3 parts");
-        assert_eq!(parts[1], "", "Payload part should be empty");
+        let (_, payload_encoded, _) = jws_segments(&jws);
+        assert_eq!(payload_encoded, "", "POST-as-GET payload is empty");
     }
 
     #[test]
@@ -257,10 +270,8 @@ mod tests {
         assert_eq!(n.len(), 256);
         assert_eq!(e, vec![0x01, 0x00, 0x01]);
 
-        let signing_input = {
-            let parts: Vec<&str> = jws.split('.').collect();
-            format!("{}.{}", parts[0], parts[1])
-        };
+        let (protected, payload_encoded, _) = jws_segments(&jws);
+        let signing_input = format!("{protected}.{payload_encoded}");
 
         #[cfg(feature = "aws-lc-rs")]
         {
@@ -292,8 +303,8 @@ mod tests {
         let payload = serde_json::json!({ "termsOfServiceAgreed": true });
         let jws = signer.sign(&header, &payload).unwrap();
 
-        let parts: Vec<&str> = jws.split('.').collect();
-        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let (protected, payload_encoded, _) = jws_segments(&jws);
+        let signing_input = format!("{protected}.{payload_encoded}");
         let signature = decode_signature(&jws);
         assert_eq!(signature.len(), 64);
 
@@ -315,11 +326,11 @@ mod tests {
         assert_eq!(signature.len(), 64);
 
         // Deterministic: re-signing reproduces the exact same JWS.
-        let parts: Vec<&str> = jws.split('.').collect();
+        let (protected, payload_encoded, _) = jws_segments(&jws);
         let header: Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected).unwrap()).unwrap();
         let payload: Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload_encoded).unwrap()).unwrap();
         assert_eq!(signer.sign(&header, &payload).unwrap(), jws);
     }
 }

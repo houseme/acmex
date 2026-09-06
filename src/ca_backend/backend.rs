@@ -416,7 +416,7 @@ impl CaBackend for AcmeCaBackend {
         // nested signature semantics have one implementation while the outer
         // request still goes through the session for nonce/error handling.
         let old_jwk = Jwk::for_key_pair(&old_key.0)?;
-        let inner_object =
+        let inner_jws =
             key_change_inner_jws(&account.account_url, &key_change_url, &old_jwk, &new_key)?;
 
         // Outer JWS: the ordinary account-authenticated request path signs
@@ -424,7 +424,7 @@ impl CaBackend for AcmeCaBackend {
         // handling, badNonce recovery, Replay-Nonce capture and status
         // classification included. Its payload is the inner JWS object.
         session
-            .execute_jws(&key_change_url, JwsPayload::Object(inner_object))
+            .execute_jws(&key_change_url, JwsPayload::Object(json!(inner_jws)))
             .await?;
 
         // ---- keyChange accepted: switch everything to the new key. ----
@@ -688,7 +688,7 @@ pub(crate) fn key_change_inner_jws(
     key_change_url: &str,
     old_jwk: &Jwk,
     new_key: &KeyPair,
-) -> Result<serde_json::Value> {
+) -> Result<String> {
     let new_jwk = Jwk::for_key_pair(&new_key.0)?;
     let inner_alg = KeyType::for_key_pair(&new_key.0)?.jwa_algorithm();
     let inner_header = json!({
@@ -700,32 +700,9 @@ pub(crate) fn key_change_inner_jws(
         "account": account_url,
         "oldKey": old_jwk.to_value(),
     });
-    let inner_jws = JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)?;
-    compact_jws_to_object(&inner_jws)
-}
-
-/// Converts compact JWS serialization into the JSON object used by ACME.
-pub(crate) fn compact_jws_to_object(jws: &str) -> Result<serde_json::Value> {
-    let mut parts = jws.split('.');
-    let protected = parts
-        .next()
-        .ok_or_else(|| AcmeError::protocol("compact JWS missing protected header"))?;
-    let payload = parts
-        .next()
-        .ok_or_else(|| AcmeError::protocol("compact JWS missing payload"))?;
-    let signature = parts
-        .next()
-        .ok_or_else(|| AcmeError::protocol("compact JWS missing signature"))?;
-    if parts.next().is_some() {
-        return Err(AcmeError::protocol(
-            "compact JWS has more than three segments".to_string(),
-        ));
-    }
-    Ok(json!({
-        "protected": protected,
-        "payload": payload,
-        "signature": signature,
-    }))
+    // RFC 8555 §7.3.5: the outer payload is the inner flattened JWS,
+    // carried as a JSON string.
+    JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)
 }
 
 /// HMAC-SHA256, the only symmetric ACME signature (EAB, RFC 8555 §7.3.4).

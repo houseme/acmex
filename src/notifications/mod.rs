@@ -145,7 +145,10 @@ impl WebhookClient {
     pub fn new_with_resolver(config: WebhookConfig, secrets: Arc<dyn SecretResolver>) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("webhook http client"),
             secrets,
         }
     }
