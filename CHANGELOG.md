@@ -43,6 +43,17 @@ must call out any unverified external evidence.
   backend = "kms-aws"`): managed keys are created as KMS-held asymmetric
   keys and CSRs are signed remotely via the KMS Sign API — private key
   material never leaves the service and `export` is always `None`.
+- DNS challenge types for the new CA draft landscape: `dns-account-01`
+  (TXT value reuses the DNS-01 digest; the record name is derived from the
+  ACME account URL, so authorizations survive account key rollover) and
+  `dns-persist-01` (persistent `_validation-persist` records binding the
+  account URI, opt-in via validation policy, cleanup preserves the record).
+  Multi-challenge preparation (`prepare_all_supported`) provisions every
+  offered challenge type the engine supports — required by CAs that
+  validate all offered challenges (recent Pebble does).
+- DNS challenge types for the new CA draft landscape: `dns-account-01`
+  (challenge type, account-URL-bound record name; see the dns-account-01
+  feature entry above) and `dns-persist-01`.
 - External CSR issuance end to end: intents created with
   `key.mode = "external-csr"` now require and use a caller-supplied CSR
   (`external_csr` on intent creation or issue), validated for signature and
