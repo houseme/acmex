@@ -365,13 +365,15 @@ fn verify_ecdsa_signature(
                 &ring::signature::ECDSA_P256_SHA256_ASN1
             } else if signature_oid.ends_with(".3.3") {
                 &ring::signature::ECDSA_P384_SHA384_ASN1
-            } else if signature_oid.ends_with(".3.4") {
-                &ring::signature::ECDSA_P521_SHA512_ASN1
             } else {
-                return Err(mismatch());
+                // ring 0.17 does not expose an ASN.1 P-521 verifier.
+                return Err(AcmeError::certificate(
+                    "ECDSA P-521 certificate signature verification is not supported by the \
+                     `ring-crypto` backend",
+                ));
             };
-        let key = ring::signature::UnparsedPublicKey::new(algorithm, public_key);
-        return Ok(key.verify(tbs, signature_der).is_ok());
+            let key = ring::signature::UnparsedPublicKey::new(algorithm, public_key);
+            return Ok(key.verify(tbs, signature_der).is_ok());
     }
     #[cfg(not(any(feature = "aws-lc-rs", feature = "ring-crypto")))]
     {

@@ -582,13 +582,11 @@ fn verify_ecdsa_sha512_signature(tbs: &[u8], public_key: &[u8], signature: &[u8]
 }
 
 #[cfg(all(feature = "ring-crypto", not(feature = "aws-lc-rs")))]
-fn verify_ecdsa_sha512_signature(tbs: &[u8], public_key: &[u8], signature: &[u8]) -> Result<()> {
-    let key = ring::signature::UnparsedPublicKey::new(
-        &ring::signature::ECDSA_P521_SHA512_ASN1,
-        public_key,
-    );
-    key.verify(tbs, signature)
-        .map_err(|_| AcmeError::crypto("invalid ECDSA-with-SHA512 signature"))
+fn verify_ecdsa_sha512_signature(_tbs: &[u8], _public_key: &[u8], _signature: &[u8]) -> Result<()> {
+    // ring 0.17 does not expose an ASN.1 P-521 verifier.
+    Err(AcmeError::crypto(
+        "ECDSA P-521 CSR signature verification is not supported by the `ring-crypto` backend",
+    ))
 }
 
 #[cfg(not(any(feature = "aws-lc-rs", feature = "ring-crypto")))]
