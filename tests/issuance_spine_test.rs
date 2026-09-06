@@ -1169,7 +1169,7 @@ async fn dns_persist01_spine_publishes_persistent_txt() {
     let expected_txt = acmex::challenge::dns_persist01_validation_value(
         "pebble.letsencrypt.org",
         "https://acme.example/acct/1",
-        None,
+        false,
     );
     let expected_hash = acmex::dns::record::txt_value_hash(&expected_txt);
 

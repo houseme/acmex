@@ -98,11 +98,13 @@ pub fn dns_account01_record_name(account_url: &str, domain: &str) -> String {
 pub fn dns_persist01_validation_value(
     issuer_domain_name: &str,
     accounturi: &str,
-    persist_until: Option<i64>,
+    is_wildcard: bool,
 ) -> String {
+    // draft-ietf-acme-dns-persist-01 §5.1: without `policy=wildcard` the CA
+    // MUST NOT accept the record for wildcard identifiers.
     let mut value = format!("{issuer_domain_name};accounturi={accounturi}");
-    if let Some(until) = persist_until {
-        value.push_str(&format!(";persistUntil={until}"));
+    if is_wildcard {
+        value.push_str(";policy=wildcard");
     }
     value
 }
@@ -351,7 +353,11 @@ impl ChallengePresenter for MemoryPresenter {
                         "dns-persist-01 challenge carries no accounturi".to_string(),
                     )
                 })?;
-                dns_persist01_validation_value(issuer, accounturi, None)
+                dns_persist01_validation_value(
+                    issuer,
+                    accounturi,
+                    request.session.identifier.is_wildcard(),
+                )
             }
             ChallengeType::Http01 | ChallengeType::TlsAlpn01 => request.key_authorization.clone(),
         };
@@ -633,25 +639,27 @@ mod tests {
     }
 
     /// draft-ietf-acme-dns-persist-01: the TXT value is a semicolon
-    /// parameter list `<issuer>;accounturi=<url>[;persistUntil=<ts>]`.
+    /// parameter list `<issuer>;accounturi=<url>[;policy=wildcard]`, and
+    /// wildcard identifiers MUST carry `policy=wildcard` (§5.1) for the CA
+    /// to accept the record.
     #[test]
     fn dns_persist_01_txt_value_matches_draft_parameter_list() {
         assert_eq!(
             dns_persist01_validation_value(
                 "pebble.letsencrypt.org",
                 "https://acme.example/acct/1",
-                None,
+                false,
             ),
             "pebble.letsencrypt.org;accounturi=https://acme.example/acct/1"
         );
-        // persistUntil is optional and appended last when present.
+        // Wildcard authorizations bind the record to the wildcard policy.
         assert_eq!(
             dns_persist01_validation_value(
                 "pebble.letsencrypt.org",
                 "https://acme.example/acct/1",
-                Some(1893456000),
+                true,
             ),
-            "pebble.letsencrypt.org;accounturi=https://acme.example/acct/1;persistUntil=1893456000"
+            "pebble.letsencrypt.org;accounturi=https://acme.example/acct/1;policy=wildcard"
         );
     }
 
@@ -709,7 +717,7 @@ mod tests {
         let expected_value = dns_persist01_validation_value(
             "pebble.letsencrypt.org",
             "https://acme.example/acct/1",
-            None,
+            false,
         );
         let expected_hash = crate::dns::record::txt_value_hash(&expected_value);
         match &lease.locator {

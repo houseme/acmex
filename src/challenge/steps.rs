@@ -795,6 +795,22 @@ impl PrepareChallengesStep {
                 .await;
         }
 
+        // draft-ietf-acme-dns-persist-01 §3.1: a challenge with more than
+        // ten issuer-domain-names, or any name longer than 253 octets, is
+        // malformed and MUST be rejected rather than retried.
+        if chosen.issuer_domain_names.len() > 10 {
+            return Err(policy_error(
+                "dns-persist-01 challenge carries more than ten issuer-domain-names".to_string(),
+            ));
+        }
+        for name in &chosen.issuer_domain_names {
+            if name.len() > 253 {
+                return Err(policy_error(format!(
+                    "dns-persist-01 issuer-domain-name exceeds 253 octets: {name}"
+                )));
+            }
+        }
+
         let key_authorization = match self.deps.key_authorization(&chosen.token) {
             Ok(value) => value,
             Err(err) => return Err(retryable(err.to_string())),
@@ -1546,13 +1562,28 @@ pub async fn cleanup_operation_leases(
                     .challenge_leases
                     .update(lease_stored.revision, updated)
                     .await;
-                // Sessions record the cleanup dimension too.
-                let mut session_updated = session.clone();
-                session_updated.state = ChallengeSessionState::Cleaned;
-                let _ = repositories
-                    .challenge_sessions
-                    .update(stored.revision, session_updated)
-                    .await;
+                // Sessions record the cleanup dimension through the state
+                // machine (Valid -> CleanupPending -> Cleaned); direct
+                // writes would skip the legal transition path.
+                let session_cleaned = session
+                    .clone()
+                    .transition(ChallengeSessionState::CleanupPending)
+                    .and_then(|pending| pending.transition(ChallengeSessionState::Cleaned));
+                match session_cleaned {
+                    Ok(cleaned_session) => {
+                        let _ = repositories
+                            .challenge_sessions
+                            .update(stored.revision, cleaned_session)
+                            .await;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            error = %err,
+                            "challenge session could not transition to cleaned"
+                        );
+                    }
+                }
                 cleaned += 1;
             }
             Err(err) => {

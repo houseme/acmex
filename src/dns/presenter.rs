@@ -98,19 +98,24 @@ impl ChallengePresenter for Dns01Presenter {
     }
 
     fn supported_kinds(&self) -> Vec<ChallengeType> {
-        // Same TXT record name, same observation and cleanup paths — only
-        // the value formula differs per kind.
-        vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        // Same observation and cleanup paths for the whole DNS TXT family —
+        // only the record name and value formula differ per kind.
+        vec![
+            ChallengeType::Dns01,
+            ChallengeType::DnsAccount01,
+            ChallengeType::DnsPersist01,
+        ]
     }
 
     async fn prepare(&self, request: PrepareChallenge) -> Result<ChallengeLease> {
         let challenge_type = request.session.challenge_type;
         if !matches!(
             challenge_type,
-            ChallengeType::Dns01 | ChallengeType::DnsAccount01
+            ChallengeType::Dns01 | ChallengeType::DnsAccount01 | ChallengeType::DnsPersist01
         ) {
             return Err(crate::error::AcmeError::InvalidInput(format!(
-                "the DNS presenter only prepares dns-01/dns-account-01, not `{challenge_type}`"
+                "the DNS presenter only prepares dns-01/dns-account-01/dns-persist-01, \
+                 not `{challenge_type}`"
             )));
         }
 
@@ -134,19 +139,40 @@ impl ChallengePresenter for Dns01Presenter {
 
         // dns-01: TXT at _acme-challenge.<domain> carrying
         // base64url(SHA256(token.thumbprint)). dns-account-01: same TXT
-        // value, but the record name is derived from the account URL so
-        // authorizations survive account key rollover.
-        let value = match challenge_type {
-            ChallengeType::DnsAccount01 => {
-                dns_account01_validation_value(&request.key_authorization)
+        // value, but the record name is derived from the account URL.
+        // dns-persist-01: a persistent _validation-persist.<domain> record
+        // binding the CA identity and the account URI (never cleaned by
+        // AcmeX — removal is a zone-owner operation).
+        let (record_name, value) = match challenge_type {
+            ChallengeType::DnsAccount01 => (
+                dns_account01_record_name(&request.account_url, identifier.base_name()),
+                dns_account01_validation_value(&request.key_authorization),
+            ),
+            ChallengeType::DnsPersist01 => {
+                if request.issuer_domain_names.is_empty() {
+                    return Err(crate::error::AcmeError::InvalidInput(
+                        "dns-persist-01 challenge carries no issuer-domain-names".to_string(),
+                    ));
+                }
+                let issuer = request.issuer_domain_names[0].clone();
+                let Some(accounturi) = request.accounturi.as_deref() else {
+                    return Err(crate::error::AcmeError::InvalidInput(
+                        "dns-persist-01 challenge carries no accounturi".to_string(),
+                    ));
+                };
+                let mut value = format!("{issuer};accounturi={accounturi};");
+                if identifier.is_wildcard() {
+                    value.push_str("policy=wildcard");
+                }
+                (
+                    format!("_validation-persist.{}", identifier.base_name()),
+                    value,
+                )
             }
-            _ => dns01_validation_value(&request.key_authorization),
-        };
-        let record_name = match challenge_type {
-            ChallengeType::DnsAccount01 => {
-                dns_account01_record_name(&request.account_url, identifier.base_name())
-            }
-            _ => record_name.clone(),
+            _ => (
+                record_name.clone(),
+                dns01_validation_value(&request.key_authorization),
+            ),
         };
 
         let locator = provider

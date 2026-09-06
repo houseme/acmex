@@ -342,6 +342,7 @@ fn verify_ecdsa_signature(
     public_key: &[u8],
     signature_der: &[u8],
 ) -> Result<bool> {
+    #[cfg(feature = "aws-lc-rs")]
     let mismatch = || {
         AcmeError::certificate(format!(
             "ECDSA signature verification: signature algorithm {signature_oid} does not \
