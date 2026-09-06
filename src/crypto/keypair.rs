@@ -75,11 +75,8 @@ impl KeyType {
     /// Convenient classification used by the JWS/JWK paths: derives the type
     /// or reports an explicit error naming the unclassifiable key.
     pub fn for_key_pair(key: &rcgen::KeyPair) -> Result<Self> {
-        Self::from_key_pair(key).ok_or_else(|| {
-            AcmeError::crypto(
-                "unsupported account key: cannot derive a JWS algorithm from this key type",
-            )
-        })
+        Self::from_key_pair(key)
+            .ok_or_else(|| unsupported_account_key_message(key.algorithm(), key.public_key_raw()))
     }
 
     /// The fixed octet length of one ECDSA coordinate (R or S) for the JWS
@@ -142,6 +139,26 @@ impl std::fmt::Display for KeyType {
             KeyType::Rsa4096 => write!(f, "RSA-4096"),
         }
     }
+}
+
+/// The explicit error for keys [`KeyType::from_key_pair`] cannot classify.
+///
+/// RSA keys report their actual modulus length so an unclassified strength
+/// (e.g. RSA-3072) is immediately diagnosable instead of surfacing a generic
+/// "cannot derive an algorithm" message.
+fn unsupported_account_key_message(
+    algorithm: &rcgen::SignatureAlgorithm,
+    public_key_der: &[u8],
+) -> AcmeError {
+    if *algorithm == PKCS_RSA_SHA256
+        && let Some(bits) = der::rsa_public_key_modulus_octets(public_key_der)
+            .map(|octets| octets.saturating_mul(8))
+    {
+        return AcmeError::crypto(format!(
+            "unsupported account key: RSA key with {bits}-bit modulus; expected 2048 or 4096"
+        ));
+    }
+    AcmeError::crypto("unsupported account key: cannot derive a JWS algorithm from this key type")
 }
 
 /// A representation of a public key in JSON Web Key (JWK) format.
@@ -610,5 +627,44 @@ mod tests {
         assert_eq!(n.len(), 512);
 
         assert_eq!(der::rsa_public_key_modulus_octets(b"not der"), None);
+    }
+
+    /// An RSA account key of an unclassified strength is rejected with its
+    /// actual modulus length, so an RSA-3072 key is diagnosable from the
+    /// error alone (rcgen cannot generate odd RSA sizes, so the RSAPublicKey
+    /// DER for a 3072-bit modulus is handcrafted here with long-form lengths,
+    /// which the `der_integer`/`der_sequence` helpers do not emit).
+    #[test]
+    fn unsupported_rsa_key_error_names_the_modulus_length() {
+        // SEQUENCE { INTEGER (0x00 || 0x8a * 384), INTEGER (65537) }:
+        // content = (4 + 385) + 5 = 394 = 0x018a octets.
+        let mut rsa_public_key = vec![0x30, 0x82, 0x01, 0x8a];
+        rsa_public_key.extend_from_slice(&[0x02, 0x82, 0x01, 0x81, 0x00]);
+        rsa_public_key.extend_from_slice(&[0x8au8; 384]);
+        rsa_public_key.extend_from_slice(&[0x02, 0x03, 0x01, 0x00, 0x01]);
+
+        let err = unsupported_account_key_message(&PKCS_RSA_SHA256, &rsa_public_key);
+        assert!(
+            err.to_string().contains(
+                "unsupported account key: RSA key with 3072-bit modulus; expected 2048 or 4096"
+            ),
+            "error must name the modulus length: {err}"
+        );
+
+        // Non-RSA keys keep the generic message (no RSA modulus to report).
+        let err = unsupported_account_key_message(&PKCS_ED25519, &[0x01, 0x02, 0x03]);
+        assert!(
+            err.to_string()
+                .contains("cannot derive a JWS algorithm from this key type"),
+            "non-RSA fallback message: {err}"
+        );
+
+        // A malformed RSA public key falls back to the generic message too.
+        let err = unsupported_account_key_message(&PKCS_RSA_SHA256, b"not der");
+        assert!(
+            err.to_string()
+                .contains("cannot derive a JWS algorithm from this key type"),
+            "malformed RSA fallback message: {err}"
+        );
     }
 }

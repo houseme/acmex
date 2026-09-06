@@ -515,17 +515,24 @@ fn complete_csr_payload(artifact: crate::key::CsrArtifact) -> StepResult {
 /// it: provider `external`, an id derived from the CSR's SubjectPublicKeyInfo
 /// fingerprint (stable across retries and across renewals that reuse the
 /// same key material) and `exportable: false` — no secret-store entry exists
-/// behind it and none may ever be created. `algorithm` carries the intent's
-/// declared policy value; under external-CSR mode it is informational (the
-/// CSR itself determines the real key).
+/// behind it and none may ever be created. `algorithm` is derived from the
+/// CSR's actual SubjectPublicKeyInfo so the persisted metadata describes the
+/// real key; the intent's declared policy value is only a fallback for
+/// keys [`crate::key::csr_key_algorithm`] cannot classify (the subsequent
+/// `create_csr` validation rejects those with the exact reason).
 fn external_key_ref(intent: &CertificateIntent, external: &ExternalCsr) -> Result<domain::KeyRef> {
     use sha2::{Digest, Sha256};
-    let spki = csr_spki_der(&external.csr_der)?;
+    use x509_parser::asn1_rs::FromDer;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(&external.csr_der)
+            .map_err(|e| AcmeError::certificate(format!("parse CSR: {e}")))?;
+    let spki = csr.certification_request_info.subject_pki.raw.to_vec();
     let key_id = domain::KeyId::new(format!("ext_csr_{}", hex::encode(Sha256::digest(&spki))))?;
+    let algorithm = crate::key::csr_key_algorithm(&csr).unwrap_or(intent.key_policy.algorithm);
     Ok(domain::KeyRef {
-        provider: "external".to_string(),
+        provider: crate::key::EXTERNAL_CSR_KEY_PROVIDER.to_string(),
         key_id,
-        algorithm: intent.key_policy.algorithm,
+        algorithm,
         exportable: false,
     })
 }
@@ -1466,5 +1473,87 @@ impl StepExecutor for SubmitRevocationStep {
             },
             Err(err) => acme_backend_error(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent_with_algorithm(algorithm: domain::KeyAlgorithm) -> CertificateIntent {
+        CertificateIntent {
+            id: domain::IntentId::generate(),
+            tenant_id: domain::TenantId::default_tenant(),
+            identifiers: domain::IdentifierSet::parse(["example.com"]).unwrap(),
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: domain::KeyPolicy {
+                algorithm,
+                ..Default::default()
+            },
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            idempotency_key: "external-key-ref-test".to_string(),
+            generation: 1,
+        }
+    }
+
+    fn csr_der_for(key: &rcgen::KeyPair) -> Vec<u8> {
+        let params = rcgen::CertificateParams::new(vec!["example.com".to_string()]).unwrap();
+        params
+            .serialize_request(key)
+            .unwrap()
+            .der()
+            .as_ref()
+            .to_vec()
+    }
+
+    /// The KeyRef's `algorithm` describes the CSR's real key: the declared
+    /// policy value must not leak into metadata when the CSR disagrees.
+    #[test]
+    fn external_key_ref_derives_algorithm_from_the_csr_spki() {
+        let p256 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::Rsa2048),
+            &ExternalCsr {
+                csr_der: csr_der_for(&p256),
+            },
+        )
+        .unwrap();
+        assert_eq!(key_ref.provider, "external");
+        assert!(!key_ref.exportable);
+        assert!(key_ref.key_id.as_str().starts_with("ext_csr_"));
+        assert_eq!(
+            key_ref.algorithm,
+            domain::KeyAlgorithm::EcP256,
+            "algorithm must be derived from the CSR, not the policy declaration"
+        );
+
+        let ed25519 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
+            &ExternalCsr {
+                csr_der: csr_der_for(&ed25519),
+            },
+        )
+        .unwrap();
+        assert_eq!(key_ref.algorithm, domain::KeyAlgorithm::Ed25519);
+    }
+
+    /// Keys `csr_key_algorithm` cannot classify (P-521 has no KeyAlgorithm
+    /// variant) fall back to the policy value here; the provider validation
+    /// that runs right after rejects the material with the exact reason, so
+    /// the fallback never persists a wrong label.
+    #[test]
+    fn external_key_ref_falls_back_to_the_policy_for_unclassifiable_keys() {
+        let p521 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P521_SHA512).unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
+            &ExternalCsr {
+                csr_der: csr_der_for(&p521),
+            },
+        )
+        .unwrap();
+        assert_eq!(key_ref.algorithm, domain::KeyAlgorithm::EcP256);
     }
 }

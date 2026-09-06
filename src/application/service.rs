@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::domain::{
     CertificateIntent, CertificateLineage, ChallengeLease, ChallengeLeaseState, ChallengeSet,
@@ -177,16 +179,23 @@ impl RepositoryCertificateApplication {
         Ok(None)
     }
 
-    async fn lineage_for_intent(&self, intent: &CertificateIntent) -> Result<CertificateLineage> {
-        if let Some(stored) = self
+    async fn find_lineage_by_intent(
+        &self,
+        intent_id: &IntentId,
+    ) -> Result<Option<CertificateLineage>> {
+        Ok(self
             .repositories
             .lineages
             .list()
             .await?
             .into_iter()
-            .find(|stored| stored.value.intent_id == intent.id)
-        {
-            return Ok(stored.value);
+            .find(|stored| stored.value.intent_id == *intent_id)
+            .map(|stored| stored.value))
+    }
+
+    async fn lineage_for_intent(&self, intent: &CertificateIntent) -> Result<CertificateLineage> {
+        if let Some(stored) = self.find_lineage_by_intent(&intent.id).await? {
+            return Ok(stored);
         }
 
         let lineage = CertificateLineage::new(
@@ -198,6 +207,100 @@ impl RepositoryCertificateApplication {
         match self.repositories.lineages.create(lineage.clone()).await? {
             CreateOutcome::Created | CreateOutcome::AlreadyExists => Ok(lineage),
         }
+    }
+
+    /// Replay guard for the external-CSR part of the create payload (the
+    /// stored intent cannot reproduce the material itself, so it is verified
+    /// against the CSR durably recorded by the intent's first issue).
+    ///
+    /// * mode exclusivity is enforced exactly like on the create path;
+    /// * a replay carrying material that differs from the recorded CSR is a
+    ///   conflict instead of silently returning the original intent;
+    /// * before any issuance has consumed the material nothing is recorded
+    ///   yet, so a replay cannot be proven different and resolves to the
+    ///   same intent like any other pre-issuance replay.
+    async fn ensure_external_csr_replay(
+        &self,
+        intent: &CertificateIntent,
+        external_csr: Option<&str>,
+    ) -> Result<()> {
+        validate_external_csr_mode(&intent.key_policy, external_csr)?;
+        let Some(pem) = external_csr else {
+            return Ok(());
+        };
+        let replayed = crate::key::ExternalCsr::from_pem(pem)?;
+        let Some(recorded) = self.recorded_external_csr_der(intent).await? else {
+            return Ok(());
+        };
+        if recorded != replayed.csr_der {
+            return Err(AcmeError::conflict(
+                "Idempotency-Key was already used with a different request payload \
+                 (external_csr material differs from the recorded CSR)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The external CSR durably recorded for an intent, if any: the first
+    /// Issue operation of the intent's lineage carries it in its `CreateCsr`
+    /// step payload (initialization PEM until the step first succeeds, then
+    /// base64 DER). `None` before the first issuance pins the material.
+    async fn recorded_external_csr_der(
+        &self,
+        intent: &CertificateIntent,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(lineage) = self.find_lineage_by_intent(&intent.id).await? else {
+            return Ok(None);
+        };
+        for status in [
+            OperationStatus::Queued,
+            OperationStatus::Running,
+            OperationStatus::Waiting,
+            OperationStatus::Succeeded,
+            OperationStatus::Failed,
+            OperationStatus::CancelRequested,
+            OperationStatus::Cancelled,
+            OperationStatus::Compensating,
+            OperationStatus::CompensationFailed,
+        ] {
+            for stored in self
+                .repositories
+                .operations
+                .list_by_status(status, 500)
+                .await?
+            {
+                let operation = stored.value;
+                if operation.kind != OperationKind::Issue
+                    || operation.subject.lineage_id.as_ref() != Some(&lineage.id)
+                {
+                    continue;
+                }
+                let Some(step) = operation
+                    .steps
+                    .iter()
+                    .find(|s| s.kind == crate::domain::WorkflowStepKind::CreateCsr)
+                else {
+                    continue;
+                };
+                let Some(raw) = step.output_ref.as_deref() else {
+                    continue;
+                };
+                let Ok(payload) = serde_json::from_str::<PersistedCsrOutput>(raw) else {
+                    continue;
+                };
+                if let Some(pem) = payload.external_csr_pem
+                    && let Ok(external) = crate::key::ExternalCsr::from_pem(&pem)
+                {
+                    return Ok(Some(external.csr_der));
+                }
+                if let Some(csr_der) = payload.csr_der
+                    && let Ok(der) = BASE64.decode(csr_der.as_bytes())
+                {
+                    return Ok(Some(der));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn resolve_lineage_for_renew(
@@ -300,6 +403,141 @@ impl RepositoryCertificateApplication {
             }
             CreateOutcome::AlreadyExists => Ok(op_ref(&record)),
         }
+    }
+
+    /// Restores the external-CSR initialization payload for a renewal.
+    ///
+    /// External-CSR lineages can never fall back to managed key generation,
+    /// so a renewal is only executable when the CSR material can be
+    /// re-supplied. The original CSR is durable: the issuing operation's
+    /// `CreateCsr` step keeps it in its output payload — as the issue
+    /// request's initialization PEM until the step first succeeds, then as
+    /// the completed CSR payload (base64 DER) — and `PersistVersion` derives
+    /// the version id deterministically from the operation id
+    /// (`ver_<operation id>`), so the active version leads back to it.
+    ///
+    /// When the lineage's active version carries an external key, the CSR is
+    /// recovered from there, re-encoded as a PEM `CERTIFICATE REQUEST` and
+    /// seeded onto the Renew operation exactly like `issue` seeds it.
+    ///
+    /// `None` means "not an external lineage" or "material not recoverable":
+    /// the operation is still created and then fails at `CreateCsr` with the
+    /// stable operator-action-required error instead of silently switching to
+    /// managed keys. Recoverable-history corruption is logged and degrades to
+    /// `None`; repository errors propagate.
+    async fn external_csr_renewal_init(
+        &self,
+        lineage: &CertificateLineage,
+    ) -> Result<Option<String>> {
+        let Some(active) = &lineage.active_version_id else {
+            return Ok(None);
+        };
+        let version = self
+            .repositories
+            .versions
+            .get(active)
+            .await?
+            .map(|stored| stored.value)
+            .ok_or_else(|| {
+                AcmeError::storage(format!(
+                    "lineage `{}` references missing active version `{}`",
+                    lineage.id, active
+                ))
+            })?;
+        if version.key_ref.provider != crate::key::EXTERNAL_CSR_KEY_PROVIDER {
+            return Ok(None);
+        }
+        let Some(stored) = self.issuing_operation_of_version(&version).await? else {
+            tracing::warn!(
+                lineage_id = %lineage.id,
+                version_id = %version.id,
+                "external renewal cannot recover the issuing operation's CSR payload"
+            );
+            return Ok(None);
+        };
+        let Some(step) = stored
+            .steps
+            .iter()
+            .find(|s| s.kind == crate::domain::WorkflowStepKind::CreateCsr)
+        else {
+            tracing::warn!(
+                lineage_id = %lineage.id,
+                operation_id = %stored.id,
+                "issuing operation has no CreateCsr step"
+            );
+            return Ok(None);
+        };
+        let Some(raw) = step.output_ref.as_deref() else {
+            tracing::warn!(
+                lineage_id = %lineage.id,
+                operation_id = %stored.id,
+                "issuing operation's CreateCsr step has no output yet"
+            );
+            return Ok(None);
+        };
+        let payload = match serde_json::from_str::<PersistedCsrOutput>(raw) {
+            Ok(payload) => payload,
+            Err(err) => {
+                tracing::warn!(
+                    lineage_id = %lineage.id,
+                    operation_id = %stored.id,
+                    error = %err,
+                    "issuing operation's CreateCsr payload is unreadable"
+                );
+                return Ok(None);
+            }
+        };
+        let pem = if let Some(pem) = payload.external_csr_pem {
+            pem
+        } else if let Some(csr_der) = payload.csr_der {
+            let csr_der = match BASE64.decode(csr_der.as_bytes()) {
+                Ok(der) => der,
+                Err(err) => {
+                    tracing::warn!(
+                        lineage_id = %lineage.id,
+                        operation_id = %stored.id,
+                        error = %err,
+                        "persisted external CSR DER is not valid base64"
+                    );
+                    return Ok(None);
+                }
+            };
+            // Re-encoded as PEM so the Renew operation consumes exactly the
+            // same initialization payload shape the issue path produces.
+            pem::Pem::new("CERTIFICATE REQUEST", csr_der).to_string()
+        } else {
+            tracing::warn!(
+                lineage_id = %lineage.id,
+                operation_id = %stored.id,
+                "persisted CreateCsr payload carries no CSR material"
+            );
+            return Ok(None);
+        };
+        Ok(Some(
+            serde_json::json!({ "external_csr_pem": pem }).to_string(),
+        ))
+    }
+
+    /// Resolves the Issue operation that produced `version` via the
+    /// deterministic `ver_<operation id>` version id. `None` when the id
+    /// shape, the record or its kind does not match.
+    async fn issuing_operation_of_version(
+        &self,
+        version: &crate::domain::CertificateVersion,
+    ) -> Result<Option<OperationRecord>> {
+        let Some(operation_id) = version.id.as_str().strip_prefix("ver_") else {
+            return Ok(None);
+        };
+        let Ok(operation_id) = OperationId::new(operation_id.to_string()) else {
+            return Ok(None);
+        };
+        let Some(stored) = self.repositories.operations.get(&operation_id).await? else {
+            return Ok(None);
+        };
+        if stored.value.kind != OperationKind::Issue {
+            return Ok(None);
+        }
+        Ok(Some(stored.value))
     }
 
     async fn version_and_lineage(
@@ -411,6 +649,12 @@ impl CertificateApplication for RepositoryCertificateApplication {
 
         if let Some(existing) = self.find_intent_by_idempotency(&idempotency_key).await? {
             if Self::intent_payload_hash(&existing.value)? == request_hash {
+                // Part of the create payload hash that the stored intent
+                // cannot reproduce: the external CSR material itself. Replays
+                // must carry the recorded material once one exists (aligned
+                // with the issue idempotency semantics).
+                self.ensure_external_csr_replay(&existing.value, command.external_csr.as_deref())
+                    .await?;
                 return Ok(existing.into());
             }
             return Err(AcmeError::conflict(
@@ -629,6 +873,16 @@ impl CertificateApplication for RepositoryCertificateApplication {
     async fn renew(&self, command: RenewCertificate) -> Result<OperationRef> {
         let idempotency_key = ensure_idempotency_key(&command.idempotency_key)?;
         let lineage = self.resolve_lineage_for_renew(&command).await?;
+        // External-CSR lineages renew from their recorded material: the
+        // active version's issuing operation still holds the original CSR,
+        // which is recovered and seeded like the issue path does. Without a
+        // recoverable CSR the operation is created anyway and fails at
+        // CreateCsr with the stable operator-action-required error — the
+        // material can only come from the external key holder.
+        let step_init = self
+            .external_csr_renewal_init(&lineage)
+            .await?
+            .map(|payload| (crate::domain::WorkflowStepKind::CreateCsr, payload));
         let request_hash = command_hash(&(
             OperationKind::Renew,
             &lineage.id,
@@ -645,7 +899,7 @@ impl CertificateApplication for RepositoryCertificateApplication {
             },
             idempotency_key,
             request_hash,
-            None,
+            step_init,
         )
         .await
     }
@@ -807,6 +1061,22 @@ fn ensure_tenant(
     } else {
         Err(AcmeError::not_found(format!("{resource} not found")))
     }
+}
+
+/// The persisted `CreateCsr` step output of an issuing operation, in either
+/// of its two shapes (mirrors `workflow::issuance::{ExternalCsrInitPayload,
+/// CsrPayload}`; only the fields the external-renewal restore needs):
+///
+/// * initialization form until the step first succeeds: `external_csr_pem`;
+/// * completed form afterwards: `csr_der` (base64, standard alphabet).
+#[derive(serde::Deserialize)]
+struct PersistedCsrOutput {
+    /// PEM `CERTIFICATE REQUEST` (issue seeding form).
+    #[serde(default)]
+    external_csr_pem: Option<String>,
+    /// Base64 (standard) encoded CSR DER (completed step form).
+    #[serde(default)]
+    csr_der: Option<String>,
 }
 
 /// Validates external-CSR mode exclusivity for one command.
@@ -1198,13 +1468,90 @@ mod tests {
     #[tokio::test]
     async fn external_csr_intent_is_accepted_and_replayed_idempotently() {
         let service = service().await;
-        let intent = service
-            .create_intent(external_csr_command("extcsr-ok", "example.com"))
+        // Identical material on both calls: a true replay of the same
+        // request, not a fresh CSR under the same key.
+        let csr_pem = test_csr_pem("example.com");
+        let mut command = external_csr_command("extcsr-ok", "example.com");
+        command.external_csr = Some(csr_pem.clone());
+        let intent = service.create_intent(command).await.unwrap();
+        let mut replay = external_csr_command("extcsr-ok", "example.com");
+        replay.external_csr = Some(csr_pem);
+        let replay = service.create_intent(replay).await.unwrap();
+        assert_eq!(intent.id, replay.id);
+    }
+
+    /// A create replay with different external-CSR material is a conflict
+    /// once the material is recorded (i.e. once an issue consumed it) —
+    /// the same semantics as a replayed issue with a different CSR.
+    #[tokio::test]
+    async fn create_intent_replay_with_different_external_csr_conflicts() {
+        let service = service().await;
+        let original = test_csr_pem("example.com");
+        let mut command = external_csr_command("extcsr-hash", "example.com");
+        command.external_csr = Some(original.clone());
+        let intent = service.create_intent(command).await.unwrap();
+        // The first issue pins the original material durably.
+        service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id.clone(),
+                external_csr: Some(original),
+                idempotency_key: "issue-extcsr-hash".to_string(),
+            })
             .await
             .unwrap();
-        // Same key + same material replays to the same intent.
+        // external_csr_command generates a fresh CSR (new key material), so
+        // this replay differs from the recorded original.
+        let err = service
+            .create_intent(external_csr_command("extcsr-hash", "example.com"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AcmeError::Conflict(_)),
+            "different CSR must conflict, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("external_csr material differs"),
+            "the conflict must name the CSR mismatch: {err}"
+        );
+    }
+
+    /// A create replay carrying the recorded material stays idempotent.
+    #[tokio::test]
+    async fn create_intent_replay_with_same_external_csr_is_idempotent() {
+        let service = service().await;
+        let csr_pem = test_csr_pem("example.com");
+        let mut command = external_csr_command("extcsr-same", "example.com");
+        command.external_csr = Some(csr_pem.clone());
+        let intent = service.create_intent(command).await.unwrap();
+        service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id.clone(),
+                external_csr: Some(csr_pem.clone()),
+                idempotency_key: "issue-extcsr-same".to_string(),
+            })
+            .await
+            .unwrap();
+        let mut replay = external_csr_command("extcsr-same", "example.com");
+        replay.external_csr = Some(csr_pem);
+        let replay = service.create_intent(replay).await.unwrap();
+        assert_eq!(intent.id, replay.id);
+    }
+
+    /// Before the first issue pins the material nothing is recorded, so a
+    /// replay cannot be proven different and resolves to the same intent —
+    /// the documented pre-issuance window (byte-identical retries must keep
+    /// succeeding).
+    #[tokio::test]
+    async fn create_intent_replay_before_first_issue_cannot_conflict_on_csr() {
+        let service = service().await;
+        let intent = service
+            .create_intent(external_csr_command("extcsr-pre", "example.com"))
+            .await
+            .unwrap();
         let replay = service
-            .create_intent(external_csr_command("extcsr-ok", "example.com"))
+            .create_intent(external_csr_command("extcsr-pre", "example.com"))
             .await
             .unwrap();
         assert_eq!(intent.id, replay.id);
@@ -1289,6 +1636,162 @@ mod tests {
                 .unwrap()
                 .contains("BEGIN CERTIFICATE REQUEST"),
             "the CreateCsr step must carry the external CSR init payload"
+        );
+    }
+
+    fn renew_command(key: &str, lineage_id: Option<LineageId>) -> RenewCertificate {
+        RenewCertificate {
+            context: ActorContext::default(),
+            lineage_id,
+            identifiers: Vec::new(),
+            force: false,
+            idempotency_key: key.to_string(),
+        }
+    }
+
+    /// A renewal of an external-CSR lineage re-seeds the original CSR onto
+    /// the Renew operation's CreateCsr step, recovered from the issuing
+    /// operation's persisted payload — the deterministic dead end where a
+    /// renewal previously failed forever is now executable.
+    #[tokio::test]
+    async fn renew_recovers_external_csr_from_the_issuing_operation() {
+        let service = service().await;
+        let csr_pem = test_csr_pem("example.com");
+        let intent = service
+            .create_intent(external_csr_command("extcsr-renew", "example.com"))
+            .await
+            .unwrap();
+        let issued = service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id.clone(),
+                external_csr: Some(csr_pem.clone()),
+                idempotency_key: "issue-extcsr-renew".to_string(),
+            })
+            .await
+            .unwrap();
+        // Simulate the completed first issuance: the version exists and the
+        // lineage points at it (the engine does this in production).
+        let lineage_stored = service
+            .repositories
+            .lineages
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.value.intent_id == intent.id)
+            .expect("issue creates the lineage");
+        let version_id = VersionId::new(format!("ver_{}", issued.id)).unwrap();
+        let external_key_ref = crate::domain::KeyRef {
+            provider: "external".to_string(),
+            key_id: crate::domain::KeyId::new("key_external_renewed").unwrap(),
+            algorithm: crate::domain::KeyAlgorithm::EcP256,
+            exportable: false,
+        };
+        let version = crate::domain::CertificateVersion {
+            id: version_id.clone(),
+            lineage_id: lineage_stored.value.id.clone(),
+            identifiers: crate::domain::IdentifierSet::parse(["example.com"]).unwrap(),
+            certificate_chain_pem: "-----BEGIN CERTIFICATE-----".to_string(),
+            serial: "01".to_string(),
+            not_before: "2026-01-01T00:00:00Z".to_string(),
+            not_after: "2026-04-01T00:00:00Z".to_string(),
+            issued_by: "test-ca".to_string(),
+            profile: None,
+            key_ref: external_key_ref,
+            replaces: None,
+            superseded_by: None,
+            verification_report: None,
+            state: crate::domain::VersionState::Issued,
+        };
+        service.repositories.versions.create(version).await.unwrap();
+        let mut lineage = lineage_stored.value.clone();
+        lineage.active_version_id = Some(version_id);
+        service
+            .repositories
+            .lineages
+            .update(lineage_stored.revision, lineage)
+            .await
+            .unwrap();
+
+        let op = service
+            .renew(renew_command(
+                "renew-extcsr-renew",
+                Some(lineage_stored.value.id),
+            ))
+            .await
+            .unwrap();
+        let record = service
+            .repositories
+            .operations
+            .get(&op.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let step = record
+            .value
+            .steps
+            .iter()
+            .find(|s| s.kind == crate::domain::WorkflowStepKind::CreateCsr)
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(step.output_ref.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            payload["external_csr_pem"].as_str().unwrap(),
+            csr_pem,
+            "the Renew operation must carry the recovered external CSR"
+        );
+    }
+
+    /// Managed lineages keep the renewal behavior unchanged: no CSR
+    /// initialization payload is seeded (the CreateCsr step generates or
+    /// reuses managed keys).
+    #[tokio::test]
+    async fn renew_of_managed_lineage_seeds_no_csr_payload() {
+        let service = service().await;
+        let intent = service
+            .create_intent(create_command("managed-renew", vec!["example.com"]))
+            .await
+            .unwrap();
+        service
+            .issue(IssueCertificate {
+                context: ActorContext::default(),
+                intent_id: intent.id.clone(),
+                external_csr: None,
+                idempotency_key: "issue-managed-renew".to_string(),
+            })
+            .await
+            .unwrap();
+        let lineage_id = service
+            .repositories
+            .lineages
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.value.intent_id == intent.id)
+            .map(|stored| stored.value.id)
+            .expect("issue creates the lineage");
+        let op = service
+            .renew(renew_command("renew-managed", Some(lineage_id)))
+            .await
+            .unwrap();
+        let record = service
+            .repositories
+            .operations
+            .get(&op.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let step = record
+            .value
+            .steps
+            .iter()
+            .find(|s| s.kind == crate::domain::WorkflowStepKind::CreateCsr)
+            .unwrap();
+        assert!(
+            step.output_ref.is_none(),
+            "managed renewals must not carry external CSR material"
         );
     }
 

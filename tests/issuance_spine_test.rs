@@ -1852,3 +1852,330 @@ fn external_csr_intent(key: &str, external_csr: &str) -> CreateCertificateIntent
         idempotency_key: key.to_string(),
     }
 }
+
+/// A second full CA conversation under a distinct order URL (`order/2`),
+/// consumed by the renewal of the external-CSR lineage.
+fn script_second_conversation(fixture: &SpineFixture, chain_pem: &str) {
+    let order = |status: &str, certificate: Option<&str>| {
+        let mut body = serde_json::json!({
+            "status": status,
+            "expires": "2026-01-08T00:00:00Z",
+            "identifiers": [{"type": "dns", "value": "example.com"}],
+            "authorizations": ["https://acme.example/authz/b"],
+            "finalize": "https://acme.example/finalize/2"
+        });
+        if let Some(url) = certificate {
+            body["certificate"] = serde_json::json!(url);
+        }
+        body
+    };
+    let authz = |status: &str| {
+        serde_json::json!({
+            "identifier": {"type": "dns", "value": "example.com"},
+            "status": status,
+            "expires": "2026-01-08T00:00:00Z",
+            "challenges": [{
+                "type": "dns-01",
+                "url": "https://acme.example/authz/b/challenge",
+                "token": "token-b",
+                "status": status
+            }]
+        })
+    };
+    fixture.transport.push(
+        ScriptedResponse::json("new-order", 201, serde_json::json!({"status": "pending"}))
+            .with_headers(
+                Some("n".to_string()),
+                None,
+                Some("https://acme.example/order/2".to_string()),
+            ),
+    );
+    fixture
+        .transport
+        .push(ScriptedResponse::json("order/2", 200, order("pending", None)).uses(2));
+    fixture
+        .transport
+        .push(ScriptedResponse::json("authz/b", 200, authz("pending")).uses(2));
+    fixture
+        .transport
+        .push(ScriptedResponse::json("authz/b", 200, authz("valid")).uses(100));
+    fixture
+        .transport
+        .push(ScriptedResponse::json("finalize/2", 200, serde_json::json!({})).uses(5));
+    fixture
+        .transport
+        .push(ScriptedResponse::json("order/2", 200, order("processing", None)).uses(2));
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "order/2",
+            200,
+            order("valid", Some("https://acme.example/cert/2")),
+        )
+        .uses(100),
+    );
+    fixture
+        .transport
+        .push(raw_response("cert/2", 200, chain_pem.to_string()));
+}
+
+/// Renewing an external-CSR lineage recovers the original CSR from the
+/// issuing operation's persisted CreateCsr payload and renews end to end:
+/// the version is replaced, the external key reference stays stable (same
+/// CSR → same SubjectPublicKeyInfo fingerprint) and no private key ever
+/// reaches the secret store.
+#[tokio::test]
+async fn external_csr_renewal_restores_csr_and_succeeds() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
+
+    // First issuance with externally held key material.
+    let (external_key, csr_pem) = external_key_and_csr("example.com");
+    fixture.serve_certificate(&chain_for_key("example.com", &external_key, &ca));
+    let (service, _) = ApplicationServiceBuilder::new()
+        .with_repositories(fixture.repositories.clone())
+        .build()
+        .unwrap();
+    let intent = service
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: vec!["example.com".to_string()],
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: acmex::domain::KeyPolicy {
+                mode: KeyManagementMode::ExternalCsr,
+                ..Default::default()
+            },
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            external_csr: Some(csr_pem.clone()),
+            idempotency_key: "extcsr-renew-intent".to_string(),
+        })
+        .await
+        .unwrap();
+    let issued = service
+        .issue(IssueCertificate {
+            context: ActorContext::default(),
+            intent_id: intent.id.clone(),
+            external_csr: Some(csr_pem),
+            idempotency_key: "extcsr-renew-issue".to_string(),
+        })
+        .await
+        .unwrap();
+    let issued_record = fixture.drive_to_terminal(&issued.id).await;
+    assert_eq!(
+        issued_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "issuance error: {:?}",
+        issued_record.error
+    );
+    let issued_version_id = VersionId::new(format!("ver_{}", issued.id)).unwrap();
+
+    // Renewal through the application service: the CSR is recovered from
+    // the issuing operation, not supplied again.
+    script_second_conversation(&fixture, &chain_for_key("example.com", &external_key, &ca));
+    let lineage_id = fixture
+        .repositories
+        .lineages
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|stored| stored.value.intent_id == intent.id)
+        .map(|stored| stored.value.id)
+        .expect("issue created the lineage");
+    let renewed = service
+        .renew(acmex::application::RenewCertificate {
+            context: ActorContext::default(),
+            lineage_id: Some(lineage_id.clone()),
+            identifiers: Vec::new(),
+            force: false,
+            idempotency_key: "extcsr-renew-op".to_string(),
+        })
+        .await
+        .unwrap();
+    let renewed_record = fixture.drive_to_terminal(&renewed.id).await;
+    assert_eq!(
+        renewed_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "renewal error: {:?}",
+        renewed_record.error
+    );
+
+    let renewed_version_id = VersionId::new(format!("ver_{}", renewed.id)).unwrap();
+    let renewed_version = fixture
+        .repositories
+        .versions
+        .get(&renewed_version_id)
+        .await
+        .unwrap()
+        .expect("renewed version persisted");
+    let issued_version = fixture
+        .repositories
+        .versions
+        .get(&issued_version_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        renewed_version.value.key_ref.provider, "external",
+        "the renewal stays in external-CSR mode"
+    );
+    assert_eq!(
+        renewed_version.value.key_ref.key_id, issued_version.value.key_ref.key_id,
+        "same CSR → same key fingerprint"
+    );
+    assert_eq!(
+        renewed_version.value.replaces.as_ref(),
+        Some(&issued_version_id),
+        "the renewal replaces the first version"
+    );
+    assert_eq!(issued_version.value.state, VersionState::Superseded);
+    assert_eq!(
+        issued_version.value.superseded_by.as_ref(),
+        Some(&renewed_version_id)
+    );
+    let lineage = fixture
+        .repositories
+        .lineages
+        .get(&lineage_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lineage.value.active_version_id, Some(renewed_version_id));
+
+    assert_eq!(
+        count_secret_entries(&fixture.key_store_dir),
+        0,
+        "external CSR renewal must not persist private key material"
+    );
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// A renewal of an external-CSR lineage whose CSR material cannot be
+/// recovered (here: an active version with no issuing operation behind it)
+/// still reaches a terminal, clearly classified failure — never managed key
+/// generation and never a silent dead end.
+#[tokio::test]
+async fn external_csr_renewal_without_recoverable_csr_fails_as_operator_action() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let fixture = build_fixture(&identifiers, Vec::new(), None, None, directory()).await;
+    let (service, _) = ApplicationServiceBuilder::new()
+        .with_repositories(fixture.repositories.clone())
+        .build()
+        .unwrap();
+    let (_foreign_key, csr_pem) = external_key_and_csr("example.com");
+    let intent = service
+        .create_intent(CreateCertificateIntent {
+            context: ActorContext::default(),
+            identifiers: vec!["example.com".to_string()],
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: acmex::domain::KeyPolicy {
+                mode: KeyManagementMode::ExternalCsr,
+                ..Default::default()
+            },
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            external_csr: Some(csr_pem),
+            idempotency_key: "extcsr-ghost-intent".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // External lineage with an active version but no recoverable issuing
+    // operation (the `ver_op_ghost` id does not resolve to a record).
+    let mut lineage = CertificateLineage::new(
+        LineageId::new("lin_ext_ghost").unwrap(),
+        acmex::domain::TenantId::default_tenant(),
+        intent.id.clone(),
+        identifiers.clone(),
+    );
+    let version = CertificateVersion {
+        id: VersionId::new("ver_op_ghost").unwrap(),
+        lineage_id: lineage.id.clone(),
+        identifiers: identifiers.clone(),
+        certificate_chain_pem: "-----BEGIN CERTIFICATE-----".to_string(),
+        serial: "01".to_string(),
+        not_before: "2025-01-01T00:00:00Z".to_string(),
+        not_after: "2027-01-01T00:00:00Z".to_string(),
+        issued_by: "test-ca".to_string(),
+        profile: None,
+        key_ref: KeyRef {
+            provider: "external".to_string(),
+            key_id: KeyId::new("key_ghost").unwrap(),
+            algorithm: KeyAlgorithm::EcP256,
+            exportable: false,
+        },
+        replaces: None,
+        superseded_by: None,
+        verification_report: None,
+        state: VersionState::Issued,
+    };
+    lineage.active_version_id = Some(version.id.clone());
+    fixture.repositories.versions.create(version).await.unwrap();
+    fixture.repositories.lineages.create(lineage).await.unwrap();
+
+    let renewed = service
+        .renew(acmex::application::RenewCertificate {
+            context: ActorContext::default(),
+            lineage_id: Some(LineageId::new("lin_ext_ghost").unwrap()),
+            identifiers: Vec::new(),
+            force: false,
+            idempotency_key: "extcsr-ghost-renew".to_string(),
+        })
+        .await
+        .unwrap();
+    let record = fixture.drive_to_terminal(&renewed.id).await;
+    assert_eq!(
+        record.status,
+        acmex::domain::OperationStatus::Failed,
+        "expected the renewal to fail, got: {:?}",
+        record.error
+    );
+    let error = record.error.expect("failure carries an error");
+    assert_eq!(
+        error.class,
+        acmex::domain::ErrorClass::OperatorActionRequired,
+        "only the external key holder can supply the material"
+    );
+    assert!(
+        error
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("external CSR material missing"),
+        "error should name the missing material: {:?}",
+        error.detail
+    );
+
+    assert!(
+        fixture
+            .repositories
+            .versions
+            .get(&VersionId::new(format!("ver_{}", renewed.id)).unwrap())
+            .await
+            .unwrap()
+            .is_none(),
+        "the failed renewal must not produce a version"
+    );
+    assert_eq!(
+        count_secret_entries(&fixture.key_store_dir),
+        0,
+        "the failed renewal must not fall back to managed key generation"
+    );
+
+    cleanup_dir(&fixture.key_store_dir);
+}
