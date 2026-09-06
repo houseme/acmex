@@ -232,6 +232,8 @@ async fn dns01_presenter_end_to_end_with_fakes() {
             session,
             key_authorization: "token.abc".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -328,6 +330,8 @@ async fn dns_account01_presenter_end_to_end_with_fakes() {
             session,
             key_authorization: "token-x.thumbprint-part".to_string(),
             account_url: "https://acme.example/acct/1".to_string(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -426,6 +430,8 @@ async fn presenter_routes_delegated_zone_to_owner() {
             session,
             key_authorization: "v".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -500,6 +506,8 @@ async fn partial_propagation_fails_quorum_then_succeeds() {
             session,
             key_authorization: "v".to_string(),
             account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();

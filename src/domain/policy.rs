@@ -1103,8 +1103,10 @@ mod tests {
         assert!(!without_flag.prepare_all_supported);
 
         // Explicitly set → survives a round trip.
-        let mut with_flag = ValidationPolicy::default();
-        with_flag.prepare_all_supported = true;
+        let with_flag = ValidationPolicy {
+            prepare_all_supported: true,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&with_flag).unwrap();
         assert!(json.contains("prepare_all_supported"), "{json}");
         let back: ValidationPolicy = serde_json::from_str(&json).unwrap();
