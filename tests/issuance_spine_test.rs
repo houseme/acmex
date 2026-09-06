@@ -687,7 +687,7 @@ async fn build_challenge_mode_fixture(
         },
         acmex::server::worker::WorkflowWorkerComponents {
             backend,
-            account_jwk,
+            account_jwk: account_jwk.clone(),
             presenters,
             key_provider,
             orchestrator,
@@ -702,6 +702,7 @@ async fn build_challenge_mode_fixture(
         key_store_dir,
         transport: ca.transport,
         backend: acme_backend,
+        account_jwk,
     }
 }
 

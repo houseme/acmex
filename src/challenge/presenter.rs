@@ -118,10 +118,6 @@ pub fn dns_persist01_record_name(domain: &str) -> String {
 /// Both parts are base64url without padding, so the first `.` separates
 /// them; presenters that do not depend on the thumbprint (dns-account-01)
 /// recover the token exactly like the legacy HTTP-01 solver adapter does.
-pub(crate) fn token_from_key_authorization(key_authorization: &str) -> &str {
-    key_authorization.split('.').next().unwrap_or_default()
-}
-
 /// Input to `prepare`.
 pub struct PrepareChallenge {
     /// The session being prepared.
