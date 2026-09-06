@@ -109,17 +109,16 @@ fn decode_jws_post(
         "expected exactly one POST to {url_fragment}"
     );
     let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3);
+    let (protected, payload_b64, _signature_b64) = jws_segments(&jws);
     let header = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[0])
+            .decode(protected)
             .unwrap(),
     )
     .unwrap();
     let payload = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[1])
+            .decode(payload_b64)
             .unwrap(),
     )
     .unwrap();
@@ -255,15 +254,14 @@ async fn order_request_serializes_profile_and_replaces() {
         .filter(|r| r.url.contains("new-order") && r.method == AcmeMethod::Post)
         .collect();
     assert_eq!(posts.len(), 1);
-    // The newOrder POST body is a JWS; the payload (middle segment) carries
-    // the profile, replaces and identifiers claims.
+    // The newOrder POST body is a JWS; the payload carries the profile,
+    // replaces and identifiers claims.
     let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3);
+    let (_protected, payload_b64, _signature_b64) = jws_segments(&jws);
     use base64::Engine;
     let payload: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[1])
+            .decode(payload_b64)
             .unwrap(),
     )
     .unwrap();
@@ -317,14 +315,13 @@ async fn post_as_get_uses_canonical_empty_payload() {
         .collect();
     assert_eq!(posts.len(), 1);
     let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3);
-    assert_eq!(segments[1], "", "POST-as-GET payload must be empty");
+    let (protected, payload_b64, _signature) = jws_segments(&jws);
+    assert_eq!(payload_b64, "", "POST-as-GET payload must be empty");
     // Protected header carries the account kid and target url.
     use base64::Engine;
     let header: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[0])
+            .decode(&protected)
             .unwrap(),
     )
     .unwrap();
@@ -637,7 +634,8 @@ async fn concurrent_requests_never_share_a_nonce() {
             continue;
         }
         let body = String::from_utf8(request.body.clone().unwrap()).unwrap();
-        let header = body.split('.').next().unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let header = envelope["protected"].as_str().unwrap();
         let decoded: serde_json::Value = serde_json::from_slice(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(header)
@@ -825,15 +823,25 @@ fn jws_posts_to(transport: &FakeAcmeTransport, url_fragment: &str) -> Vec<String
         .collect()
 }
 
-/// Splits a compact JWS into (protected header, payload, signature b64).
+/// Splits a flattened JSON JWS into (protected header, payload, signature b64).
+fn jws_segments(jws: &str) -> (String, String, String) {
+    let object: serde_json::Value =
+        serde_json::from_str(jws).expect("JWS body is the flattened JSON envelope");
+    (
+        object["protected"].as_str().unwrap().to_string(),
+        object["payload"].as_str().unwrap().to_string(),
+        object["signature"].as_str().unwrap().to_string(),
+    )
+}
+
+/// Splits a flattened JSON JWS into (protected header, payload, signature b64).
 fn decode_jws(jws: &str) -> (serde_json::Value, serde_json::Value, String) {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3, "compact JWS has three segments");
-    let header = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[0]).unwrap()).unwrap();
-    let payload = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[1]).unwrap()).unwrap();
-    (header, payload, segments[2].to_string())
+    let (protected, payload, signature) = jws_segments(jws);
+    let header = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected).unwrap()).unwrap();
+    let payload = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    (header, payload, signature)
 }
 
 /// Re-signs a captured JWS with `key` and returns the compact serialization.
@@ -897,15 +905,27 @@ async fn es256_account_registration_carries_ec_jwk_and_raw_signature() {
     let handle = backend.ensure_account(&account_ref()).await.unwrap();
     assert_eq!(handle.account_url, "https://acme.example/acct/91");
 
-    let (jws, header, payload) = {
+    let (_jws, header, payload, signature_b64) = {
         let requests = transport.requests();
         let post = requests
             .iter()
             .find(|r| r.url.contains("new-account") && r.method == AcmeMethod::Post)
             .expect("newAccount POST");
         let jws = String::from_utf8(post.body.clone().unwrap()).unwrap();
-        let (header, payload, _) = decode_jws(&jws);
-        (jws, header, payload)
+        let (protected, payload_b64, signature_b64) = jws_segments(&jws);
+        let header: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(protected)
+                .unwrap(),
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        (jws, header, payload, signature_b64)
     };
 
     assert_eq!(header["alg"], "ES256");
@@ -927,8 +947,7 @@ async fn es256_account_registration_carries_ec_jwk_and_raw_signature() {
     assert!(payload.get("onlyReturnExisting").is_none());
 
     // Raw R||S: exactly 64 octets (never the DER ~70-72 octet encoding).
-    let signature_segment = jws.split('.').nth(2).unwrap();
-    let signature = URL_SAFE_NO_PAD.decode(signature_segment).unwrap();
+    let signature = URL_SAFE_NO_PAD.decode(signature_b64).unwrap();
     assert_eq!(signature.len(), 64, "ES256 JWS signatures are raw R||S");
 }
 
@@ -1048,18 +1067,17 @@ async fn es256_to_ed25519_key_rollover_derives_each_alg_from_its_own_key() {
 
     let old_jwk = Jwk::for_key_pair(&old_key.0).unwrap();
     let new_jwk = Jwk::for_key_pair(&new_key.0).unwrap();
-    let inner = format!(
-        "{}.{}.{}",
-        outer_payload["protected"].as_str().unwrap(),
-        outer_payload["payload"].as_str().unwrap(),
-        outer_payload["signature"].as_str().unwrap()
-    );
-    let (inner_header, inner_payload, _) = decode_jws(&inner);
+    // RFC 8555 §7.3.5: the outer payload is a JSON string containing the
+    // inner flattened JWS.
+    let inner = outer_payload
+        .as_str()
+        .expect("inner JWS carried as a JSON string");
+    let (inner_header, inner_payload, _) = decode_jws(inner);
     assert_eq!(inner_header["alg"], "EdDSA");
     assert_eq!(inner_header["jwk"], new_jwk.to_value());
     assert_eq!(inner_payload["oldKey"], old_jwk.to_value());
     // The inner signature is the deterministic new key's (and only its).
-    assert_eq!(resign_jws(&inner, &new_key), inner);
+    assert_eq!(resign_jws(inner, &new_key), inner);
 
     // Post-rollover requests sign with the new Ed25519 key.
     backend
@@ -1165,13 +1183,12 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
     let old_jwk_value =
         Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes())).to_value();
-    let inner = format!(
-        "{}.{}.{}",
-        outer_payload["protected"].as_str().unwrap(),
-        outer_payload["payload"].as_str().unwrap(),
-        outer_payload["signature"].as_str().unwrap()
-    );
-    let (inner_header, inner_payload, _) = decode_jws(&inner);
+    // RFC 8555 §7.3.5: the outer payload is a JSON string containing the
+    // inner flattened JWS.
+    let inner = outer_payload
+        .as_str()
+        .expect("inner JWS carried as a JSON string");
+    let (inner_header, inner_payload, _) = decode_jws(inner);
     assert_eq!(inner_header["alg"], "EdDSA");
     assert_eq!(inner_header["jwk"], new_jwk.to_value());
     assert_eq!(inner_header["url"], "https://acme.example/key-change");
@@ -1181,8 +1198,8 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     assert_eq!(inner_payload["account"], "https://acme.example/acct/77");
     assert_eq!(inner_payload["oldKey"], old_jwk_value);
     // The inner signature verifies against the NEW key (and only it).
-    assert_eq!(resign_jws(&inner, &new_key), inner);
-    assert_ne!(resign_jws(&inner, &old_key), inner);
+    assert_eq!(resign_jws(inner, &new_key), inner);
+    assert_ne!(resign_jws(inner, &old_key), inner);
 
     // (c) A follow-up request is signed by the NEW key. The JWS header keeps
     // the unchanged account kid, so prove the signer via deterministic

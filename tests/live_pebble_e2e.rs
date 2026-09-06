@@ -204,7 +204,6 @@ impl ChalltestsrvAdmin {
         }
         Ok(())
     }
-
 }
 
 #[derive(Clone)]
@@ -845,8 +844,7 @@ async fn run_pebble_issue(
         // The record's staged_ref is the serialized StagedDeployment (it
         // also carries the rollback retry baseline); the sink-local staged
         // reference inside it is the version directory.
-        let staged: acmex::delivery::StagedDeployment =
-            serde_json::from_str(&staged_ref).unwrap();
+        let staged: acmex::delivery::StagedDeployment = serde_json::from_str(&staged_ref).unwrap();
         let metadata = std::path::Path::new(&staged.staged_ref).join("metadata.json");
         let mut payload: serde_json::Value =
             serde_json::from_slice(&tokio::fs::read(&metadata).await.unwrap()).unwrap();

@@ -1046,9 +1046,7 @@ impl StepExecutor for AcknowledgeChallengesStep {
                         )
                         .await
                         .ok()
-                        .is_some_and(|authz| {
-                            authz.authorization.status == "valid"
-                        });
+                        .is_some_and(|authz| authz.authorization.status == "valid");
                     if already_valid {
                         let acknowledged = session
                             .transition(ChallengeSessionState::Acknowledged)
