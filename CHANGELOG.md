@@ -82,6 +82,17 @@ must call out any unverified external evidence.
 
 ### Fixed
 
+- **JWS bodies now use the RFC 8555 §6.2 flattened JSON serialization.** The
+  signer previously emitted the compact `a.b.c` serialization as the POST
+  body, which real ACME servers reject — this is the fix that makes ACME
+  issuance against a live CA possible end to end (proven by the now-green
+  Pebble L4 gate).
+- Certificate chain verification supports ECDSA (P-256/384/521) signatures
+  via aws-lc-rs or ring, in addition to RSA; Pebble and Let's Encrypt issue
+  ECDSA chains by default.
+- Challenge acknowledgement tolerates challenges the CA already validated
+  (proactive validation), and unknown challenge types advertised by a CA no
+  longer break authorization parsing.
 - Issuance spine test fixtures now include the optional verification report
   field introduced by the v0.10 certificate verification model.
 - Deployment rollback failures now retry with backoff before becoming

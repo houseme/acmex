@@ -3,11 +3,15 @@
 These limitations are intentionally explicit so T12 cannot turn unrun external
 tests into implied success.
 
-- Pebble: a real gated harness now exists (`tests/live_pebble_e2e.rs` +
+- Pebble: the gated harness (`tests/live_pebble_e2e.rs` +
   `scripts/docker-compose.pebble.yml`, driven by `scripts/run_pebble_e2e.sh`)
-  but has NOT been executed in a prepared environment yet. Pebble validation
-  remains not-yet-passed until the HTTP-01, DNS-01, TLS-ALPN-01, renewal,
-  revocation, restart and failure-rollback evidence is produced by a green run.
+  executed green on 2026-09-06: HTTP-01, DNS-01, TLS-ALPN-01, renewal,
+  revocation, real-executor restart and failure-rollback scenarios all passed
+  against a real Pebble CA (artifact `target/pebble-e2e/20260906T052941Z`).
+  The harness pins the VA to always-valid for the test domain because recent
+  Pebble validates every offered challenge, including draft types AcmeX does
+  not implement; DNS-01 evidence additionally includes a live VA run without
+  that override.
 - Let's Encrypt staging is not yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.
