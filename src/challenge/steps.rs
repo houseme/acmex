@@ -307,18 +307,12 @@ impl StepExecutor for EnsureAccountStep {
                 // leaves the pinned thumbprint stale — the CA, holding the
                 // new public key, would reject every challenge value
                 // derived from it.
-                let account_jwk = match self.deps.backend.current_account_jwk().await {
-                    Ok(jwk) => {
-                        if jwk != self.deps.account_jwk.get() {
-                            tracing::info!(
-                                ca = %self.deps.backend.ca_id(),
-                                "account key changed out of band; refreshing the \
-                                 key-authorization JWK"
-                            );
-                            self.deps.account_jwk.set(jwk.clone());
-                        }
-                        Some(jwk)
-                    }
+                // Converge the handle to the backend's current key. A
+                // concurrent rollover between our read and the handle set
+                // could push a stale JWK, so after setting we re-read the
+                // backend once and converge again if it moved.
+                let mut account_jwk = match self.deps.backend.current_account_jwk().await {
+                    Ok(jwk) => Some(jwk),
                     Err(err) => {
                         tracing::debug!(
                             ca = %self.deps.backend.ca_id(),
@@ -328,6 +322,25 @@ impl StepExecutor for EnsureAccountStep {
                         None
                     }
                 };
+                if let Some(jwk) = &account_jwk
+                    && jwk != &self.deps.account_jwk.get()
+                {
+                    tracing::info!(
+                        ca = %self.deps.backend.ca_id(),
+                        "account key changed out of band; refreshing the \
+                         key-authorization JWK"
+                    );
+                    self.deps.account_jwk.set(jwk.clone());
+                    // Re-read: if the backend moved again, converge to the
+                    // freshest value rather than trusting the first read.
+                    if let Ok(fresh) = self.deps.backend.current_account_jwk().await {
+                        let moved = fresh != *jwk;
+                        account_jwk = Some(fresh.clone());
+                        if moved {
+                            self.deps.account_jwk.set(fresh);
+                        }
+                    }
+                }
                 let payload = serde_json::to_string(&AccountPayload {
                     account: handle,
                     account_jwk,

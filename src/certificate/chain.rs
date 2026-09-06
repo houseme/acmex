@@ -304,8 +304,14 @@ fn verify_cert_signature(cert_der: &[u8], issuer_der: Option<&[u8]>) -> Result<b
     // certificates (what Let's Encrypt and Pebble issue by default) verify
     // through the crypto backend below.
     let signature_oid = cert.signature_algorithm.algorithm.to_id_string();
-    // probe removed
     if signature_oid.starts_with("1.2.840.10045.4.3.") {
+        // RFC 5280: the signature BIT STRING must have zero unused bits;
+        // anything else is a malformed encoding.
+        if cert.signature_value.unused_bits != 0 {
+            return Err(AcmeError::certificate(
+                "signature BIT STRING has unused bits",
+            ));
+        }
         let issuer_public_key = issuer_cert
             .as_ref()
             .map(|issuer| issuer.public_key().subject_public_key.data.as_ref())
