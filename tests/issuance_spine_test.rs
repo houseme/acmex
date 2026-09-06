@@ -35,8 +35,6 @@ use acmex::protocol::Jwk;
 use acmex::repository::{Clock, FakeClock, FileSecretStore, MemoryRepository, RepositorySet};
 use acmex::server::worker::{WorkflowWorkerSettings, register_executors};
 use acmex::workflow::WorkflowEngine;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 fn now() -> Timestamp {
