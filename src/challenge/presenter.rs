@@ -53,7 +53,6 @@ pub fn dns_account01_validation_value(key_authorization: &str) -> String {
 /// `_acme-challenge_` + base32(SHA-256(account URL))[..10] + "." + domain
 /// (RFC 4648 base32, lowercase, no padding).
 pub fn dns_account01_record_name(account_url: &str, domain: &str) -> String {
-    use base64::Engine;
     use sha2::{Digest, Sha256};
 
     const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
@@ -74,15 +73,6 @@ pub fn dns_account01_record_name(account_url: &str, domain: &str) -> String {
         encoded.push(BASE32_ALPHABET[((acc << (5 - bits)) & 0x1f) as usize] as char);
     }
     format!("_acme-challenge_{encoded}.{domain}")
-}
-
-/// The ACME token part of a key authorization (`token.thumbprint`).
-///
-/// Both parts are base64url without padding, so the first `.` separates
-/// them; presenters that do not depend on the thumbprint (dns-account-01)
-/// recover the token exactly like the legacy HTTP-01 solver adapter does.
-pub(crate) fn token_from_key_authorization(key_authorization: &str) -> &str {
-    key_authorization.split('.').next().unwrap_or_default()
 }
 
 /// Input to `prepare`.
@@ -532,15 +522,6 @@ mod tests {
         let record_a = dns_account01_record_name("https://acme.example/acct/1", "example.com");
         let record_b = dns_account01_record_name("https://acme.example/acct/2", "example.com");
         assert_ne!(record_a, record_b, "the account binding is in the name");
-    }
-
-    #[test]
-    fn token_is_recovered_from_key_authorization_prefix() {
-        assert_eq!(
-            token_from_key_authorization("token-x.cGZwLWZpbmdlcnByaW50"),
-            "token-x"
-        );
-        assert_eq!(token_from_key_authorization("only-token"), "only-token");
     }
 
     #[test]

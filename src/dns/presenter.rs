@@ -18,7 +18,7 @@ use jiff::Timestamp;
 
 use crate::challenge::presenter::{
     CleanupOutcome, Observation, PrepareChallenge, dns_account01_record_name,
-    dns_account01_validation_value, dns01_validation_value, token_from_key_authorization,
+    dns_account01_validation_value, dns01_validation_value,
 };
 use crate::challenge::{ChallengePresenter, ChallengeSession};
 use crate::domain::challenge::{ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState};
@@ -144,7 +144,7 @@ impl ChallengePresenter for Dns01Presenter {
         };
         let record_name = match challenge_type {
             ChallengeType::DnsAccount01 => {
-                dns_account01_record_name(&request.account_url, &identifier.base_name())
+                dns_account01_record_name(&request.account_url, identifier.base_name())
             }
             _ => record_name.clone(),
         };
