@@ -573,6 +573,15 @@ impl EmailNotifier {
                     starttls_negotiate(&mut reader, &self.settings.helo_name).await?;
                     let connector = self.tls_connector()?;
                     let server_name = self.tls_server_name()?;
+                    // A pipelined server could have pushed bytes past the
+                    // reply line; into_inner() would silently drop them and
+                    // corrupt the TLS stream. Reject instead of guessing
+                    // (well-behaved servers never pipeline before STARTTLS).
+                    if !reader.buffer().is_empty() {
+                        return Err(SmtpFailure::terminal(
+                            "unexpected data buffered before STARTTLS upgrade",
+                        ));
+                    }
                     let tls = self
                         .tls_connect(reader.into_inner(), &connector, server_name)
                         .await?;

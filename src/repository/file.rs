@@ -96,6 +96,13 @@ pub struct FileEntityStore {
     /// (mtime, len) stamp on every read (see [`Self::read_entity_json`]).
     /// Bounded by [`PARSE_CACHE_CAPACITY`] with oldest-first eviction.
     /// Plain `Mutex` is sufficient: no await happens while it is held.
+    ///
+    /// Cross-process caveat: correctness against external writers relies on
+    /// the on-disk mtime changing. On filesystems with coarse mtime
+    /// granularity (NFS attribute caching, FAT), a same-length in-place
+    /// rewrite may keep the old stamp; deploy one AcmeX instance per file
+    /// repository root (the CAS write path is unaffected — it always
+    /// re-reads and fails on conflict).
     parse_cache: Arc<Mutex<HashMap<PathBuf, ParsedFile>>>,
     /// Monotonic insertion sequence for approximate-LRU eviction.
     parse_cache_seq: Arc<AtomicU64>,
