@@ -181,9 +181,15 @@ fn ca_challenge_error_summary(
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("acme_error");
+            let detail = problem
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
             match problem.get("status").and_then(serde_json::Value::as_u64) {
-                Some(status) => format!("CA challenge error type={problem_type} status={status}"),
-                None => format!("CA challenge error type={problem_type}"),
+                Some(status) => format!(
+                    "CA challenge error type={problem_type} status={status} detail={detail}"
+                ),
+                None => format!("CA challenge error type={problem_type} detail={detail}"),
             }
         })
         .unwrap_or_else(|| "authorization invalid".to_string())

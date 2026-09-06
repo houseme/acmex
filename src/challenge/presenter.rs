@@ -55,7 +55,9 @@ pub fn dns_account01_validation_value(key_authorization: &str) -> String {
 pub fn dns_account01_record_name(account_url: &str, domain: &str) -> String {
     use sha2::{Digest, Sha256};
 
-    const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    // RFC 4648 base32 standard (uppercase) alphabet — matches what
+    // Boulder/Pebble compute for the dns-account-01 record label.
+    const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let digest = Sha256::digest(account_url.as_bytes());
     let mut encoded = String::with_capacity(16);
     let prefix = &digest[..10];
@@ -611,7 +613,7 @@ mod tests {
         assert!(
             label
                 .chars()
-                .all(|c| "abcdefghijklmnopqrstuvwxyz234567".contains(c)),
+                .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c)),
             "record label must be lowercase base32: {record}"
         );
     }

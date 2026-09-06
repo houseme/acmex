@@ -26,8 +26,6 @@ services:
       # dns-persist-01). Pin the test domain to always-valid so the
       # scenarios exercise our own challenge plumbing instead. DNS-01 is
       # additionally proven against the live VA without this override.
-      - PEBBLE_VA_ALWAYS_VALID_acmex-test.example.com=1
-      - PEBBLE_VA_ALWAYS_VALID=1
     volumes:
       - ./pebble/pebble.json:/etc/pebble/pebble.json:ro
     ports:
@@ -51,6 +49,8 @@ services:
         ":8051",
         "-defaultIPv4",
         "10.30.50.3",
+        "-defaultIPv6",
+        "::ffff:10.30.50.3",
         "-https01",
         "",
         "-doh",

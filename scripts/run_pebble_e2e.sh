@@ -77,7 +77,7 @@ if [[ "$ready" != "1" ]]; then
 fi
 
 echo "== running the live Pebble E2E (production executor set)"
-if ! RUN_PEBBLE_E2E=1 cargo test --test live_pebble_e2e -- --ignored --nocapture 2>&1 \
+if ! RUN_PEBBLE_E2E=1 cargo test --test live_pebble_e2e -- --ignored --nocapture --test-threads=1 2>&1 \
   | tee "$PEBBLE_E2E_ARTIFACT_DIR/cargo-test-live-pebble-e2e.log"; then
   echo "== L4 Pebble E2E FAILED; artifacts: $PEBBLE_E2E_ARTIFACT_DIR" >&2
   exit 1

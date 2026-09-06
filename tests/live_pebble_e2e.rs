@@ -505,7 +505,11 @@ impl ChallengePresenter for ChalltestsrvTlsAlpnPresenter {
                 "TLS-ALPN-01 cannot validate wildcard DNS identifiers",
             ));
         }
-        let host = chall_host(request.session.identifier.acme_value());
+        // challtestsrv stores the host verbatim; Pebble's SNI has no
+        // trailing dot, so the map key must not have one either.
+        let host = chall_host(request.session.identifier.acme_value())
+            .trim_end_matches('.')
+            .to_string();
         self.admin
             .post(
                 "/add-tlsalpn01",
@@ -915,6 +919,21 @@ async fn run_pebble_issue(
     assert_eq!(lineage.active_version_id.as_ref(), Some(&version_id));
 
     if mode == PebbleRunMode::Lifecycle {
+        let mut entries = Vec::new();
+        if let Ok(mut rd) = std::fs::read_dir(&key_dir) {
+            for e in rd.flatten() {
+                entries.push(e.file_name().to_string_lossy().to_string());
+            }
+        }
+        eprintln!(
+            "LIFECYCLE-DIAG post-first-issuance key_dir={} entries={:?} key_ref={:?}",
+            key_dir.display(),
+            entries,
+            version.key_ref
+        );
+    }
+
+    if mode == PebbleRunMode::Lifecycle {
         let renew_op = OperationId::new(format!("op_pebble_renew_{suffix}")).unwrap();
         repositories
             .operations
@@ -937,6 +956,27 @@ async fn run_pebble_issue(
             .run_until_terminal(&renew_op, Duration::from_secs(300))
             .await
             .unwrap();
+        if renewed_record.status != acmex::domain::OperationStatus::Succeeded {
+            let mut entries = Vec::new();
+            if let Ok(mut rd) = std::fs::read_dir(&key_dir) {
+                for e in rd.flatten() {
+                    entries.push(e.file_name().to_string_lossy().to_string());
+                }
+            }
+            eprintln!(
+                "RENEW-FAIL diag: key_dir={} entries={:?} active_version_key_ref={:?} first_version={:?}",
+                key_dir.display(),
+                entries,
+                lineage.active_version_id,
+                repositories
+                    .versions
+                    .get(&version_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|v| v.value.key_ref.clone())
+            );
+        }
         assert_eq!(
             renewed_record.status,
             acmex::domain::OperationStatus::Succeeded,
