@@ -61,6 +61,21 @@ must call out any unverified external evidence.
 
 ### Changed
 
+- The validation pipeline's account JWK is now a shared, refreshable handle
+  (`AccountJwkHandle`, `ca_backend::backend`) instead of a startup snapshot.
+  After an RFC 8555 §7.3.5 account key rollover, `AcmeCaBackend` (in-process
+  `roll_account_key`) and `EnsureAccountStep` (per-issuance re-sync via the
+  new default-implemented `CaBackend::current_account_jwk`) publish the new
+  key's JWK through it, so challenge key authorizations (`token.thumbprint`)
+  keep matching the CA's stored account public key. Previously every
+  issuance after a rollover computed key authorizations from the stale
+  thumbprint and was rejected by the CA (review P3-6). Breaking for 0.x
+  consumers assembling steps directly: `ChallengeStepDeps.account_jwk` and
+  `WorkflowWorkerComponents.account_jwk` changed type from `Jwk` to
+  `AccountJwkHandle` (wrap the JWK with `AccountJwkHandle::new`, and attach
+  the same handle to an `AcmeCaBackend` via `attach_jwk_handle`); persisted
+  EnsureAccount step outputs gain an optional `account_jwk` field that old
+  records omit via `#[serde(default)]`.
 - The legacy account API now serves real account records: create passes
   contacts into the ACME registration, and read/update/deactivate round-trip
   to the CA and persist `AccountRecord`s instead of returning hardcoded

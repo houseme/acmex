@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use jiff::Timestamp;
 
 use crate::ca_backend::CaBackend;
+use crate::ca_backend::backend::AccountJwkHandle;
 use crate::ca_backend::{
     AccountHandle, AuthorizationRef, ChallengeRef, ExternalAccountBindingRef, OrderHandle,
     OrderRequest,
@@ -49,8 +50,10 @@ pub struct ChallengeStepDeps {
     pub backend: Arc<dyn CaBackend>,
     /// Presenters by challenge type.
     pub presenters: PresenterRegistry,
-    /// The account key's JWK (for key authorizations).
-    pub account_jwk: Jwk,
+    /// The account key's JWK (for key authorizations). A handle, not a
+    /// startup snapshot: refreshed when the account key rolls over so key
+    /// authorizations always use the current thumbprint.
+    pub account_jwk: AccountJwkHandle,
     /// Identifier policy (allowed challenges; empty = any compatible).
     pub allowed_challenges: crate::domain::ChallengeSet,
     /// Maximum time from prepare to propagation.
@@ -60,7 +63,9 @@ pub struct ChallengeStepDeps {
 }
 
 impl ChallengeStepDeps {
-    /// Computes the ACME key authorization `token.thumbprint`.
+    /// Computes the ACME key authorization `token.thumbprint`. The
+    /// thumbprint comes from the handle's *current* JWK, so a refresh after
+    /// an account key rollover takes effect for every later prepare.
     fn key_authorization(&self, token: &str) -> Result<String> {
         Ok(format!(
             "{}.{}",
@@ -77,6 +82,12 @@ impl ChallengeStepDeps {
 #[derive(Serialize, Deserialize)]
 struct AccountPayload {
     account: AccountHandle,
+    /// The account JWK as observed by EnsureAccount (audit trail for
+    /// thumbprint changes); `None` when the backend cannot report it.
+    /// `#[serde(default)]` keeps step outputs written before this field
+    /// existed deserializable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_jwk: Option<Jwk>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -270,8 +281,40 @@ impl StepExecutor for EnsureAccountStep {
         let account_ref = self.account_ref();
         match self.deps.backend.ensure_account(&account_ref).await {
             Ok(handle) => {
-                let payload =
-                    serde_json::to_string(&AccountPayload { account: handle }).unwrap_or_default();
+                // Cross-process self-heal: re-sync the pipeline's account
+                // JWK with the backend's *current* account key before any
+                // key authorization of this operation is computed. A
+                // rollover that happened out of band (another process, or a
+                // backend that swapped its key without this handle attached)
+                // leaves the pinned thumbprint stale — the CA, holding the
+                // new public key, would reject every challenge value
+                // derived from it.
+                let account_jwk = match self.deps.backend.current_account_jwk().await {
+                    Ok(jwk) => {
+                        if jwk != self.deps.account_jwk.get() {
+                            tracing::info!(
+                                ca = %self.deps.backend.ca_id(),
+                                "account key changed out of band; refreshing the \
+                                 key-authorization JWK"
+                            );
+                            self.deps.account_jwk.set(jwk.clone());
+                        }
+                        Some(jwk)
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            ca = %self.deps.backend.ca_id(),
+                            error = %err,
+                            "backend cannot report its account JWK; keeping the pinned handle"
+                        );
+                        None
+                    }
+                };
+                let payload = serde_json::to_string(&AccountPayload {
+                    account: handle,
+                    account_jwk,
+                })
+                .unwrap_or_default();
                 StepResult::Complete {
                     output_ref: Some(payload),
                     side_effect_locator: None,

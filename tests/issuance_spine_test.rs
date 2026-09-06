@@ -18,7 +18,9 @@ use acmex::application::{
     ActorContext, ApplicationServiceBuilder, CertificateApplication, CreateCertificateIntent,
     IssueCertificate,
 };
-use acmex::ca_backend::{AcmeCaBackend, FakeAcmeTransport, ScriptedResponse};
+use acmex::ca_backend::{
+    AccountHandle, AcmeCaBackend, CaBackend, FakeAcmeTransport, ScriptedResponse,
+};
 use acmex::challenge::{MemoryPresenter, MemoryPresenterBehavior};
 use acmex::domain::{
     CertificateIntent, CertificateLineage, CertificateVersion, DeliveryTarget, DeliveryTargetKind,
@@ -30,8 +32,6 @@ use acmex::protocol::Jwk;
 use acmex::repository::{Clock, FakeClock, FileSecretStore, MemoryRepository, RepositorySet};
 use acmex::server::worker::{WorkflowWorkerSettings, register_executors};
 use acmex::workflow::WorkflowEngine;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 fn now() -> Timestamp {
@@ -303,6 +303,8 @@ struct SpineFixture {
     presenter: Arc<MemoryPresenter>,
     key_store_dir: std::path::PathBuf,
     transport: Arc<FakeAcmeTransport>,
+    /// The concrete backend (rollover tests call `roll_account_key` on it).
+    backend: Arc<AcmeCaBackend>,
 }
 
 #[derive(Default)]
@@ -395,15 +397,20 @@ async fn build_fixture_with_verification(
     presenters.register(presenter.clone());
 
     let account_key = Arc::new(KeyPair::generate().unwrap());
-    let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
-    let backend: Arc<dyn acmex::ca_backend::CaBackend> =
-        Arc::new(AcmeCaBackend::with_fake_transport(
-            "test-ca",
-            "https://acme.example/directory",
-            ca.transport.clone(),
-            account_key,
-            repositories.clone(),
-        ));
+    let account_jwk = acmex::ca_backend::backend::AccountJwkHandle::new(
+        Jwk::for_key_pair(&account_key.0).unwrap(),
+    );
+    let acme_backend = Arc::new(AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        ca.transport.clone(),
+        account_key,
+        repositories.clone(),
+    ));
+    // Key authorizations read the thumbprint through this handle; the
+    // backend refreshes it when an account key rollover completes.
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn acmex::ca_backend::CaBackend> = acme_backend.clone();
 
     let orchestrator = acmex::delivery::DeploymentOrchestrator::new(repositories.clone())
         .register_sink(
@@ -442,6 +449,7 @@ async fn build_fixture_with_verification(
         presenter,
         key_store_dir,
         transport: ca.transport,
+        backend: acme_backend,
     }
 }
 
@@ -699,6 +707,231 @@ async fn full_issuance_spine_activates_persisted_version() {
     // The managed key exists in the secret store.
     assert!(fixture.key_store_dir.join("keys").exists() || fixture.key_store_dir.exists());
 
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// Review P3-6 regression, end to end: after an account key rollover the
+/// pipeline computes key authorizations from the NEW thumbprint. The first
+/// issuance runs with the original key; `roll_account_key` then refreshes
+/// the shared `AccountJwkHandle`; the second issuance must publish a
+/// DNS-01 TXT value derived from `token.<new thumbprint>` — the CA holds
+/// the new public key, so the old thumbprint's value would be rejected.
+#[tokio::test]
+async fn issuance_after_account_key_rollover_uses_the_new_thumbprint() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let ca = test_ca("acmex test ca");
+    let fixture = build_fixture_with_verification(
+        &identifiers,
+        Vec::new(),
+        None,
+        None,
+        directory(),
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
+
+    // ---- First issuance with the original account key. ----
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_pre_rollover",
+            "spine-pre-rollover",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+    let op1 = OperationId::new("op_spine_pre_rollover").unwrap();
+    let csr_key = fixture.drive_until_csr(&op1).await;
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+    let record = fixture.drive_to_terminal(&op1).await;
+    assert_eq!(record.status, acmex::domain::OperationStatus::Succeeded);
+    assert_eq!(
+        fixture.presenter.resource_count().await,
+        0,
+        "first issuance cleaned up its challenge resources"
+    );
+
+    // ---- Roll the account key (RFC 8555 §7.3.5) on the same backend. ----
+    fixture.transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+    let account_url = fixture
+        .repositories
+        .accounts
+        .get("ten_default:test-ca")
+        .await
+        .unwrap()
+        .expect("account persisted by the first issuance")
+        .value
+        .account_url
+        .expect("account URL persisted");
+    let new_key = Arc::new(KeyPair::generate().unwrap());
+    fixture
+        .backend
+        .roll_account_key(
+            &AccountHandle {
+                ca_id: "test-ca".to_string(),
+                account_url,
+                key_id: String::new(),
+            },
+            new_key.clone(),
+        )
+        .await
+        .unwrap();
+
+    // ---- Second issuance: the same engine and handle, post-rollover.
+    // Scripts live under distinct URL fragments (order/2, authz/b) so they
+    // cannot collide with the first issuance's leftover scripts. ----
+    fixture.transport.push(
+        ScriptedResponse::json("new-order", 201, serde_json::json!({"status": "pending"}))
+            .with_headers(
+                Some("n".to_string()),
+                None,
+                Some("https://acme.example/order/2".to_string()),
+            ),
+    );
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "order/2",
+            200,
+            serde_json::json!({
+                "status": "pending",
+                "expires": "2026-01-08T00:00:00Z",
+                "identifiers": [{"type": "dns", "value": "example.com"}],
+                "authorizations": ["https://acme.example/authz/b"],
+                "finalize": "https://acme.example/finalize/2"
+            }),
+        )
+        .uses(2),
+    );
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "authz/b",
+            200,
+            serde_json::json!({
+                "identifier": {"type": "dns", "value": "example.com"},
+                "status": "pending",
+                "expires": "2026-01-08T00:00:00Z",
+                "challenges": [{
+                    "type": "dns-01",
+                    "url": "https://acme.example/authz/b/challenge",
+                    "token": "token-b",
+                    "status": "pending"
+                }]
+            }),
+        )
+        .uses(2),
+    );
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "authz/b/challenge",
+            200,
+            serde_json::json!({"status": "processing"}),
+        )
+        .uses(10),
+    );
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "authz/b",
+            200,
+            serde_json::json!({
+                "identifier": {"type": "dns", "value": "example.com"},
+                "status": "valid",
+                "expires": "2026-01-08T00:00:00Z",
+                "challenges": [{
+                    "type": "dns-01",
+                    "url": "https://acme.example/authz/b/challenge",
+                    "token": "token-b",
+                    "status": "valid"
+                }]
+            }),
+        )
+        .uses(100),
+    );
+    fixture
+        .transport
+        .push(ScriptedResponse::json("finalize/2", 200, serde_json::json!({})).uses(5));
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "order/2",
+            200,
+            serde_json::json!({
+                "status": "processing",
+                "expires": "2026-01-08T00:00:00Z",
+                "identifiers": [{"type": "dns", "value": "example.com"}],
+                "authorizations": ["https://acme.example/authz/b"],
+                "finalize": "https://acme.example/finalize/2"
+            }),
+        )
+        .uses(2),
+    );
+    fixture.transport.push(
+        ScriptedResponse::json(
+            "order/2",
+            200,
+            serde_json::json!({
+                "status": "valid",
+                "expires": "2026-01-08T00:00:00Z",
+                "identifiers": [{"type": "dns", "value": "example.com"}],
+                "authorizations": ["https://acme.example/authz/b"],
+                "certificate": "https://acme.example/cert/2",
+                "finalize": "https://acme.example/finalize/2"
+            }),
+        )
+        .uses(100),
+    );
+
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_post_rollover",
+            "spine-post-rollover",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+    let op2 = OperationId::new("op_spine_post_rollover").unwrap();
+    let csr_key = fixture.drive_until_csr(&op2).await;
+    // The post-rollover order advertises cert/2 (see the scripted order).
+    fixture.transport.push(raw_response(
+        "cert/2",
+        200,
+        chain_for_key("example.com", &csr_key, &ca),
+    ));
+
+    // Between PrepareChallenges and the final cleanup the published TXT
+    // value must be the one derived from the NEW thumbprint.
+    let new_jwk = Jwk::for_key_pair(&new_key.0).unwrap();
+    let key_authorization = format!("token-b.{}", new_jwk.thumbprint_sha256().unwrap());
+    let txt_value = acmex::challenge::dns01_validation_value(&key_authorization);
+    assert!(
+        fixture
+            .presenter
+            .has_resource(
+                "_acme-challenge.example.com",
+                &acmex::dns::record::txt_value_hash(&txt_value),
+            )
+            .await,
+        "the post-rollover TXT value must be derived from the new thumbprint"
+    );
+    // Exactly one resource: nothing was ever prepared with the stale
+    // (pre-rollover) thumbprint.
+    assert_eq!(fixture.presenter.resource_count().await, 1);
+
+    let record = fixture.drive_to_terminal(&op2).await;
+    assert_eq!(
+        record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}",
+        record.error
+    );
     cleanup_dir(&fixture.key_store_dir);
 }
 

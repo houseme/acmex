@@ -23,8 +23,6 @@ use acmex::protocol::Jwk;
 use acmex::repository::{Clock, FakeClock, MemoryRepository, RepositorySet};
 use acmex::types::ChallengeType;
 use acmex::workflow::{EngineConfig, WorkflowEngine};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 fn now() -> Timestamp {
@@ -278,7 +276,9 @@ fn build_fixture(
     let deps = Arc::new(ChallengeStepDeps {
         backend: Arc::new(backend),
         presenters,
-        account_jwk: Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(key_pair.public_key_bytes())),
+        account_jwk: acmex::ca_backend::backend::AccountJwkHandle::new(
+            Jwk::for_key_pair(&key_pair.0).unwrap(),
+        ),
         allowed_challenges: Default::default(),
         propagation_timeout: Duration::from_secs(600),
         poll_interval: Duration::from_millis(50),

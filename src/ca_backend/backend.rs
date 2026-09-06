@@ -118,6 +118,76 @@ pub trait CaBackend: Send + Sync {
 
     /// Revokes a certificate.
     async fn revoke(&self, account: &AccountHandle, request: &RevocationRequest) -> Result<()>;
+
+    /// The JWK of the backend's *current* account key (RFC 7638), the re-sync
+    /// source for the validation pipeline's key-authorization thumbprint.
+    ///
+    /// A rollover performed inside this process refreshes the pipeline's
+    /// [`AccountJwkHandle`] directly; this method covers every other path —
+    /// the key was changed out of band (another process, or before this
+    /// worker assembled) — by letting `EnsureAccountStep` compare and
+    /// re-publish before any key authorization is computed.
+    ///
+    /// The default reports a configuration error: backends that cannot
+    /// expose their account key simply never trigger the re-sync. A
+    /// default-implemented method keeps the frozen v0.9 trait
+    /// source-compatible.
+    async fn current_account_jwk(&self) -> Result<Jwk> {
+        let _ = self;
+        Err(AcmeError::configuration(
+            "this CA backend does not expose its current account JWK",
+        ))
+    }
+}
+
+/// Shared, refreshable view of the account key's JWK.
+///
+/// The validation pipeline derives key authorizations (`token.thumbprint`,
+/// RFC 8555 §8.1) from this JWK. It is deliberately a handle, not a startup
+/// snapshot: an RFC 8555 §7.3.5 account key rollover changes the thumbprint,
+/// and a pipeline computing key authorizations from the old JWK would fail
+/// CA validation forever (review P3-6). The owning [`AcmeCaBackend`]
+/// publishes the new key's JWK through the attached handle when its
+/// rollover completes, and `EnsureAccountStep` re-syncs it from
+/// [`CaBackend::current_account_jwk`] on every issuance. Cloning shares one
+/// underlying slot.
+///
+/// The interior lock is a `std::sync::RwLock` whose critical sections never
+/// await, so the handle is safe to read and write from async code.
+#[derive(Clone)]
+pub struct AccountJwkHandle {
+    jwk: Arc<std::sync::RwLock<Jwk>>,
+}
+
+impl AccountJwkHandle {
+    /// Pins the JWK of the account key current at assembly time.
+    pub fn new(jwk: Jwk) -> Self {
+        Self {
+            jwk: Arc::new(std::sync::RwLock::new(jwk)),
+        }
+    }
+
+    /// The current account JWK (cloned out; the lock is never held across
+    /// an await).
+    pub fn get(&self) -> Jwk {
+        self.jwk
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Publishes the JWK of the new current account key (rollover refresh).
+    pub fn set(&self, jwk: Jwk) {
+        *self
+            .jwk
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = jwk;
+    }
+
+    /// The RFC 7638 thumbprint of the current account JWK.
+    pub fn thumbprint_sha256(&self) -> Result<String> {
+        self.get().thumbprint_sha256()
+    }
 }
 
 /// ACME (RFC 8555) implementation of [`CaBackend`].
@@ -130,6 +200,12 @@ pub struct AcmeCaBackend {
     /// cache. Always cloned out (never held across another lock): rollover
     /// acquires this lock first, then the session-cache lock.
     key_pair: tokio::sync::RwLock<Arc<KeyPair>>,
+    /// The pipeline's account-JWK handle when attached
+    /// ([`attach_jwk_handle`](Self::attach_jwk_handle)); refreshed after a
+    /// successful rollover so key authorizations use the new thumbprint.
+    /// A std lock taken outside the `key_pair`/`sessions` locks, and its
+    /// critical sections never await.
+    jwk_handle: std::sync::RwLock<Option<AccountJwkHandle>>,
     repositories: RepositorySet,
     tenant: TenantId,
     secrets: Arc<dyn SecretResolver>,
@@ -152,6 +228,7 @@ impl AcmeCaBackend {
             directory_url: directory_url.into(),
             transport,
             key_pair: tokio::sync::RwLock::new(key_pair),
+            jwk_handle: std::sync::RwLock::new(None),
             repositories,
             tenant: TenantId::default_tenant(),
             secrets: Arc::new(EnvFileSecretResolver),
@@ -175,6 +252,32 @@ impl AcmeCaBackend {
     pub fn with_secret_resolver(mut self, secrets: Arc<dyn SecretResolver>) -> Self {
         self.secrets = secrets;
         self
+    }
+
+    /// Attaches the validation pipeline's account-JWK handle. After a
+    /// successful [`roll_account_key`](CaBackend::roll_account_key) the
+    /// backend publishes the new key's JWK through it, so every key
+    /// authorization computed afterwards uses the new thumbprint.
+    pub fn attach_jwk_handle(&self, handle: AccountJwkHandle) {
+        *self
+            .jwk_handle
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Publishes `jwk` as the current account JWK on the attached handle
+    /// (no-op without one). Called after the rollover's in-memory switch,
+    /// outside both the `key_pair` and `sessions` locks; the std critical
+    /// section never awaits.
+    fn publish_account_jwk(&self, jwk: Jwk) {
+        if let Some(handle) = self
+            .jwk_handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            handle.set(jwk);
+        }
     }
 
     fn account_repo_id(&self) -> String {
@@ -416,6 +519,10 @@ impl CaBackend for AcmeCaBackend {
         // nested signature semantics have one implementation while the outer
         // request still goes through the session for nonce/error handling.
         let old_jwk = Jwk::for_key_pair(&old_key.0)?;
+        // The pipeline refresh target, derived before anything can switch:
+        // a JWK derivation failure must abort before the keyChange request,
+        // never leave a half-refreshed pipeline behind.
+        let new_account_jwk = Jwk::for_key_pair(&new_key.0)?;
         let inner_jws =
             key_change_inner_jws(&account.account_url, &key_change_url, &old_jwk, &new_key)?;
 
@@ -451,6 +558,12 @@ impl CaBackend for AcmeCaBackend {
             let mut sessions = self.sessions.write().await;
             sessions.retain(|(url, _)| url != &account.account_url);
         }
+
+        // Last, outside both backend locks: the pipeline's account-JWK
+        // handle moves to the new thumbprint, so the next key
+        // authorization (`token.thumbprint`) is computed from the key the
+        // CA now holds (review P3-6).
+        self.publish_account_jwk(new_account_jwk);
 
         tracing::info!(
             ca = self.ca_id,
@@ -617,6 +730,10 @@ impl CaBackend for AcmeCaBackend {
             .execute_jws(&directory.revoke_cert, JwsPayload::Object(payload))
             .await?;
         Ok(())
+    }
+
+    async fn current_account_jwk(&self) -> Result<Jwk> {
+        Jwk::for_key_pair(&self.current_key().await.0)
     }
 }
 
