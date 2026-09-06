@@ -459,6 +459,7 @@ mod tests {
             .prepare(PrepareChallenge {
                 session: session(Identifier::try_dns("example.com").unwrap()),
                 key_authorization: "token-a.thumbprint-a".to_string(),
+                account_url: String::new(),
             })
             .await
             .unwrap();
@@ -468,6 +469,7 @@ mod tests {
             .prepare(PrepareChallenge {
                 session: second,
                 key_authorization: "token-ab.thumbprint-b".to_string(),
+                account_url: String::new(),
             })
             .await
             .unwrap();
@@ -515,6 +517,7 @@ mod tests {
             .prepare(PrepareChallenge {
                 session: session(Identifier::try_dns("*.example.com").unwrap()),
                 key_authorization: "token.thumbprint".to_string(),
+                account_url: String::new(),
             })
             .await
             .unwrap_err();

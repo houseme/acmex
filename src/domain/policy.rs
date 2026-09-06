@@ -33,6 +33,7 @@ impl ChallengeSet {
             ChallengeType::Http01,
             ChallengeType::Dns01,
             ChallengeType::TlsAlpn01,
+            ChallengeType::DnsAccount01,
         ])
     }
 
@@ -63,7 +64,8 @@ impl ChallengeSet {
         self.0.insert(item);
     }
 
-    /// Parses from wire strings (`http-01`, `dns-01`, `tls-alpn-01`).
+    /// Parses from wire strings (`http-01`, `dns-01`, `tls-alpn-01`,
+    /// `dns-account-01`).
     pub fn parse<I, S>(items: I) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -424,15 +426,21 @@ pub enum DeliveryRequirement {
 
 /// Challenge types compatible with an identifier, per the target matrix:
 ///
-/// | Identifier | HTTP-01 | DNS-01 | TLS-ALPN-01 |
-/// |---|---:|---:|---:|
-/// | DNS | ✓ | ✓ | ✓ |
-/// | Wildcard DNS | ✗ | ✓ | ✗ |
-/// | IPv4 / IPv6 | ✓ | ✗ | ✓ |
+/// | Identifier | HTTP-01 | DNS-01 | TLS-ALPN-01 | DNS-ACCOUNT-01 |
+/// |---|---:|---:|---:|---:|
+/// | DNS | ✓ | ✓ | ✓ | ✓ |
+/// | Wildcard DNS | ✗ | ✓ | ✗ | ✓ |
+/// | IPv4 / IPv6 | ✓ | ✗ | ✓ | ✗ |
+///
+/// DNS-ACCOUNT-01 (draft-ietf-acme-dns-account-01) is a DNS-01 sibling: the
+/// TXT record name is identical (`_acme-challenge.<domain>`, base name for
+/// wildcards), so anywhere DNS-01 applies it applies too.
 pub fn compatible_challenges(identifier: &Identifier) -> ChallengeSet {
     match identifier.kind() {
         IdentifierKind::Dns => ChallengeSet::all(),
-        IdentifierKind::WildcardDns => ChallengeSet::new([ChallengeType::Dns01]),
+        IdentifierKind::WildcardDns => {
+            ChallengeSet::new([ChallengeType::Dns01, ChallengeType::DnsAccount01])
+        }
         IdentifierKind::Ipv4 | IdentifierKind::Ipv6 => {
             ChallengeSet::new([ChallengeType::Http01, ChallengeType::TlsAlpn01])
         }
@@ -445,7 +453,8 @@ pub struct ValidationPlanItem {
     /// The identifier being validated.
     pub identifier: Identifier,
     /// Challenge types still acceptable for this identifier, in preference
-    /// order (DNS-01 < HTTP-01 < TLS-ALPN-01 when all are allowed).
+    /// order (DNS-01 < DNS-ACCOUNT-01 < HTTP-01 < TLS-ALPN-01 when all are
+    /// allowed).
     pub allowed: Vec<ChallengeType>,
     /// Why other compatible types were excluded, for diagnostics.
     pub exclusions: Vec<ChallengeExclusion>,
@@ -492,11 +501,15 @@ impl ValidationPlan {
 }
 
 /// Preference order used when multiple challenge types are viable.
-fn challenge_preference() -> [ChallengeType; 3] {
-    // DNS-01 covers wildcards and needs no inbound ports; HTTP-01 is the most
-    // widely deployed; TLS-ALPN-01 last as it requires port 443 control.
+fn challenge_preference() -> [ChallengeType; 4] {
+    // DNS-01 covers wildcards and needs no inbound ports; DNS-ACCOUNT-01
+    // (draft-ietf-acme-dns-account-01) sits right behind it as the
+    // thumbprint-free sibling — only chosen when the CA offers it and DNS-01
+    // is unavailable, so existing DNS-01 flows are unaffected; HTTP-01 is the
+    // most widely deployed; TLS-ALPN-01 last as it requires port 443 control.
     [
         ChallengeType::Dns01,
+        ChallengeType::DnsAccount01,
         ChallengeType::Http01,
         ChallengeType::TlsAlpn01,
     ]
@@ -729,17 +742,84 @@ mod tests {
         assert!(compatible_challenges(&plain).contains(ChallengeType::Http01));
         assert!(compatible_challenges(&plain).contains(ChallengeType::Dns01));
         assert!(compatible_challenges(&plain).contains(ChallengeType::TlsAlpn01));
+        assert!(compatible_challenges(&plain).contains(ChallengeType::DnsAccount01));
 
         let wild = dns("*.example.com");
         assert!(!compatible_challenges(&wild).contains(ChallengeType::Http01));
         assert!(compatible_challenges(&wild).contains(ChallengeType::Dns01));
         assert!(!compatible_challenges(&wild).contains(ChallengeType::TlsAlpn01));
+        // dns-account-01 shares DNS-01's applicability, including wildcards.
+        assert!(compatible_challenges(&wild).contains(ChallengeType::DnsAccount01));
 
         for id in [ip("192.0.2.1"), ip("2001:db8::1")] {
             assert!(compatible_challenges(&id).contains(ChallengeType::Http01));
             assert!(!compatible_challenges(&id).contains(ChallengeType::Dns01));
             assert!(compatible_challenges(&id).contains(ChallengeType::TlsAlpn01));
+            // DNS-bound challenges never validate IP identifiers.
+            assert!(!compatible_challenges(&id).contains(ChallengeType::DnsAccount01));
         }
+    }
+
+    #[test]
+    fn dns_account_01_is_planned_when_offered_and_filtered_when_not() {
+        // Offered by the CA: allowed for plain DNS names and wildcards,
+        // ordered behind DNS-01 so existing flows keep their choice.
+        let offered = ChallengeSet::new([ChallengeType::Dns01, ChallengeType::DnsAccount01]);
+        let plan = validate_order_policy(
+            &[dns("example.com"), dns("*.example.com")],
+            &offered,
+            &ValidationPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.items[0].allowed,
+            vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        );
+        assert_eq!(
+            plan.items[1].allowed,
+            vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        );
+
+        // Not offered: excluded as NotOfferedByCa, plan falls back to DNS-01.
+        let plan = validate_order_policy(
+            &[dns("example.com")],
+            &ChallengeSet::new([ChallengeType::Dns01]),
+            &ValidationPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.items[0].allowed, vec![ChallengeType::Dns01]);
+        assert!(
+            plan.items[0]
+                .exclusions
+                .iter()
+                .any(|e| e.challenge == ChallengeType::DnsAccount01
+                    && e.reason == ExclusionReason::NotOfferedByCa)
+        );
+    }
+
+    #[test]
+    fn dns_account_01_only_policy_needs_it_offered() {
+        let policy = ValidationPolicy {
+            allowed_challenges: ChallengeSet::new([ChallengeType::DnsAccount01]),
+            ..ValidationPolicy::default()
+        };
+        // A DNS-01-only CA cannot satisfy a dns-account-01-only policy.
+        assert!(
+            validate_order_policy(
+                &[dns("example.com")],
+                &ChallengeSet::new([ChallengeType::Dns01]),
+                &policy,
+            )
+            .is_err()
+        );
+        // When offered, it is selected even for wildcards.
+        let plan = validate_order_policy(
+            &[dns("*.example.com")],
+            &ChallengeSet::new([ChallengeType::DnsAccount01]),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(plan.items[0].allowed, vec![ChallengeType::DnsAccount01]);
     }
 
     #[test]
@@ -797,7 +877,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.items.len(), 2);
-        assert_eq!(plan.items[0].allowed, vec![ChallengeType::Dns01]);
+        assert_eq!(
+            plan.items[0].allowed,
+            vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        );
         assert_eq!(
             plan.items[1].allowed,
             vec![ChallengeType::Http01, ChallengeType::TlsAlpn01]
@@ -825,6 +908,9 @@ mod tests {
         assert!(set.contains(ChallengeType::Http01));
         assert!(!set.contains(ChallengeType::TlsAlpn01));
         assert!(ChallengeSet::parse(["bogus"]).is_err());
+
+        let set = ChallengeSet::parse(["dns-account-01"]).unwrap();
+        assert!(set.contains(ChallengeType::DnsAccount01));
     }
 
     #[test]

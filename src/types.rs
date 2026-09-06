@@ -182,6 +182,12 @@ pub enum ChallengeType {
     Dns01,
     /// Validation via a specific TLS extension.
     TlsAlpn01,
+    /// Validation via a DNS TXT record bound to the account URL
+    /// (draft-ietf-acme-dns-account-01). Same record name as DNS-01, but the
+    /// TXT value is `base64url(SHA256(accountUrl "." token))` — it does not
+    /// depend on the account key thumbprint, so account key rollover never
+    /// invalidates in-flight authorizations.
+    DnsAccount01,
 }
 
 impl ChallengeType {
@@ -191,6 +197,7 @@ impl ChallengeType {
             ChallengeType::Http01 => "http-01",
             ChallengeType::Dns01 => "dns-01",
             ChallengeType::TlsAlpn01 => "tls-alpn-01",
+            ChallengeType::DnsAccount01 => "dns-account-01",
         }
     }
 }
@@ -216,6 +223,7 @@ impl std::str::FromStr for ChallengeType {
             "http-01" => Ok(ChallengeType::Http01),
             "dns-01" => Ok(ChallengeType::Dns01),
             "tls-alpn-01" => Ok(ChallengeType::TlsAlpn01),
+            "dns-account-01" => Ok(ChallengeType::DnsAccount01),
             _ => Err(format!("Unknown challenge type: {}", s)),
         }
     }
@@ -355,6 +363,21 @@ mod tests {
     fn test_challenge_type() {
         assert_eq!(ChallengeType::Http01.as_str(), "http-01");
         assert_eq!("dns-01".parse::<ChallengeType>(), Ok(ChallengeType::Dns01));
+    }
+
+    #[test]
+    fn test_dns_account_01_challenge_type() {
+        assert_eq!(ChallengeType::DnsAccount01.as_str(), "dns-account-01");
+        assert_eq!(
+            "dns-account-01".parse::<ChallengeType>(),
+            Ok(ChallengeType::DnsAccount01)
+        );
+        assert_eq!(ChallengeType::DnsAccount01.to_string(), "dns-account-01");
+        // Wire round trip via serde.
+        let json = serde_json::to_string(&ChallengeType::DnsAccount01).unwrap();
+        assert_eq!(json, "\"dns-account-01\"");
+        let back: ChallengeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ChallengeType::DnsAccount01);
     }
 
     #[test]

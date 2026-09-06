@@ -37,6 +37,39 @@ pub fn dns01_validation_value(key_authorization: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest.finalize())
 }
 
+/// DNS-ACCOUNT-01 TXT value (draft-ietf-acme-dns-account-01).
+///
+/// The record name is the same `_acme-challenge.<domain>` used by DNS-01,
+/// but the TXT value replaces the key authorization with the *account URL*:
+///
+/// ```text
+/// TXT = base64url(SHA256(Concat(accountUrl, ".", token)))
+/// ```
+///
+/// Because the digest never involves the account key thumbprint, account
+/// key rollover cannot invalidate authorizations that are waiting for this
+/// challenge — the whole point of the draft.
+pub fn dns_account01_validation_value(account_url: &str, token: &str) -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(account_url.as_bytes());
+    digest.update(b".");
+    digest.update(token.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
+/// The ACME token part of a key authorization (`token.thumbprint`).
+///
+/// Both parts are base64url without padding, so the first `.` separates
+/// them; presenters that do not depend on the thumbprint (dns-account-01)
+/// recover the token exactly like the legacy HTTP-01 solver adapter does.
+pub(crate) fn token_from_key_authorization(key_authorization: &str) -> &str {
+    key_authorization.split('.').next().unwrap_or_default()
+}
+
 /// Input to `prepare`.
 pub struct PrepareChallenge {
     /// The session being prepared.
@@ -44,6 +77,13 @@ pub struct PrepareChallenge {
     /// The key authorization (token.fingerprint) — passed by reference,
     /// never persisted by presenters.
     pub key_authorization: String,
+    /// The ACME account URL (`kid`) this operation authenticates as.
+    ///
+    /// Only challenge types that bind to the account itself need it —
+    /// currently dns-account-01 (draft-ietf-acme-dns-account-01). It comes
+    /// fresh from the persisted EnsureAccount payload on every (re)run of
+    /// PrepareChallenges, so it never has to be persisted elsewhere.
+    pub account_url: String,
 }
 
 /// Result of observing an external resource.
@@ -80,6 +120,14 @@ pub trait ChallengePresenter: Send + Sync {
     /// Which challenge family this presenter handles.
     fn kind(&self) -> ChallengeType;
 
+    /// Every challenge type this presenter can serve. Defaults to
+    /// [`ChallengePresenter::kind`]; presenters whose external resource is
+    /// identical across sibling challenge types (DNS TXT for dns-01 and
+    /// dns-account-01) declare them all so one registration covers both.
+    fn supported_kinds(&self) -> Vec<ChallengeType> {
+        vec![self.kind()]
+    }
+
     /// Creates the external resource and returns its lease. Must be
     /// idempotent per session id (a retry after a crash must find or
     /// re-create the same resource, not duplicate it).
@@ -107,9 +155,13 @@ impl PresenterRegistry {
         Self::default()
     }
 
-    /// Registers a presenter.
+    /// Registers a presenter under every challenge type it supports
+    /// (usually one; the DNS presenter serves both dns-01 and
+    /// dns-account-01).
     pub fn register(&mut self, presenter: Arc<dyn ChallengePresenter>) {
-        self.presenters.insert(presenter.kind(), presenter);
+        for kind in presenter.supported_kinds() {
+            self.presenters.insert(kind, presenter.clone());
+        }
     }
 
     /// Looks up the presenter for a challenge type.
@@ -161,6 +213,11 @@ impl MemoryPresenter {
         Arc::new(Self::build(ChallengeType::Http01, behavior))
     }
 
+    /// A dns-account-01-flavored memory presenter.
+    pub fn dns_account01(behavior: MemoryPresenterBehavior) -> Arc<Self> {
+        Arc::new(Self::build(ChallengeType::DnsAccount01, behavior))
+    }
+
     fn build(kind: ChallengeType, behavior: MemoryPresenterBehavior) -> Self {
         Self {
             kind,
@@ -195,6 +252,10 @@ impl ChallengePresenter for MemoryPresenter {
     async fn prepare(&self, request: PrepareChallenge) -> Result<ChallengeLease> {
         let value = match self.kind {
             ChallengeType::Dns01 => dns01_validation_value(&request.key_authorization),
+            ChallengeType::DnsAccount01 => dns_account01_validation_value(
+                &request.account_url,
+                token_from_key_authorization(&request.key_authorization),
+            ),
             ChallengeType::Http01 | ChallengeType::TlsAlpn01 => request.key_authorization.clone(),
         };
         let value_hash = crate::dns::record::txt_value_hash(&value);
@@ -404,5 +465,86 @@ impl ChallengePresenter for LegacySolverPresenter {
         let mut solver = (self.factory)();
         solver.cleanup().await?;
         Ok(CleanupOutcome::Cleaned)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// draft-ietf-acme-dns-account-01 §4: TXT =
+    /// base64url(SHA256(Concat(accountUrl, ".", token))).
+    ///
+    /// Precomputed reference vector:
+    /// base64url(SHA256("https://acme.example/acct/1.token-x"))
+    /// = "mAFU-jezutN5v0UDMEtlV9sORu1WvZCjZvu-Fwxa8Yg".
+    #[test]
+    fn dns_account_01_txt_value_matches_draft_formula() {
+        assert_eq!(
+            dns_account01_validation_value("https://acme.example/acct/1", "token-x"),
+            "mAFU-jezutN5v0UDMEtlV9sORu1WvZCjZvu-Fwxa8Yg"
+        );
+        assert_eq!(
+            dns_account01_validation_value("https://acme.example/acct/1", "token-b"),
+            "ZQ_Ypci894gyJlLV_QDZHKGNTzrOS6QxXaJ_mvLuQVE"
+        );
+    }
+
+    #[test]
+    fn dns_account_01_value_differs_from_dns_01_for_same_token() {
+        // The account URL replaces `token.thumbprint`, so the same token
+        // must NOT produce the DNS-01 value (that is the rollover safety).
+        let dns01 = dns01_validation_value("token-x.thumbprint");
+        let account = dns_account01_validation_value("https://acme.example/acct/1", "token-x");
+        assert_ne!(dns01, account);
+    }
+
+    #[test]
+    fn token_is_recovered_from_key_authorization_prefix() {
+        assert_eq!(
+            token_from_key_authorization("token-x.cGZwLWZpbmdlcnByaW50"),
+            "token-x"
+        );
+        assert_eq!(token_from_key_authorization("only-token"), "only-token");
+    }
+
+    #[test]
+    fn registry_registers_under_every_supported_kind() {
+        struct DualKindPresenter;
+
+        #[async_trait]
+        impl ChallengePresenter for DualKindPresenter {
+            fn kind(&self) -> ChallengeType {
+                ChallengeType::Dns01
+            }
+
+            fn supported_kinds(&self) -> Vec<ChallengeType> {
+                vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+            }
+
+            async fn prepare(&self, _request: PrepareChallenge) -> Result<ChallengeLease> {
+                unimplemented!("registry test only exercises registration")
+            }
+
+            async fn observe(&self, _lease: &ChallengeLease) -> Result<Observation> {
+                unimplemented!("registry test only exercises registration")
+            }
+
+            async fn cleanup(&self, _lease: &ChallengeLease) -> Result<CleanupOutcome> {
+                unimplemented!("registry test only exercises registration")
+            }
+        }
+
+        let mut registry = PresenterRegistry::new();
+        registry.register(MemoryPresenter::dns01(MemoryPresenterBehavior::default()));
+        // The in-memory presenter only claims its own kind...
+        assert!(registry.get(ChallengeType::Dns01).is_some());
+        assert!(registry.get(ChallengeType::DnsAccount01).is_none());
+
+        // ...while a multi-kind presenter is registered under all of them.
+        registry.register(Arc::new(DualKindPresenter));
+        assert!(registry.get(ChallengeType::Dns01).is_some());
+        assert!(registry.get(ChallengeType::DnsAccount01).is_some());
+        assert!(registry.get(ChallengeType::Http01).is_none());
     }
 }

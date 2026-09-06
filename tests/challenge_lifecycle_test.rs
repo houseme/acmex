@@ -543,6 +543,7 @@ async fn cleanup_already_absent_is_success() {
         .prepare(PrepareChallenge {
             session,
             key_authorization: "token.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();
@@ -563,6 +564,7 @@ async fn multi_value_resources_are_isolated() {
         .prepare(PrepareChallenge {
             session: session_of("a"),
             key_authorization: "token-a.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();
@@ -570,6 +572,7 @@ async fn multi_value_resources_are_isolated() {
         .prepare(PrepareChallenge {
             session: session_of("b"),
             key_authorization: "token-b.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();
@@ -628,6 +631,7 @@ async fn scanner_retries_then_exhausts() {
         .prepare(PrepareChallenge {
             session: session_of("scan"),
             key_authorization: "token.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();
@@ -674,6 +678,7 @@ async fn scanner_recovers_orphaned_lease_after_restart() {
         .prepare(PrepareChallenge {
             session: session_of("orphan"),
             key_authorization: "token.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();
@@ -703,6 +708,7 @@ async fn observation_not_yet_then_propagated() {
         .prepare(PrepareChallenge {
             session: session_of("obs"),
             key_authorization: "t.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();
@@ -748,6 +754,7 @@ async fn cleanup_scanner_sets_pending_backlog_metric() {
         .prepare(PrepareChallenge {
             session: session_of("metric-scan"),
             key_authorization: "token.fp".to_string(),
+            account_url: String::new(),
         })
         .await
         .unwrap();

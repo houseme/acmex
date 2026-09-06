@@ -19,7 +19,10 @@ use acmex::application::{
     IssueCertificate,
 };
 use acmex::ca_backend::{AcmeCaBackend, FakeAcmeTransport, ScriptedResponse};
-use acmex::challenge::{MemoryPresenter, MemoryPresenterBehavior};
+use acmex::challenge::{
+    MemoryPresenter, MemoryPresenterBehavior, dns_account01_validation_value,
+    dns01_validation_value,
+};
 use acmex::domain::{
     CertificateIntent, CertificateLineage, CertificateVersion, DeliveryTarget, DeliveryTargetKind,
     IdentifierSet, IntentId, KeyAlgorithm, KeyId, KeyManagementMode, KeyRef, LineageId,
@@ -178,6 +181,19 @@ impl FakeCa {
     }
 
     fn authz(&self, domain: &str, token: &str, status: &str, uses: usize) {
+        self.authz_with_challenge_type(domain, token, status, uses, "dns-01");
+    }
+
+    /// One authorization for `domain` offering a single challenge of the
+    /// given ACME type string (e.g. `dns-01`, `dns-account-01`).
+    fn authz_with_challenge_type(
+        &self,
+        domain: &str,
+        token: &str,
+        status: &str,
+        uses: usize,
+        challenge_type: &str,
+    ) {
         let url = "https://acme.example/authz/a";
         self.transport.push(
             ScriptedResponse::json(
@@ -188,7 +204,7 @@ impl FakeCa {
                     "status": status,
                     "expires": "2026-01-08T00:00:00Z",
                     "challenges": [{
-                        "type": "dns-01",
+                        "type": challenge_type,
                         "url": format!("{url}/challenge"),
                         "token": token,
                         "status": status
@@ -412,6 +428,102 @@ async fn build_fixture_with_verification(
         );
 
     let mut engine = WorkflowEngine::new("spine-test", repositories.clone()).with_config(
+        acmex::workflow::EngineConfig {
+            retry_backoff_base: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(5),
+            ..Default::default()
+        },
+    );
+    register_executors(
+        &mut engine,
+        &WorkflowWorkerSettings {
+            challenge_poll_interval: Duration::from_millis(50),
+            trust_anchor_pems: verification.trust_anchor_pems,
+            skip_certificate_trust_check: verification.skip_certificate_trust_check,
+            ..Default::default()
+        },
+        acmex::server::worker::WorkflowWorkerComponents {
+            backend,
+            account_jwk,
+            presenters,
+            key_provider,
+            orchestrator,
+        },
+    );
+
+    SpineFixture {
+        clock,
+        repositories,
+        engine,
+        presenter,
+        key_store_dir,
+        transport: ca.transport,
+    }
+}
+
+/// Fixture variant in which the fake CA offers ONLY `dns-account-01`
+/// (draft-ietf-acme-dns-account-01) and a dns-account-01 memory presenter is
+/// registered. Everything else matches [`build_fixture_with_verification`],
+/// so the existing dns-01 conversations keep running unmodified.
+async fn build_dns_account01_fixture(
+    identifiers: &IdentifierSet,
+    verification: FixtureVerification,
+) -> SpineFixture {
+    let clock = Arc::new(FakeClock::at(now()));
+    let repositories = MemoryRepository::with_clock(clock.clone()).into_set();
+
+    let intent = sample_intent(identifiers.clone(), Vec::new(), None);
+    repositories.intents.create(intent.clone()).await.unwrap();
+    let lineage = CertificateLineage::new(
+        LineageId::new("lin_spine").unwrap(),
+        acmex::domain::TenantId::default_tenant(),
+        intent.id.clone(),
+        identifiers.clone(),
+    );
+    repositories.lineages.create(lineage).await.unwrap();
+
+    let domain = identifiers.iter().next().unwrap().acme_value();
+    let ca = FakeCa::new(&clock, directory());
+    ca.allow_account("https://acme.example/acct/1");
+    ca.allow_order();
+    ca.order_pending(&domain);
+    ca.authz_with_challenge_type(&domain, "token-x", "pending", 2, "dns-account-01");
+    ca.acknowledge_ok();
+    // Authorizations flip to valid after acknowledgement.
+    ca.authz_with_challenge_type(&domain, "token-x", "valid", 100, "dns-account-01");
+    ca.finalize_ok();
+    ca.order_processing_then_valid(&domain);
+
+    static FIXTURE_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let fixture_seq = FIXTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let key_store_dir =
+        std::env::temp_dir().join(format!("acmex-spine-{}-{fixture_seq}", std::process::id()));
+    let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
+        FileSecretStore::new(key_store_dir.clone()),
+    ));
+
+    let presenter = MemoryPresenter::dns_account01(MemoryPresenterBehavior::default());
+    let mut presenters = acmex::challenge::PresenterRegistry::new();
+    presenters.register(presenter.clone());
+
+    let account_key = Arc::new(KeyPair::generate().unwrap());
+    let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
+    let backend: Arc<dyn acmex::ca_backend::CaBackend> =
+        Arc::new(AcmeCaBackend::with_fake_transport(
+            "test-ca",
+            "https://acme.example/directory",
+            ca.transport.clone(),
+            account_key,
+            repositories.clone(),
+        ));
+
+    let orchestrator = acmex::delivery::DeploymentOrchestrator::new(repositories.clone())
+        .register_sink(
+            DeliveryTargetKind::File,
+            Arc::new(acmex::delivery::FileCertificateSink::new()),
+        );
+
+    let mut engine = WorkflowEngine::new("spine-dnsacct-test", repositories.clone()).with_config(
         acmex::workflow::EngineConfig {
             retry_backoff_base: Duration::from_millis(1),
             retry_backoff_max: Duration::from_millis(5),
@@ -698,6 +810,122 @@ async fn full_issuance_spine_activates_persisted_version() {
     assert_eq!(fixture.presenter.resource_count().await, 0);
     // The managed key exists in the secret store.
     assert!(fixture.key_store_dir.join("keys").exists() || fixture.key_store_dir.exists());
+
+    cleanup_dir(&fixture.key_store_dir);
+}
+
+/// The full issuance spine driven through dns-account-01 only
+/// (draft-ietf-acme-dns-account-01): the fake CA offers no dns-01 challenge,
+/// the planner picks dns-account-01 and the DNS TXT value is bound to the
+/// ACCOUNT URL (`base64url(SHA256(accountUrl "." token))`) instead of the
+/// key authorization thumbprint.
+#[tokio::test]
+async fn dns_account01_spine_publishes_account_bound_txt_value() {
+    let identifiers = IdentifierSet::parse(["example.com"]).unwrap();
+    let ca = test_ca("acmex test ca");
+    let fixture = build_dns_account01_fixture(
+        &identifiers,
+        FixtureVerification {
+            trust_anchor_pems: vec![ca.pem()],
+            skip_certificate_trust_check: false,
+        },
+    )
+    .await;
+
+    let op_id = OperationId::new("op_spine_dnsacct").unwrap();
+    fixture
+        .repositories
+        .operations
+        .create(issue_record(
+            "op_spine_dnsacct",
+            "spine-dnsacct",
+            fixture.clock.now(),
+        ))
+        .await
+        .unwrap();
+
+    // PrepareChallenges runs before the CSR step, so the TXT resource exists
+    // once the CSR is available. Its value must be the draft's account-URL
+    // digest — NOT the dns-01 key-authorization digest.
+    let expected_txt = dns_account01_validation_value("https://acme.example/acct/1", "token-x");
+    assert_ne!(
+        expected_txt,
+        dns01_validation_value("token-x.some-thumbprint"),
+        "the account-URL binding must change the value"
+    );
+    let expected_hash = acmex::dns::record::txt_value_hash(&expected_txt);
+    let csr_key = fixture.drive_until_csr(&op_id).await;
+    assert!(
+        fixture
+            .presenter
+            .has_resource("_acme-challenge.example.com", &expected_hash)
+            .await,
+        "dns-account-01 TXT resource with account-bound value must be presented"
+    );
+
+    // The planned session really is dns-account-01.
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].value.challenge_type,
+        acmex::types::ChallengeType::DnsAccount01
+    );
+
+    fixture.serve_certificate(&chain_for_key("example.com", &csr_key, &ca));
+    let final_record = fixture.drive_to_terminal(&op_id).await;
+    assert_eq!(
+        final_record.status,
+        acmex::domain::OperationStatus::Succeeded,
+        "error: {:?}\nrequests: {:?}\nqueue: {:?}",
+        final_record.error,
+        fixture
+            .transport
+            .requests()
+            .iter()
+            .map(|r| format!("{:?} {}", r.method, r.url))
+            .collect::<Vec<_>>(),
+        fixture.transport.queued_fragments(),
+    );
+
+    // The persisted lease pins the exact value hash even after cleanup, and
+    // the challenge family is preserved end-to-end.
+    let sessions = fixture
+        .repositories
+        .challenge_sessions
+        .list_by_operation(&op_id)
+        .await
+        .unwrap();
+    let lease_id = sessions[0].value.lease_id.clone().expect("lease recorded");
+    let lease = fixture
+        .repositories
+        .challenge_leases
+        .get(&lease_id)
+        .await
+        .unwrap()
+        .expect("lease persisted");
+    assert_eq!(
+        lease.value.challenge_type,
+        acmex::types::ChallengeType::DnsAccount01
+    );
+    match &lease.value.locator {
+        acmex::domain::ChallengeLeaseLocator::Dns {
+            record_name,
+            value_hash,
+            ..
+        } => {
+            assert_eq!(record_name, "_acme-challenge.example.com");
+            assert_eq!(value_hash, &expected_hash);
+        }
+        other => panic!("dns locator expected, got {other:?}"),
+    }
+
+    // Observation/acknowledgement/cleanup reused the DNS machinery.
+    assert_eq!(fixture.presenter.resource_count().await, 0);
 
     cleanup_dir(&fixture.key_store_dir);
 }
