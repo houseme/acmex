@@ -1,5 +1,6 @@
 //! Certificate material rendering and downstream delivery sinks.
 
+pub mod agent_server;
 pub mod http_sink;
 pub mod k8s_sink;
 pub mod vault_sink;
@@ -25,6 +26,7 @@ use crate::error::{AcmeError, Result};
 use crate::key::SecretBytes;
 use crate::repository::{CasOutcome, CreateOutcome, RepositorySet};
 
+pub use agent_server::{AgentServerConfig, AgentServerError, AgentServerState, serve_agent};
 pub use http_sink::HttpAgentSink;
 
 /// Rollback retry budget; exhausted records stay in `RollbackFailed` for

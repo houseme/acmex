@@ -45,6 +45,9 @@ pub enum Commands {
 
     /// Start API server
     Serve(ServeArgs),
+
+    /// Reference remote delivery agent (server side of HttpAgentSink)
+    Agent(AgentArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -307,4 +310,52 @@ pub struct ServeArgs {
     /// Config file path
     #[arg(short, long)]
     pub config: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommands {
+    /// Serve the reference remote delivery agent (in-memory state) until
+    /// SIGINT/SIGTERM
+    Serve(AgentServeArgs),
+}
+
+/// `Debug` is hand-written: a bare-string `--token-ref` *is* a secret, so
+/// anything without an `env:`/`file:` prefix is redacted before it can land
+/// in the command log (`tracing::info!("{:?}", cli.command)`).
+#[derive(Parser)]
+pub struct AgentServeArgs {
+    /// Listen address
+    #[arg(long, default_value = crate::delivery::agent_server::DEFAULT_AGENT_LISTEN_ADDR)]
+    pub listen: String,
+
+    /// Deployment-agent bearer token as a SecretRef (`env:NAME` or
+    /// `file:/path`). Bare strings are rejected so plaintext tokens can
+    /// never sit in shell history or config files.
+    #[arg(long)]
+    pub token_ref: String,
+}
+
+impl std::fmt::Debug for AgentServeArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentServeArgs")
+            .field("listen", &self.listen)
+            .field("token_ref", &redact_token_ref(&self.token_ref))
+            .finish()
+    }
+}
+
+/// SecretRef forms (`env:`/`file:`) name a location, not a value, and are
+/// safe to log; everything else is treated as the secret itself.
+fn redact_token_ref(value: &str) -> &str {
+    if value.starts_with("env:") || value.starts_with("file:") {
+        value
+    } else {
+        "**redacted**"
+    }
 }
