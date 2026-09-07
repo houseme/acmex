@@ -24,7 +24,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PEBBLE_DIRECTORY_URL="${PEBBLE_DIRECTORY_URL:-https://127.0.0.1:14000/dir}"
 export PEBBLE_CHALLTESTSRV_ADMIN="${PEBBLE_CHALLTESTSRV_ADMIN:-http://127.0.0.1:8055}"
+export PEBBLE_MANAGEMENT_URL="${PEBBLE_MANAGEMENT_URL:-https://127.0.0.1:15000}"
 export PEBBLE_E2E_DOMAIN="${PEBBLE_E2E_DOMAIN:-acmex-test.example.com}"
+# RFC 8738 scenario identifiers (see scripts/docker-compose.pebble.yml):
+export PEBBLE_E2E_IPV4="${PEBBLE_E2E_IPV4:-10.30.50.3}"
+export PEBBLE_E2E_HOST_IPV4="${PEBBLE_E2E_HOST_IPV4:-0.250.250.254}"
+export PEBBLE_E2E_IPV6="${PEBBLE_E2E_IPV6:-fd3a:9d6d:1c4e::3}"
 # reqwest picks up the OS-level proxy configuration (macOS system proxy) and
 # would route loopback traffic through it, which fails with 400. The gate
 # only ever talks to localhost.
@@ -48,7 +53,11 @@ cat >"$PEBBLE_E2E_ARTIFACT_DIR/environment.txt" <<EOF
 timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 directory_url=$PEBBLE_DIRECTORY_URL
 challtestsrv_admin=$PEBBLE_CHALLTESTSRV_ADMIN
+management_url=$PEBBLE_MANAGEMENT_URL
 domain=$PEBBLE_E2E_DOMAIN
+ip_v4=$PEBBLE_E2E_IPV4
+ip_host_v4=$PEBBLE_E2E_HOST_IPV4
+ip_v6=$PEBBLE_E2E_IPV6
 git_sha=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
 EOF
 
@@ -59,7 +68,7 @@ if [[ ! -s "$PEBBLE_TRUST_ANCHOR_PEM_FILE" ]]; then
   # The issuance root is generated at Pebble startup and served by its
   # management API — `pebble.minica.pem` only covers Pebble's own TLS cert.
   echo "== extracting the runtime issuance root to $PEBBLE_TRUST_ANCHOR_PEM_FILE"
-  curl -sk "https://127.0.0.1:15000/roots/0" > "$PEBBLE_TRUST_ANCHOR_PEM_FILE"
+  curl -sk "$PEBBLE_MANAGEMENT_URL/roots/0" > "$PEBBLE_TRUST_ANCHOR_PEM_FILE"
 fi
 
 echo "== waiting for the pebble directory at $PEBBLE_DIRECTORY_URL"

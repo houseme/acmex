@@ -1,4 +1,4 @@
-# Pebble E2E environment (roadmap T12) — used by scripts/run_pebble_e2e.sh
+# Pebble E2E environment (roadmap T12/T13) — used by scripts/run_pebble_e2e.sh
 #
 #   docker compose -f scripts/docker-compose.pebble.yml up -d
 #   cargo test --test live_pebble_e2e -- --ignored --nocapture
@@ -8,6 +8,25 @@
 #             programmed over the admin API on :8055. DNS, HTTP-01 and
 #             TLS-ALPN-01 are served from one stable Docker-network address so
 #             Pebble's VA can reach the test server from inside the network.
+#
+# All host-side ports and the RFC 1918 subnet are overridable so several
+# local stacks can coexist (envsubst-style `${VAR:-default}` substitution):
+#   ACMEX_PEBBLE_DIR_PORT      host port for the ACME directory (default 14000)
+#   ACMEX_PEBBLE_ADMIN_PORT    host port for Pebble's management API (default 15000)
+#   ACMEX_PEBBLE_SUBNET        docker IPv4 subnet (default 10.30.50.0/24)
+#   ACMEX_PEBBLE_IPV4          pebble's static IPv4 (default 10.30.50.2)
+#   ACMEX_CHALLTESTSRV_IPV4    challtestsrv's static IPv4 (default 10.30.50.3)
+#   ACMEX_PEBBLE_V6_SUBNET     docker IPv6 subnet (default fd3a:9d6d:1c4e::/64)
+#   ACMEX_PEBBLE_IPV6          pebble's static IPv6 (default fd3a:9d6d:1c4e::2)
+#   ACMEX_CHALLTESTSRV_IPV6    challtestsrv's static IPv6 (default fd3a:9d6d:1c4e::3)
+#
+# RFC 8738 note: for IP identifiers Pebble's VA dials the identifier IP:port
+# directly (no DNS). challtestsrv serves HTTP-01 token-keyed, so HTTP-01 IP
+# validation works against its static address. Its TLS-ALPN-01 endpoint only
+# mints dNSName-SAN certificates, so IP TLS-ALPN-01 is served by acmex's own
+# production `LocalTlsListener` (see tests/live_pebble_e2e.rs) instead.
+name: acmex-pebble-e2e
+
 services:
   pebble:
     # ghcr.io/letsencrypt/pebble mirrors the Docker Hub image; it is used
@@ -29,11 +48,12 @@ services:
     volumes:
       - ./pebble/pebble.json:/etc/pebble/pebble.json:ro
     ports:
-      - "14000:14000" # ACME directory (HTTPS)
-      - "15000:15000" # admin API
+      - "${ACMEX_PEBBLE_DIR_PORT:-14000}:14000" # ACME directory (HTTPS)
+      - "${ACMEX_PEBBLE_ADMIN_PORT:-15000}:15000" # admin API
     networks:
       pebble-net:
-        ipv4_address: 10.30.50.2
+        ipv4_address: ${ACMEX_PEBBLE_IPV4:-10.30.50.2}
+        ipv6_address: ${ACMEX_PEBBLE_IPV6:-fd3a:9d6d:1c4e::2}
 
   challtestsrv:
     image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
@@ -48,9 +68,9 @@ services:
         "-tlsalpn01",
         ":8051",
         "-defaultIPv4",
-        "10.30.50.3",
+        "${ACMEX_CHALLTESTSRV_IPV4:-10.30.50.3}",
         "-defaultIPv6",
-        "::ffff:10.30.50.3",
+        "${ACMEX_CHALLTESTSRV_IPV6:-fd3a:9d6d:1c4e::3}",
         "-https01",
         "",
         "-doh",
@@ -60,15 +80,19 @@ services:
       - "8055:8055" # admin HTTP API (set-txt / clear-txt / dump-dns)
       - "8053:8053/udp" # DNS for pebble's resolver
       - "8053:8053/tcp"
-      - "8052:8052" # HTTP-01 (unused by the DNS-01 flow, exposed for T07)
-      - "8051:8051" # TLS-ALPN-01 (unused by the DNS-01 flow, exposed for T07)
+      # No host mappings for :8052/:8051: Pebble's VA dials challtestsrv's
+      # in-network address directly, and the RFC 8738 TLS-ALPN-01 scenario
+      # binds :8051 on the host for its own listener.
     networks:
       pebble-net:
-        ipv4_address: 10.30.50.3
+        ipv4_address: ${ACMEX_CHALLTESTSRV_IPV4:-10.30.50.3}
+        ipv6_address: ${ACMEX_CHALLTESTSRV_IPV6:-fd3a:9d6d:1c4e::3}
 
 networks:
   pebble-net:
     driver: bridge
+    enable_ipv6: true
     ipam:
       config:
-        - subnet: 10.30.50.0/24
+        - subnet: ${ACMEX_PEBBLE_SUBNET:-10.30.50.0/24}
+        - subnet: ${ACMEX_PEBBLE_V6_SUBNET:-fd3a:9d6d:1c4e::/64}

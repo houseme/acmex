@@ -211,6 +211,12 @@ pub struct AcmeCaBackend {
     secrets: Arc<dyn SecretResolver>,
     nonce_pool: Arc<super::session::SharedNoncePool>,
     sessions: tokio::sync::RwLock<Vec<(String, Arc<AcmeSession>)>>,
+    /// Deployment-declared identifier types the CA accepts (`dns`, `ip`, ...).
+    /// The ACME directory has no field to advertise these, so the default is
+    /// empty (DNS-only); deployments targeting an RFC 8738-capable CA declare
+    /// the extra types via
+    /// [`with_identifier_types`](Self::with_identifier_types).
+    identifier_types: Vec<String>,
 }
 
 impl AcmeCaBackend {
@@ -234,6 +240,7 @@ impl AcmeCaBackend {
             secrets: Arc::new(EnvFileSecretResolver),
             nonce_pool: Arc::new(super::session::SharedNoncePool::new()),
             sessions: tokio::sync::RwLock::new(Vec::new()),
+            identifier_types: Vec::new(),
         }
     }
 
@@ -251,6 +258,20 @@ impl AcmeCaBackend {
     /// Uses a deployment-provided secret resolver for EAB credentials.
     pub fn with_secret_resolver(mut self, secrets: Arc<dyn SecretResolver>) -> Self {
         self.secrets = secrets;
+        self
+    }
+
+    /// Declares the identifier types this CA accepts (`dns`, `ip`, ...).
+    ///
+    /// The ACME directory (RFC 8555 §7.1.1) has no field advertising
+    /// identifier types, so [`capabilities`](CaBackend::capabilities) cannot
+    /// discover them. Without a declaration the pipeline treats the CA as
+    /// DNS-only and rejects IP-identifier orders (RFC 8738) as a policy
+    /// violation before any order is created — deployments targeting an
+    /// IP-capable CA (Pebble, or public CAs with RFC 8738 support) declare
+    /// the capability here so the pre-order gate passes.
+    pub fn with_identifier_types(mut self, identifier_types: Vec<String>) -> Self {
+        self.identifier_types = identifier_types;
         self
     }
 
@@ -393,9 +414,10 @@ impl CaBackend for AcmeCaBackend {
         Ok(CaCapabilities {
             ca_id: self.ca_id.clone(),
             directory_url: self.directory_url.clone(),
-            // The ACME directory does not advertise identifier types; leave
-            // unknown (DNS-only default) unless metadata says otherwise.
-            identifier_types: Vec::new(),
+            // The ACME directory does not advertise identifier types; the
+            // deployment-declared set (with_identifier_types) is authoritative
+            // and stays empty (DNS-only default) when not declared.
+            identifier_types: self.identifier_types.clone(),
             supports_ari: directory.renewal_info.is_some(),
             profiles,
             requires_eab: directory
@@ -848,6 +870,7 @@ pub fn identifiers_to_wire(identifiers: &[Identifier]) -> Vec<serde_json::Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ca_backend::transport::ScriptedResponse;
 
     #[test]
     fn account_key_id_is_deterministic() {
@@ -857,5 +880,55 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert!(a.starts_with("key_acct_"));
+    }
+
+    fn directory_body() -> serde_json::Value {
+        serde_json::json!({
+            "newNonce": "https://acme.example/new-nonce",
+            "newAccount": "https://acme.example/new-account",
+            "newOrder": "https://acme.example/new-order",
+            "revokeCert": "https://acme.example/revoke-cert",
+            "keyChange": "https://acme.example/key-change",
+        })
+    }
+
+    fn test_backend(fake: Arc<FakeAcmeTransport>) -> AcmeCaBackend {
+        let repositories = crate::repository::MemoryRepository::new().into_set();
+        AcmeCaBackend::new(
+            "test-ca",
+            "https://acme.example/directory",
+            fake,
+            Arc::new(KeyPair::generate().unwrap()),
+            repositories,
+        )
+    }
+
+    /// Capabilities default to DNS-only: the ACME directory has no
+    /// identifier-type field, so an undeclared CA must not report `ip`.
+    #[tokio::test]
+    async fn undeclared_capabilities_stay_dns_only() {
+        let fake = Arc::new(FakeAcmeTransport::new(jiff::Timestamp::now()));
+        fake.push(ScriptedResponse::json("directory", 200, directory_body()).uses(100));
+        let caps = test_backend(fake).capabilities().await.unwrap();
+        assert!(caps.identifier_types.is_empty());
+        assert!(caps.supports_identifier_type("dns"));
+        assert!(!caps.supports_identifier_type("ip"));
+    }
+
+    /// The deployment declaration (with_identifier_types) is what the
+    /// capability gate (CreateOrResumeOrder) consults for RFC 8738 orders
+    /// against CAs the directory cannot describe.
+    #[tokio::test]
+    async fn declared_identifier_types_reach_capabilities() {
+        let fake = Arc::new(FakeAcmeTransport::new(jiff::Timestamp::now()));
+        fake.push(ScriptedResponse::json("directory", 200, directory_body()).uses(100));
+        let caps = test_backend(fake)
+            .with_identifier_types(vec!["dns".to_string(), "ip".to_string()])
+            .capabilities()
+            .await
+            .unwrap();
+        assert_eq!(caps.identifier_types, vec!["dns", "ip"]);
+        assert!(caps.supports_identifier_type("ip"));
+        assert!(caps.supports_identifier_type("dns"));
     }
 }

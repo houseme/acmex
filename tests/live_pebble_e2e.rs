@@ -36,10 +36,10 @@ use acmex::challenge::{
     dns01_validation_value,
 };
 use acmex::domain::{
-    CertificateIntent, ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState, ChallengeSet,
-    DeliveryTarget, DeliveryTargetKind, DeploymentId, DeploymentState, IdentifierSet, IntentId,
-    LineageId, OperationId, OperationKind, OperationRecord, OperationStatus, OperationSubject,
-    TenantId, ValidationPolicy, VersionId, WorkflowStepKind,
+    CaPolicy, CertificateIntent, ChallengeLease, ChallengeLeaseLocator, ChallengeLeaseState,
+    ChallengeSet, DeliveryTarget, DeliveryTargetKind, DeploymentId, DeploymentState, Identifier,
+    IdentifierSet, IntentId, LineageId, OperationId, OperationKind, OperationRecord,
+    OperationStatus, OperationSubject, TenantId, ValidationPolicy, VersionId, WorkflowStepKind,
 };
 use acmex::key::SoftwareKeyProvider;
 use acmex::protocol::Jwk;
@@ -57,6 +57,19 @@ struct PebbleEnv {
     challtestsrv_admin: String,
     challtestsrv_dns: String,
     domain: String,
+    /// challtestsrv's static IPv4 inside the compose network: the identifier
+    /// for the RFC 8738 HTTP-01 scenario (the VA dials this address directly,
+    /// no DNS involved).
+    ipv4: String,
+    /// An IPv4 that reaches the *host* from pebble's container (OrbStack's
+    /// `host.docker.internal` literal): the identifier for the RFC 8738
+    /// TLS-ALPN-01 scenario, served by acmex's own production
+    /// `LocalTlsListener` because challtestsrv cannot mint iPAddress-SAN
+    /// certificates.
+    host_ipv4: String,
+    /// challtestsrv's static IPv6 inside the compose network (best-effort
+    /// RFC 8738 HTTP-01 over IPv6).
+    ipv6: String,
     trust_anchor_pem_file: Option<String>,
 }
 
@@ -67,6 +80,9 @@ impl PebbleEnv {
             challtestsrv_admin: env_or("PEBBLE_CHALLTESTSRV_ADMIN", "http://127.0.0.1:8055"),
             challtestsrv_dns: env_or("PEBBLE_CHALLTESTSRV_DNS", "127.0.0.1:8053"),
             domain: env_or("PEBBLE_E2E_DOMAIN", "acmex-test.example.com"),
+            ipv4: env_or("PEBBLE_E2E_IPV4", "10.30.50.3"),
+            host_ipv4: env_or("PEBBLE_E2E_HOST_IPV4", "0.250.250.254"),
+            ipv6: env_or("PEBBLE_E2E_IPV6", "fd3a:9d6d:1c4e::3"),
             trust_anchor_pem_file: std::env::var("PEBBLE_TRUST_ANCHOR_PEM_FILE").ok(),
         }
     }
@@ -583,6 +599,42 @@ async fn run_pebble_issue(
     suffix: &str,
     mode: PebbleRunMode,
 ) -> VersionId {
+    let env = PebbleEnv::load();
+    let identifiers = IdentifierSet::parse([env.domain.as_str()]).unwrap();
+    run_pebble_issue_scenario(IssueScenario {
+        challenge_type,
+        suffix: suffix.to_string(),
+        mode,
+        identifiers,
+        presenters: pebble_presenters(&env.challtestsrv_admin),
+        allow_private_identifiers: false,
+    })
+    .await
+}
+
+/// One gated issuance scenario against the live Pebble.
+struct IssueScenario {
+    challenge_type: ChallengeType,
+    suffix: String,
+    mode: PebbleRunMode,
+    identifiers: IdentifierSet,
+    presenters: PresenterRegistry,
+    /// RFC 8738 private/reserved addresses (Pebble's compose network) are
+    /// only issuable with the CA-policy opt-in; public CAs reject them at
+    /// policy time (T07).
+    allow_private_identifiers: bool,
+}
+
+async fn run_pebble_issue_scenario(scenario: IssueScenario) -> VersionId {
+    let IssueScenario {
+        challenge_type,
+        suffix,
+        mode,
+        identifiers,
+        presenters,
+        allow_private_identifiers,
+    } = scenario;
+    let suffix = suffix.as_str();
     if std::env::var("RUN_PEBBLE_E2E").as_deref() != Ok("1") {
         eprintln!(
             "SKIP: RUN_PEBBLE_E2E=1 not set — see scripts/run_pebble_e2e.sh; \
@@ -605,8 +657,13 @@ async fn run_pebble_issue(
         }
     };
     println!(
-        "🎯 Pebble E2E {challenge_type} against {} ({})",
-        env.directory_url, env.domain
+        "🎯 Pebble E2E {challenge_type} for [{}] against {}",
+        identifiers
+            .iter()
+            .map(|id| id.acme_value())
+            .collect::<Vec<_>>()
+            .join(", "),
+        env.directory_url
     );
 
     // Readiness probe with an actionable message.
@@ -639,7 +696,6 @@ async fn run_pebble_issue(
 
     // Durable state + intent/lineage fixtures.
     let repositories = MemoryRepository::new().into_set();
-    let identifiers = IdentifierSet::parse([env.domain.as_str()]).unwrap();
     let lineage_id = LineageId::new(format!("lin_pebble_{suffix}")).unwrap();
     let deploy_root = std::env::temp_dir().join(format!(
         "acmex-pebble-deploy-{}-{suffix}",
@@ -649,7 +705,10 @@ async fn run_pebble_issue(
         id: IntentId::new(format!("int_pebble_{suffix}")).unwrap(),
         tenant_id: TenantId::default_tenant(),
         identifiers: identifiers.clone(),
-        ca_policy: Default::default(),
+        ca_policy: CaPolicy {
+            allow_private_identifiers,
+            ..Default::default()
+        },
         validation_policy: ValidationPolicy {
             allowed_challenges: ChallengeSet::new([challenge_type]),
             ..Default::default()
@@ -701,7 +760,11 @@ async fn run_pebble_issue(
         Arc::new(InsecurePebbleTransport::new()),
         account_key,
         repositories.clone(),
-    );
+    )
+    // The ACME directory cannot advertise identifier types; Pebble supports
+    // RFC 8738, so the deployment declares `ip` for the pre-order capability
+    // gate (CreateOrResumeOrder).
+    .with_identifier_types(vec!["dns".to_string(), "ip".to_string()]);
     // Key authorizations read the thumbprint through this handle; the
     // backend refreshes it when an account key rollover completes.
     acme_backend.attach_jwk_handle(account_jwk.clone());
@@ -731,7 +794,7 @@ async fn run_pebble_issue(
             WorkflowWorkerComponents {
                 backend: backend.clone(),
                 account_jwk: account_jwk.clone(),
-                presenters: pebble_presenters(&env.challtestsrv_admin),
+                presenters: presenters.clone(),
                 key_provider: key_provider.clone(),
                 orchestrator: orchestrator.clone(),
             },
@@ -1133,5 +1196,78 @@ async fn pebble_dns01_file_sink_health_failure_rolls_back() {
         "dns01_rollback",
         PebbleRunMode::Rollback,
     )
+    .await;
+}
+
+/// RFC 8738 (IP identifier) issuance with HTTP-01 against Pebble: the VA
+/// dials challtestsrv's static IPv4 directly (no DNS involved) and reads the
+/// token-keyed challenge file. Full spine: intent → order → HTTP-01
+/// challenge → finalize → strict verification (iPAddress SAN) → File sink
+/// deployment + activation.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_full_issuance_ip_http01() {
+    let env = PebbleEnv::load();
+    let _ = run_pebble_issue_scenario(IssueScenario {
+        challenge_type: ChallengeType::Http01,
+        suffix: "ip_http01".to_string(),
+        mode: PebbleRunMode::Basic,
+        identifiers: IdentifierSet::new(vec![Identifier::try_ip(&env.ipv4).unwrap()]).unwrap(),
+        presenters: pebble_presenters(&env.challtestsrv_admin),
+        allow_private_identifiers: true,
+    })
+    .await;
+}
+
+/// RFC 8738 (IP identifier) issuance with TLS-ALPN-01 against Pebble: the VA
+/// dials the identifier IPv4:8051 with the `in-addr.arpa` SNI and requires a
+/// validation certificate whose only SAN is that exact iPAddress
+/// (RFC 8737). challtestsrv only mints dNSName-SAN certificates, so the
+/// challenge is served by acmex's production `LocalTlsListener` +
+/// `TlsAlpn01Presenter` — the same real edge the worker assembly binds.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_full_issuance_ip_tlsalpn01() {
+    let env = PebbleEnv::load();
+    let listener = acmex::challenge::tls_alpn01::LocalTlsListener::bind(
+        std::net::SocketAddr::from(([0, 0, 0, 0], 8051)),
+    )
+    .await
+    .unwrap_or_else(|err| {
+        panic!(
+            "cannot bind the local TLS-ALPN-01 listener on :8051 ({err}); \
+             the port must be free for the RFC 8738 scenario"
+        )
+    });
+    let mut presenters = PresenterRegistry::new();
+    presenters.register(Arc::new(acmex::challenge::TlsAlpn01Presenter::with_edge(
+        Arc::new(listener),
+    )));
+    let _ = run_pebble_issue_scenario(IssueScenario {
+        challenge_type: ChallengeType::TlsAlpn01,
+        suffix: "ip_tlsalpn01".to_string(),
+        mode: PebbleRunMode::Basic,
+        identifiers: IdentifierSet::new(vec![Identifier::try_ip(&env.host_ipv4).unwrap()]).unwrap(),
+        presenters,
+        allow_private_identifiers: true,
+    })
+    .await;
+}
+
+/// RFC 8738 (IP identifier) issuance over IPv6 with HTTP-01, best effort:
+/// the VA dials challtestsrv's static IPv6 address directly. Requires the
+/// docker runtime to honour `enable_ipv6` with static container addresses.
+#[tokio::test]
+#[ignore = "requires a running pebble + challtestsrv pair (scripts/run_pebble_e2e.sh)"]
+async fn pebble_full_issuance_ip_http01_v6() {
+    let env = PebbleEnv::load();
+    let _ = run_pebble_issue_scenario(IssueScenario {
+        challenge_type: ChallengeType::Http01,
+        suffix: "ip_http01_v6".to_string(),
+        mode: PebbleRunMode::Basic,
+        identifiers: IdentifierSet::new(vec![Identifier::try_ip(&env.ipv6).unwrap()]).unwrap(),
+        presenters: pebble_presenters(&env.challtestsrv_admin),
+        allow_private_identifiers: true,
+    })
     .await;
 }
