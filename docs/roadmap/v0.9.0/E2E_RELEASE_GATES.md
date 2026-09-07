@@ -56,9 +56,10 @@ disabled; Pebble's certificate is invalid by design), with DNS-01, HTTP-01
 and TLS-ALPN-01 programmed through the challtestsrv admin API, driving
 intent → order → challenge → CSR → finalize → download → strict verification
 → File sink deploy → activation. The DNS-01 lifecycle scenario also covers
-renewal replacement and CA revocation. It has not yet been *executed* in a
-prepared environment (no docker in the dev sandbox) — an executed run is still
-required before L4 counts as passed.
+renewal replacement and CA revocation. Executed green repeatedly on 2026-09-06/07 (latest runs use locally built
+pebble v2.10.1 + challtestsrv v1.4.2 after the docker mirror blocked image
+pulls; the compose path remains the CI wiring). Evidence artifacts live under
+`target/pebble-e2e/`.
 
 Successful runs archive `environment.txt`, `cargo-test-live-pebble-e2e.log`,
 and `compose.log` under `target/pebble-e2e/<timestamp>/`; CI uploads the

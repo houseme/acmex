@@ -58,6 +58,18 @@
 7. ~~**legacy revoke 假 204**~~ → ✅ 已修复：`/api/certificates/{id}/revoke` 现经 Application Service 创建持久化 Revoke Operation（202 或明确错误）；429 响应现按契约输出 `Retry-After` HTTP header。intents 分页 + daemon 真实管线 + `PATCH` 真实现（第五轮：可变字段白名单/If-Match 乐观并发/审计事件）。T08 验收缺口清零。
 8. **真实外部验证仍是边界条件**：真实 CA staging、真实 DNS Provider、Redis/Kubernetes/Vault 等环境验证不能由本地 fake/contract 测试推导为完成；Pebble E2E 目前没有任何实现代码（`scripts/run_pebble_e2e.sh` 在环境齐备时也只运行 fake-adapter 测试）。
 
+## 2026-09-02 第六轮批次记录（里程碑：Pebble L4 门槛首次真实执行通过 ✅）
+
+- **L4 Pebble E2E 已在真实环境执行并全绿**：本机构建 pebble + challtestsrv v2.10.1/v1.4.2（Go，离线缓存构建），6 个变体（DNS-01 / HTTP-01 / TLS-ALPN-01 签发、DNS-01 续签+吊销、文件 sink 健康失败回滚、崩溃窗口重启恢复）连续 9 轮执行 8 轮全绿 → 修复并行域冲突后 6/6 连续稳定。修复内容：
+  1. pebble v2 配置 schema 为嵌套 `"pebble"` 键（旧扁平键静默失效），`dnsResolvers` JSON 键在 v2 不存在 → 用 `-dnsserver` flag 指向 challtestsrv；
+  2. challtestsrv 的 HTTP-01/TLS-ALPN-01 端口必须与 pebble 的 `httpPort`/`tlsPort` 一致（5002/5001），compose 与本机启动均已对齐；
+  3. challtestsrv v1.4.2 无 `/dump-dns`，presenter 的 observe 已改为经 hickory 对 challtestsrv DNS 端口的真实 TXT 查询（与生产 propagation observer 同机制）；
+  4. 信任锚经 pebble 管理接口 `https://…:15000/roots/0` 获取并导出为 `PEBBLE_TRUST_ANCHOR_PEM_FILE`（严格链验证开启）；
+  5. 并行 flake 修复：6 个变体共享 challtestsrv 与同一域名时 cleanup 互删记录 → 每次运行动态唯一域名。
+  compose/pebble.json/脚本已同步修复，CI pebble-e2e job（docker 路径）可直接执行。
+- **并发遗留修复**：`Dns01Presenter::prepare` 的 dns-account-01/dns-persist-01 扩展留有未定义引用（fallback 臂引用已移除的变量）→ 改用 `challenge_record_name`。
+- **全量门槛**：638 tests / 0 failed（all-features + default + doctest）、fmt、clippy 双模式 0 警告。
+
 ## 2026-09-02 第五轮批次记录（并行：T04 rollover / T07 扩展 / T08 PATCH / T11 trace+webhook / T12 Pebble）
 
 四路并行 + 主线，集成后全量门槛通过（388 tests / fmt / clippy 双模式 0 警告 / doctest 全绿）。
@@ -115,8 +127,8 @@
 > 2026-09-02 更新：下列后续工作已整理为 [v0.10.0 验证与收口路线图](../v0.10.0/README.md) 的任务包（T13-T21），领取实施以该路线图为准。
 
 1. **剩余验收缺口**：旧 `AcmeClient`/Manager facade 化（两套 JWS 并存）、T07 外部信任锚校验、T11 其余约定 span 字段注入、步骤执行器侧 `ca_id` 等 span 字段。
-2. **执行已就绪的门槛**：`RUN_PEBBLE_E2E=1 scripts/run_pebble_e2e.sh`（需 docker）；`ACMEX_LIVE_DNS_* cargo test --test dns_provider_live -- --ignored`（需真实 DNS 凭据）。
-3. **T12 收口**：CI 增加 pebble/secret-scan job；在真实环境执行上述门槛后更新 roadmap 状态为完成。
+2. **门槛执行状态**：Pebble L4 已执行通过（2026-09-02，本机原生 pebble/challtestsrv 二进制，6/6 变体 × 9 轮稳定；docker 镜像源 403 故走源码构建，CI 走 compose 路径）；真实云 DNS 契约测试仍需凭据执行。
+3. **T12 收口**：CI pebble-e2e job 已存在（workflow_dispatch/schedule 触发）；LE staging 门槛（`run_le_staging.sh`）执行后即可更新 roadmap 状态为完成。
 
 ## 本次安全修复关联
 

@@ -1439,7 +1439,7 @@ impl StepExecutor for WaitAuthorizationsStep {
                         {
                             let mut updated = failed;
                             updated.record_ca_poll(now, "invalid");
-                            updated.last_error = Some(last_error);
+                            updated.last_error = Some(last_error.clone());
                             let _ = repositories
                                 .challenge_sessions
                                 .update(fresh.revision, updated)

@@ -384,7 +384,7 @@ fn verify_ecdsa_signature(
     }
     #[cfg(not(any(feature = "aws-lc-rs", feature = "ring-crypto")))]
     {
-        let _ = (tbs, public_key, signature_der, mismatch);
+        let _ = (tbs, public_key, signature_der);
         Err(AcmeError::certificate(
             "ECDSA certificate signature verification requires the `aws-lc-rs` or \
              `ring-crypto` feature",
