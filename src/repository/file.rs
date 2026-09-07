@@ -637,6 +637,7 @@ impl OutboxRepository for FileRepository {
         self.update_outbox(sequence, |event| {
             event.dead_lettered = false;
             event.processed = false;
+            event.attempts = 0;
             event.last_error = None;
             event.next_attempt_at = None;
         })

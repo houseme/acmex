@@ -37,18 +37,24 @@
 //! prefix, so prefer a throwaway DB index or an ephemeral container.
 #![cfg(feature = "redis")]
 
-mod common;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use acmex::repository::RepositorySet;
-use common::repository_contract::{
+#[path = "common/repository_contract.rs"]
+mod repository_contract;
+
+use acmex::repository::{RedisRepository, RepositorySet, SystemClock};
+use repository_contract::{
     account_contract, intent_contract, lease_contract, lineage_version_contract,
     operation_contract, outbox_contract,
 };
 
 const SKIP_MESSAGE: &str = "SKIP: ACMEX_TEST_REDIS_URL is not set (e.g. \
 redis://127.0.0.1:6379/15 — use a disposable DB index; the suite writes under \
-the `acmex:v1:` prefix). A skipped Redis repository contract run is not a \
+the `acmex:test:*` prefix). A skipped Redis repository contract run is not a \
 release pass.";
+
+static TEST_PREFIX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn redis_url_or_skip() -> String {
     match std::env::var("ACMEX_TEST_REDIS_URL") {
@@ -61,37 +67,46 @@ fn redis_url_or_skip() -> String {
 }
 
 async fn redis_set() -> RepositorySet {
-    RepositorySet::redis(&redis_url_or_skip())
+    let index = TEST_PREFIX_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let prefix = format!("acmex:test:{}:{index}", std::process::id());
+    RedisRepository::with_key_prefix(&redis_url_or_skip(), prefix, Arc::new(SystemClock))
         .await
+        .map(RedisRepository::into_set)
         .expect("connect to redis at ACMEX_TEST_REDIS_URL")
 }
 
 #[tokio::test]
+#[ignore = "requires ACMEX_TEST_REDIS_URL pointing at a disposable Redis DB"]
 async fn intents_redis() {
     intent_contract(&redis_set().await).await;
 }
 
 #[tokio::test]
+#[ignore = "requires ACMEX_TEST_REDIS_URL pointing at a disposable Redis DB"]
 async fn lineage_versions_redis() {
     lineage_version_contract(&redis_set().await).await;
 }
 
 #[tokio::test]
+#[ignore = "requires ACMEX_TEST_REDIS_URL pointing at a disposable Redis DB"]
 async fn operations_redis() {
     operation_contract(&redis_set().await).await;
 }
 
 #[tokio::test]
+#[ignore = "requires ACMEX_TEST_REDIS_URL pointing at a disposable Redis DB"]
 async fn leases_redis() {
     lease_contract(&redis_set().await).await;
 }
 
 #[tokio::test]
+#[ignore = "requires ACMEX_TEST_REDIS_URL pointing at a disposable Redis DB"]
 async fn outbox_redis() {
     outbox_contract(&redis_set().await).await;
 }
 
 #[tokio::test]
+#[ignore = "requires ACMEX_TEST_REDIS_URL pointing at a disposable Redis DB"]
 async fn accounts_redis() {
     account_contract(&redis_set().await).await;
 }
