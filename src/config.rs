@@ -98,6 +98,15 @@ pub struct AcmeSettings {
     #[serde(default)]
     pub external_account_binding: Option<ExternalAccountBinding>,
 
+    /// Identifier types this CA deployment accepts, e.g. `["dns", "ip"]`.
+    /// Drives the pre-order capability gate: an intent whose identifiers the
+    /// deployment does not declare fails at plan time without creating an
+    /// ACME order. Defaults to `["dns"]` (empty or unset); add `"ip"` for
+    /// CAs with RFC 8738 support. Unknown values fail configuration
+    /// validation.
+    #[serde(default)]
+    pub identifier_types: Vec<String>,
+
     /// PEM files containing trusted roots for issued-certificate acceptance.
     #[serde(default)]
     pub trust_anchor_pem_files: Vec<String>,
@@ -1238,6 +1247,7 @@ impl Default for AcmeSettings {
             contact: Vec::new(),
             tos_agreed: true,
             external_account_binding: None,
+            identifier_types: Vec::new(),
             trust_anchor_pem_files: Vec::new(),
             skip_certificate_trust_check: false,
             directory: String::new(),
@@ -1441,6 +1451,15 @@ impl Config {
             return Err(AcmeError::configuration(
                 "ACME directory URL could not be resolved",
             ));
+        }
+
+        for identifier_type in &self.acme.identifier_types {
+            if !matches!(identifier_type.as_str(), "dns" | "ip") {
+                return Err(AcmeError::configuration(format!(
+                    "acme.identifier_types contains unknown value `{identifier_type}`; \
+                     supported values are \"dns\" and \"ip\""
+                )));
+            }
         }
 
         match self.storage.backend.as_str() {

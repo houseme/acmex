@@ -270,6 +270,11 @@ impl AcmeCaBackend {
     /// violation before any order is created — deployments targeting an
     /// IP-capable CA (Pebble, or public CAs with RFC 8738 support) declare
     /// the capability here so the pre-order gate passes.
+    /// Declares the identifier types this CA accepts. The set is exact:
+    /// the pre-order gate rejects intents whose identifier type is not in
+    /// the list, so `["ip"]` alone also *removes* DNS support — include
+    /// `"dns"` unless the deployment really is IP-only (ACME CAs
+    /// effectively always support DNS).
     pub fn with_identifier_types(mut self, identifier_types: Vec<String>) -> Self {
         self.identifier_types = identifier_types;
         self

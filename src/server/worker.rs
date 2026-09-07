@@ -637,13 +637,23 @@ pub async fn build_engine_from_config(
         Arc::new(ReqwestAcmeTransport::new()),
         metrics.clone(),
     );
-    let acme_backend = Arc::new(AcmeCaBackend::new(
+    let mut acme_backend = AcmeCaBackend::new(
         ca_label,
         config.acme.directory.clone(),
         transport,
         key_pair,
         repositories.clone(),
-    ));
+    );
+    // Declare the identifier types this deployment accepts (default
+    // DNS-only). The pre-order capability gate uses this to reject
+    // unsupported intents at plan time without creating an ACME order.
+    let identifier_types = if config.acme.identifier_types.is_empty() {
+        vec!["dns".to_string()]
+    } else {
+        config.acme.identifier_types.clone()
+    };
+    acme_backend = acme_backend.with_identifier_types(identifier_types);
+    let acme_backend = Arc::new(acme_backend);
     acme_backend.attach_jwk_handle(account_jwk.clone());
     let backend: Arc<dyn crate::ca_backend::CaBackend> = acme_backend;
 

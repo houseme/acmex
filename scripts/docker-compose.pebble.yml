@@ -27,6 +27,11 @@
 # production `LocalTlsListener` (see tests/live_pebble_e2e.rs) instead.
 name: acmex-pebble-e2e
 
+# Host-side knobs (with defaults): host ports 14000/15000, challenge
+# subnet 10.30.50.0/24. The IPv4 TLS-ALPN-01 IP scenario dials a host
+# address that containers can reach — set PEBBLE_E2E_HOST_IPV4 when the
+# OrbStack default (0.250.250.254) does not apply to your runtime.
+
 services:
   pebble:
     # ghcr.io/letsencrypt/pebble mirrors the Docker Hub image; it is used

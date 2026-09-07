@@ -67,8 +67,23 @@ docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" up -d --wait
 if [[ ! -s "$PEBBLE_TRUST_ANCHOR_PEM_FILE" ]]; then
   # The issuance root is generated at Pebble startup and served by its
   # management API — `pebble.minica.pem` only covers Pebble's own TLS cert.
+  # `-f` plus retries: a transient 404/empty body must not be silently
+  # written into the trust-anchor file (the test would then fail far from
+  # the cause).
   echo "== extracting the runtime issuance root to $PEBBLE_TRUST_ANCHOR_PEM_FILE"
-  curl -sk "$PEBBLE_MANAGEMENT_URL/roots/0" > "$PEBBLE_TRUST_ANCHOR_PEM_FILE"
+  root_ok=0
+  for _ in $(seq 1 10); do
+    if curl -sfk "$PEBBLE_MANAGEMENT_URL/roots/0" > "$PEBBLE_TRUST_ANCHOR_PEM_FILE" \
+        && grep -q "BEGIN CERTIFICATE" "$PEBBLE_TRUST_ANCHOR_PEM_FILE"; then
+      root_ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$root_ok" != "1" ]]; then
+    echo "SKIP: could not fetch a valid issuance root from $PEBBLE_MANAGEMENT_URL/roots/0. A skipped Pebble run is not a release pass." >&2
+    exit 77
+  fi
 fi
 
 echo "== waiting for the pebble directory at $PEBBLE_DIRECTORY_URL"
@@ -89,6 +104,15 @@ echo "== running the live Pebble E2E (production executor set)"
 if ! RUN_PEBBLE_E2E=1 cargo test --test live_pebble_e2e -- --ignored --nocapture --test-threads=1 2>&1 \
   | tee "$PEBBLE_E2E_ARTIFACT_DIR/cargo-test-live-pebble-e2e.log"; then
   echo "== L4 Pebble E2E FAILED; artifacts: $PEBBLE_E2E_ARTIFACT_DIR" >&2
+  exit 1
+fi
+
+# A skipped scenario prints "SKIP:" and still reports `passed`; the gate
+# must not mistake "everything skipped" for "everything green" (same
+# contract as the exit-77 preflight skips).
+skip_count=$(grep -c "^SKIP:" "$PEBBLE_E2E_ARTIFACT_DIR/cargo-test-live-pebble-e2e.log" || true)
+if [[ "$skip_count" != "0" ]]; then
+  echo "== L4 Pebble E2E INVALID: $skip_count scenario(s) skipped inside the test run; artifacts: $PEBBLE_E2E_ARTIFACT_DIR" >&2
   exit 1
 fi
 

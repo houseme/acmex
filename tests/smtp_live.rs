@@ -30,8 +30,8 @@
 //! Run: `cargo test --test smtp_live -- --ignored --nocapture`
 //!
 //! The test sends exactly one message with a unique subject, asserts it in
-//! `GET /api/v1/messages`, then wipes the store with
-//! `DELETE /api/v1/messages`. SMTP credentials are never hardcoded: the
+//! `GET /api/v1/messages`, then deletes that message by id (the relay's
+//! store is left untouched otherwise, so a shared relay is safe). SMTP credentials are never hardcoded: the
 //! password travels as an `env:` SecretRef resolved per delivery, matching
 //! the production configuration contract. A missing environment variable
 //! prints an explicit SKIP line — that counts as *no evidence collected*,
@@ -68,7 +68,9 @@ fn config() -> Option<LiveSmtpConfig> {
     let username = std::env::var("ACMEX_LIVE_SMTP_USERNAME").ok();
     Some(LiveSmtpConfig {
         host,
-        port: port.parse().expect("ACMEX_LIVE_SMTP_PORT is a port number"),
+        port: port
+            .parse()
+            .unwrap_or_else(|_| panic!("ACMEX_LIVE_SMTP_PORT must be a port number, got {port:?}")),
         from,
         to,
         api_base: api_base.trim_end_matches('/').to_string(),
@@ -188,9 +190,14 @@ async fn live_smtp_email_delivery_is_observed_by_the_relay_api() {
         "the relay must hold exactly the subject the notifier rendered"
     );
 
-    // Cleanup: wipe the throwaway store so the evidence run leaves nothing.
+    // Cleanup: delete exactly the message this run produced (by id), so a
+    // shared relay store is left untouched; assert the deletion removed it.
+    let message_id = message["ID"]
+        .as_str()
+        .expect("relay message carries an id")
+        .to_string();
     let deleted = client
-        .delete(format!("{}/api/v1/messages", config.api_base))
+        .delete(format!("{}/api/v1/message/{message_id}", config.api_base))
         .send()
         .await
         .expect("relay REST API DELETE");
@@ -207,9 +214,13 @@ async fn live_smtp_email_delivery_is_observed_by_the_relay_api() {
         .json()
         .await
         .expect("relay REST API JSON");
-    assert_eq!(
-        after["total"], 0,
-        "the relay store must be empty after cleanup"
+    assert!(
+        !after["messages"]
+            .as_array()
+            .expect("relay message list")
+            .iter()
+            .any(|message| message["ID"] == json!(message_id)),
+        "the deleted message must be gone from the relay"
     );
     println!(
         "✅ live SMTP delivery observed via {} and cleaned up",

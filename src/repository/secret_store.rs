@@ -199,8 +199,25 @@ impl FileSecretStore {
 
     /// Removes a secret; returns whether it existed.
     pub async fn remove(&self, id: &str) -> Result<bool> {
+        // Mirrors `put`'s durability: without a directory fsync the removal
+        // itself may not be durable, so a "deleted" key (clearance/rotation)
+        // could reappear after a crash.
         match fs::remove_file(self.path_for(id)).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                #[cfg(unix)]
+                if let Some(dir) = self.path_for(id).parent() {
+                    let dir_sync = async {
+                        let dir_file = fs::File::open(dir).await?;
+                        dir_file.sync_all().await
+                    };
+                    if let Err(e) = dir_sync.await {
+                        return Err(AcmeError::Storage(format!(
+                            "secret remove directory fsync failed: {e}"
+                        )));
+                    }
+                }
+                Ok(true)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(AcmeError::Storage(format!("secret remove failed: {e}"))),
         }

@@ -332,7 +332,15 @@ fn fsync_batch(
                             let Some(path) = ordered.get(index) else {
                                 break;
                             };
-                            match fsync_one_file(path, counter) {
+                            // Per-file catch_unwind: a panic (a bug — the
+                            // IO paths are infallible classifications)
+                            // degrades exactly that file to Failed so the
+                            // requeue keeps durability honest instead of
+                            // unwinding the worker or the batch.
+                            let outcome =
+                                std::panic::catch_unwind(|| fsync_one_file(path, counter))
+                                    .unwrap_or(DeferredFsync::Failed);
+                            match outcome {
                                 DeferredFsync::Synced => {
                                     synced += 1;
                                     if let Some(dir) = path.parent() {
@@ -352,7 +360,13 @@ fn fsync_batch(
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|handle| handle.join().expect("fsync worker thread panicked"))
+                .map(|handle| {
+                    // Unreachable in practice after the per-file
+                    // catch_unwind above; degrade rather than panic the
+                    // sweep. Per-file failures are still requeued by the
+                    // caller, so no durability claim is lost.
+                    handle.join().unwrap_or((0_u64, Vec::new(), Vec::new()))
+                })
                 .collect()
         });
         for (worker_synced, worker_failed, worker_parents) in per_worker {
@@ -629,11 +643,30 @@ impl FileEntityStore {
             return Ok(0);
         }
         let shared_for_task = Arc::clone(shared);
-        let (fsynced, failed_files, failed_dirs) = tokio::task::spawn_blocking(move || {
-            fsync_batch(&files, &dirs, &shared_for_task.fsynced_files)
+        let queued = tokio::task::spawn_blocking(move || {
+            // catch_unwind: if fsync_batch panics, the outcome degrades to
+            // "nothing synced, everything pending" so the requeue below
+            // keeps every path queued and the error is surfaced.
+            std::panic::catch_unwind(|| fsync_batch(&files, &dirs, &shared_for_task.fsynced_files))
+                .unwrap_or_else(|_| {
+                    (
+                        0_u64,
+                        files.iter().cloned().collect(),
+                        dirs.iter().cloned().collect(),
+                    )
+                })
         })
-        .await
-        .map_err(|e| AcmeError::Storage(format!("fsync task failed: {e}")))?;
+        .await;
+        // A JoinError here would mean the blocking task died before its
+        // own catch_unwind could answer — practically impossible, and the
+        // taken batch would be unrecoverable either way; surface it
+        // loudly instead of pretending the sync happened.
+        let (fsynced, failed_files, failed_dirs) = match queued {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                return Err(AcmeError::Storage(format!("fsync task failed: {err}")));
+            }
+        };
         if !failed_files.is_empty() || !failed_dirs.is_empty() {
             let mut queue = shared.queue.lock().expect("fsync queue poisoned");
             queue.files.extend(failed_files);
@@ -774,8 +807,8 @@ impl FileEntityStore {
     /// -for-byte identical on-disk results); under [`FsyncMode::Interval`]
     /// the rename happens immediately and the fsync is deferred to the
     /// background sweeper.
-    async fn durable_write(&self, path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
-        match self.write_once(path, bytes, secret).await {
+    async fn durable_write(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        match self.write_once(path, bytes).await {
             Ok(()) => Ok(()),
             Err(first) => {
                 // `created_dirs` skips a mkdir per write; if a write failed
@@ -792,7 +825,7 @@ impl FileEntityStore {
                     .remove(dir);
                 if cached {
                     self.ensure_dir(dir).await?;
-                    self.write_once(path, bytes, secret).await
+                    self.write_once(path, bytes).await
                 } else {
                     Err(first)
                 }
@@ -800,7 +833,7 @@ impl FileEntityStore {
         }
     }
 
-    async fn write_once(&self, path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
+    async fn write_once(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         let dir = path
             .parent()
             .ok_or_else(|| AcmeError::Storage("entity path has no parent".to_string()))?;
@@ -846,14 +879,6 @@ impl FileEntityStore {
                 AcmeError::Storage(format!("failed to write {}: {e}", tmp.display()))
             })?;
             #[cfg(unix)]
-            if secret {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                    .await
-                    .map_err(|e| {
-                        AcmeError::Storage(format!("failed to chmod {}: {e}", tmp.display()))
-                    })?;
-            }
             if matches!(&self.fsync, FsyncState::Always) {
                 // fsync the temp file before rename so the renamed content
                 // is durable.
@@ -946,8 +971,16 @@ impl Drop for FileEntityStore {
         shared.request_shutdown();
         let handle = shared.worker.lock().expect("fsync worker poisoned").take();
         if let Some(handle) = handle {
-            // The sweeper performs its final sweep before exiting.
-            let _ = handle.join();
+            // The sweeper performs its final sweep before exiting. A
+            // panicked sweeper must not turn this Drop into a panic; the
+            // synchronous last attempt below still covers whatever stayed
+            // queued.
+            if handle.join().is_err() {
+                tracing::warn!(
+                    "file repository: fsync sweeper thread ended abnormally; \
+                     falling back to the synchronous final flush"
+                );
+            }
         }
         // Whatever remains are failed-retry paths from the final sweep: one
         // synchronous last attempt, warning (never pretending) on failure.
@@ -988,7 +1021,7 @@ impl EntityStore for FileEntityStore {
         }
         let envelope = make_envelope(data, now);
         let bytes = serde_json::to_vec_pretty(&envelope)?;
-        self.durable_write(&path, &bytes, false).await?;
+        self.durable_write(&path, &bytes).await?;
         self.invalidate_parse_cache(&path);
         Ok(CreateOutcome::Created)
     }
@@ -1016,7 +1049,7 @@ impl EntityStore for FileEntityStore {
         }
         let envelope = bump_envelope(&existing, data, now)?;
         let bytes = serde_json::to_vec_pretty(&envelope)?;
-        self.durable_write(&path, &bytes, false).await?;
+        self.durable_write(&path, &bytes).await?;
         self.invalidate_parse_cache(&path);
         Ok(CasOutcome::Updated(current + 1))
     }
@@ -1360,7 +1393,7 @@ impl LeaseManager for FileRepository {
             expires_at_epoch_ms: epoch_ms(expires),
         };
         let bytes = serde_json::to_vec(&lock)?;
-        self.store.durable_write(&path, &bytes, false).await?;
+        self.store.durable_write(&path, &bytes).await?;
         self.store.invalidate_parse_cache(&path);
         Ok(LeaseOutcome::Granted(LeaseGrant {
             key: key.to_string(),
@@ -1396,7 +1429,7 @@ impl LeaseManager for FileRepository {
             expires_at_epoch_ms: epoch_ms(new_expiry),
         };
         let bytes = serde_json::to_vec(&lock)?;
-        self.store.durable_write(&path, &bytes, false).await?;
+        self.store.durable_write(&path, &bytes).await?;
         self.store.invalidate_parse_cache(&path);
         Ok(Some(LeaseGrant {
             key: key.to_string(),
@@ -1447,7 +1480,7 @@ impl OutboxRepository for FileRepository {
             .aggregate_dir("outbox")
             .join(format!("{sequence:012}.json"));
         let bytes = serde_json::to_vec_pretty(&event)?;
-        self.store.durable_write(&path, &bytes, false).await?;
+        self.store.durable_write(&path, &bytes).await?;
         self.store.invalidate_parse_cache(&path);
         Ok(sequence)
     }
@@ -1549,7 +1582,7 @@ impl FileRepository {
             .map_err(|e| corrupt(format!("outbox entry {sequence}: {e}")))?;
         mutate(&mut event);
         let bytes = serde_json::to_vec_pretty(&event)?;
-        self.store.durable_write(&path, &bytes, false).await?;
+        self.store.durable_write(&path, &bytes).await?;
         self.store.invalidate_parse_cache(&path);
         Ok(())
     }
@@ -1570,7 +1603,7 @@ impl MigrationManifestStore for FileRepository {
             .aggregate_dir("migration")
             .join(format!("manifest-{sequence:06}.json"));
         let bytes = serde_json::to_vec_pretty(&entry)?;
-        self.store.durable_write(&path, &bytes, false).await?;
+        self.store.durable_write(&path, &bytes).await?;
         self.store.invalidate_parse_cache(&path);
         Ok(())
     }
