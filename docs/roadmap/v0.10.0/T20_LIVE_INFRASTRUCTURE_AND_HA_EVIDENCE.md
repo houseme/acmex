@@ -83,6 +83,8 @@ scripts/run_live_infra.sh    # 编排上述门控入口
 # 无环境：全部显式跳过；默认测试集不受影响
 ```
 
+`scripts/run_live_infra.sh` 对每个 `ACMEX_LIVE_INFRA_SCENARIOS` 条目必须有显式路由；未知条目直接失败。当前仓库尚无 Kubernetes/Vault sink 实现与双进程 fencing runner，因此 `sink-kubernetes`、`sink-vault`、`dual-process-fencing` 被选中时必须提供对应非空归档证据文件（`sink-kubernetes-scope.md`、`sink-vault-scope.md`、`dual-process-fencing.log`），否则脚本失败，避免 preflight-only 假绿。
+
 ---
 
 ## 7. 验收标准

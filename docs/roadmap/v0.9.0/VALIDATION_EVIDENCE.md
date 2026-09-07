@@ -107,6 +107,10 @@ recurrence is directly diagnosable.
   agent contract and secret scan together. A sandbox-only attempt immediately
   before this failed at local ephemeral-port bind time; the elevated rerun is
   the valid evidence.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=reference-http-agent \
+  scripts/run_live_infra.sh`: PASS (2026-09-07,
+  `target/live-infra/20260907T104452Z/`). Re-run after hardening scenario
+  routing confirmed the reference agent path still executes.
 
 ## Redis Repository Contract Gate
 
@@ -118,6 +122,11 @@ recurrence is directly diagnosable.
   PASS (2026-09-07, `target/live-infra/20260907T101444Z/`). This confirms the
   T20 entrypoint now runs the Redis repository contract and archives
   `redis-repository-contract.log` instead of relying on scope text alone.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=redis \
+  ACMEX_LIVE_REDIS_URL=redis://127.0.0.1:6389/15 scripts/run_live_infra.sh`:
+  PASS (2026-09-07, `target/live-infra/20260907T104523Z/`). Re-run after
+  hardening scenario routing confirmed the Redis path still executes and
+  archives `redis-repository-contract.log`.
 - The Redis aggregate repository now uses the same `RepositorySet` trait
   surface as memory/file. Entity create/CAS and lease operations are Redis-side
   atomic, outbox ordering uses an incrementing sequence plus sorted index, and
@@ -141,6 +150,24 @@ recurrence is directly diagnosable.
   activation, second-version staging without replacing the active route,
   rollback to the previous active route, cleanup, and repeated cleanup
   idempotency against a separately deployed HTTP agent.
+
+## Live Infrastructure Scenario Routing Gate
+
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=sink-kubernetes \
+  ACMEX_LIVE_INFRA_ARTIFACT_DIR=/private/tmp/acmex-live-infra-missing-k8s \
+  ACMEX_LIVE_KUBECONFIG=/private/tmp/nonexistent-kubeconfig \
+  ACMEX_LIVE_K8S_NAMESPACE=default scripts/run_live_infra.sh`: EXPECTED FAIL
+  (2026-09-07). The script now refuses to mark Kubernetes sink evidence green
+  without a non-empty `sink-kubernetes-scope.md` artifact because this
+  repository has no Kubernetes sink runner wired.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=made-up \
+  ACMEX_LIVE_INFRA_ARTIFACT_DIR=/private/tmp/acmex-live-infra-unknown \
+  scripts/run_live_infra.sh`: EXPECTED FAIL (2026-09-07). Unknown scenario
+  names now fail in preflight instead of being silently ignored.
+- `sink-vault` and `dual-process-fencing` follow the same no-false-green rule:
+  until first-class executable runners are added, a selected scenario must
+  supply the corresponding non-empty archived evidence file or the script exits
+  failed.
 
 ## Let's Encrypt Staging Directory Gate
 

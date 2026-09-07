@@ -18,8 +18,7 @@ const ALL_SCENARIOS: &[&str] = &[
     "dual-process-fencing",
 ];
 
-fn scenarios_from_env() -> BTreeSet<String> {
-    let raw = std::env::var("ACMEX_LIVE_INFRA_SCENARIOS").unwrap_or_else(|_| "all".to_string());
+fn parse_scenarios(raw: &str) -> BTreeSet<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -31,6 +30,19 @@ fn scenarios_from_env() -> BTreeSet<String> {
             }
         })
         .map(str::to_string)
+        .collect()
+}
+
+fn scenarios_from_env() -> BTreeSet<String> {
+    let raw = std::env::var("ACMEX_LIVE_INFRA_SCENARIOS").unwrap_or_else(|_| "all".to_string());
+    parse_scenarios(&raw)
+}
+
+fn unknown_scenarios(scenarios: &BTreeSet<String>) -> Vec<String> {
+    scenarios
+        .iter()
+        .filter(|scenario| !ALL_SCENARIOS.contains(&scenario.as_str()))
+        .cloned()
         .collect()
 }
 
@@ -109,6 +121,18 @@ fn live_infra_scenarios_are_unique() {
 }
 
 #[test]
+fn live_infra_scenario_parser_expands_all_and_rejects_unknown_names() {
+    let scenarios = parse_scenarios("redis, all, made-up");
+    for scenario in ALL_SCENARIOS {
+        assert!(
+            scenarios.contains(*scenario),
+            "`all` should include {scenario}"
+        );
+    }
+    assert_eq!(unknown_scenarios(&scenarios), vec!["made-up".to_string()]);
+}
+
+#[test]
 fn live_infra_scope_doc_lists_every_gate() {
     let doc = include_str!("../docs/roadmap/v0.9.0/LIVE_INFRASTRUCTURE_EVIDENCE.md");
     for scenario in ALL_SCENARIOS {
@@ -120,6 +144,27 @@ fn live_infra_scope_doc_lists_every_gate() {
     );
 }
 
+#[test]
+fn live_infra_script_routes_every_manifest_scenario() {
+    let script = include_str!("../scripts/run_live_infra.sh");
+    for scenario in ALL_SCENARIOS {
+        assert!(
+            script.contains(&format!("scenario_selected {scenario}")),
+            "run_live_infra.sh must explicitly route `{scenario}`"
+        );
+    }
+    for artifact in [
+        "sink-kubernetes-scope.md",
+        "sink-vault-scope.md",
+        "dual-process-fencing.log",
+    ] {
+        assert!(
+            script.contains(artifact),
+            "evidence-only scenarios must require archived artifact `{artifact}`"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires real DNS, Redis, sink, and dual-process validation assets"]
 async fn live_infra_preflight_manifest_gate() {
@@ -129,6 +174,11 @@ async fn live_infra_preflight_manifest_gate() {
     }
 
     let scenarios = scenarios_from_env();
+    let unknown = unknown_scenarios(&scenarios);
+    assert!(
+        unknown.is_empty(),
+        "ACMEX_LIVE_INFRA_SCENARIOS contains unknown entries: {unknown:?}; known scenarios: {ALL_SCENARIOS:?}"
+    );
     let missing = missing_required_env(&scenarios);
     assert!(
         missing.is_empty(),

@@ -38,6 +38,28 @@ run_cargo_gate() {
   fi
 }
 
+require_existing_evidence() {
+  local scenario="$1"
+  local artifact="$2"
+  local detail="$3"
+  local path="$ACMEX_LIVE_INFRA_ARTIFACT_DIR/$artifact"
+  echo "== verifying $scenario archived evidence"
+  if [[ -s "$path" ]]; then
+    echo "== $scenario evidence present: $path"
+    return 0
+  fi
+
+  {
+    printf 'scenario=%s\n' "$scenario"
+    printf 'missing_artifact=%s\n' "$artifact"
+    printf 'detail=%s\n' "$detail"
+    printf 'release_pass=false\n'
+  } >"$ACMEX_LIVE_INFRA_ARTIFACT_DIR/${scenario}.missing.txt"
+  echo "FAIL: $scenario has no executable runner in this script yet; attach non-empty $artifact after a real run. $detail" >&2
+  echo "== $scenario FAILED; artifacts: $ACMEX_LIVE_INFRA_ARTIFACT_DIR" >&2
+  exit 1
+}
+
 scenario_selected() {
   local needle="$1"
   local raw="${ACMEX_LIVE_INFRA_SCENARIOS:-all}"
@@ -76,7 +98,22 @@ if scenario_selected sink-http-agent; then
     cargo test --test http_agent_sink_live -- --ignored --nocapture
 fi
 
-if [[ "${RUN_LIVE_DNS_CLOUDFLARE:-}" == "1" ]]; then
+if scenario_selected sink-kubernetes; then
+  require_existing_evidence sink-kubernetes sink-kubernetes-scope.md \
+    "Kubernetes Secret sink implementation/runner is not in this repository; scope evidence must come from a controlled external run."
+fi
+
+if scenario_selected sink-vault; then
+  require_existing_evidence sink-vault sink-vault-scope.md \
+    "Vault KV sink implementation/runner is not in this repository; scope evidence must come from a controlled external run."
+fi
+
+if scenario_selected dual-process-fencing; then
+  require_existing_evidence dual-process-fencing dual-process-fencing.log \
+    "Dual-process fencing requires an archived controlled multi-process run until a first-class runner is added."
+fi
+
+if scenario_selected dns-cloudflare && [[ "${RUN_LIVE_DNS_CLOUDFLARE:-}" == "1" ]]; then
   export ACMEX_LIVE_DNS_TYPE=cloudflare
   export ACMEX_LIVE_DNS_ZONE="${ACMEX_LIVE_DNS_CLOUDFLARE_ZONE:?missing ACMEX_LIVE_DNS_CLOUDFLARE_ZONE}"
   export ACMEX_LIVE_DNS_TOKEN="${ACMEX_LIVE_DNS_CLOUDFLARE_TOKEN:?missing ACMEX_LIVE_DNS_CLOUDFLARE_TOKEN}"
@@ -84,7 +121,7 @@ if [[ "${RUN_LIVE_DNS_CLOUDFLARE:-}" == "1" ]]; then
     cargo test --features dns-cloudflare --test dns_provider_live -- --ignored --nocapture
 fi
 
-if [[ "${RUN_LIVE_DNS_ROUTE53:-}" == "1" ]]; then
+if scenario_selected dns-route53 && [[ "${RUN_LIVE_DNS_ROUTE53:-}" == "1" ]]; then
   export ACMEX_LIVE_DNS_TYPE=route53
   export ACMEX_LIVE_DNS_ZONE="${ACMEX_LIVE_DNS_ROUTE53_ZONE:?missing ACMEX_LIVE_DNS_ROUTE53_ZONE}"
   export ACMEX_LIVE_DNS_EXTRA_hosted_zone_id="${ACMEX_LIVE_DNS_ROUTE53_HOSTED_ZONE_ID:?missing ACMEX_LIVE_DNS_ROUTE53_HOSTED_ZONE_ID}"

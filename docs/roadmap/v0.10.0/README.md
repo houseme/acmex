@@ -94,7 +94,7 @@ v0.9.0 的主题是架构：可恢复、可扩展、可安全接入上下游的�
 | T17 | [API 契约与遗留面收口](./T17_API_CONTRACT_CLOSURE.md) | PATCH intents、授权/挑战状态 API、legacy `/api` 弃用计划、OpenAPI 校验门槛 | 无 | M2 | 代码级完成；OpenAPI/docs gate 覆盖 |
 | T18 | [可观测性收尾](./T18_OBSERVABILITY_CLOSEOUT.md) | `repository_errors_total`、trace span 注入、webhook 重放窗口、告警资产 | 无 | M2 | 代码已落地，待验收复核 |
 | T19 | [Let's Encrypt Staging 与真实 CA 特性实测](./T19_LETSENCRYPT_STAGING_VALIDATION.md) | staging 冒烟、ARI replaces、profiles、IPv4/IPv6 证据 | T13、T14（硬）；T15、T16、T20（软） | M3 | `directory` 非变更 smoke 已执行（2026-09-07，确认 staging directory/ARI 可达）；完整签发、ARI `replaces`、profile、IP、EAB CA 仍待外部资产 |
-| T20 | [生产基础设施实测与多实例证据](./T20_LIVE_INFRASTRUCTURE_AND_HA_EVIDENCE.md) | live DNS zone 契约、K8s/Vault/远端 agent、Redis live、双进程 fencing | 无硬依赖（建议在 T18 后） | M3 | 部分执行：K8s/Vault sink、Redis repository 契约、双进程 fencing 均有 live 证据（2026-09-06/07，含跨环境复现）；reference HTTP agent 已有真实二进制子进程契约；Redis 和外部 HTTP agent 均已接入 `scripts/run_live_infra.sh`；剩余：live DNS zone、外部远端 HTTP agent 实跑 |
+| T20 | [生产基础设施实测与多实例证据](./T20_LIVE_INFRASTRUCTURE_AND_HA_EVIDENCE.md) | live DNS zone 契约、K8s/Vault/远端 agent、Redis live、双进程 fencing | 无硬依赖（建议在 T18 后） | M3 | 部分执行：K8s/Vault sink、Redis repository 契约、双进程 fencing 均有 live 证据（2026-09-06/07，含跨环境复现）；reference HTTP agent 已有真实二进制子进程契约；Redis 和外部 HTTP agent 均已接入 `scripts/run_live_infra.sh`；K8s/Vault/fencing 目前要求归档证据文件、无 runner 时不会假绿；剩余：live DNS zone、外部远端 HTTP agent 实跑 |
 | T21 | [发布工程与版本策略](./T21_RELEASE_ENGINEERING.md) | 发布路径决策、CHANGELOG、迁移文档、性能基线、版本 cut | T13-T20 | M4 | 部分实现；CHANGELOG/RELEASE_NOTES/MIGRATION/semver gate/性能基线已落地，semver 差异为 0.x 预期 breaking（待发布 waiver 记录），版本 bump/tag/publish 被剩余外部证据阻塞（T19 签发/续签/IP/EAB、T20 live DNS/外部远端 agent） |
 
 ---
