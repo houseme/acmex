@@ -1449,8 +1449,22 @@ impl StepExecutor for WaitAuthorizationsStep {
                             code: error_codes::VALIDATION_CHALLENGE_INCOMPATIBLE,
                             class: ErrorClass::Terminal,
                             detail: Some(format!(
-                                "CA marked authorization invalid for `{}`",
-                                session.identifier
+                                "CA marked authorization invalid for `{}`: our challenge \
+                                 {} at {}; {}; offered: {}",
+                                session.identifier,
+                                session.challenge_type,
+                                session.challenge_url,
+                                last_error,
+                                resource
+                                    .authorization
+                                    .challenges
+                                    .iter()
+                                    .map(|challenge| format!(
+                                        "{}={}",
+                                        challenge.challenge_type, challenge.status
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             )),
                         });
                     }
