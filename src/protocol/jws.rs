@@ -271,6 +271,9 @@ mod tests {
         assert_eq!(e, vec![0x01, 0x00, 0x01]);
 
         let (protected, payload_encoded, _) = jws_segments(&jws);
+        // Only consumed by the aws-lc-rs verification below; the variable
+        // (not the value) is unused under other backends.
+        #[cfg_attr(not(feature = "aws-lc-rs"), allow(unused_variables))]
         let signing_input = format!("{protected}.{payload_encoded}");
 
         #[cfg(feature = "aws-lc-rs")]
