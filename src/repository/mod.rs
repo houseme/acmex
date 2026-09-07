@@ -46,7 +46,7 @@ use crate::domain::{
 use crate::error::{AcmeError, Result};
 
 pub use clock::{Clock, FakeClock, SystemClock};
-pub use file::FileRepository;
+pub use file::{FSYNC_DROP_FLUSHES, FSYNC_SWEEPER_SHUTDOWNS, FileRepository, FsyncMode};
 pub use memory::MemoryRepository;
 pub use migration::{
     LegacyBundleMigrator, MigrationMode, MigrationOutcome, MigrationPlanEntry, MigrationReport,
