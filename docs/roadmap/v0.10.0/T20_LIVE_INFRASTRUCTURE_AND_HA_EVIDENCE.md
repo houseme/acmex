@@ -77,7 +77,8 @@ RELEASE_CHECKLIST "Explicit External Evidence" 区的剩余行与 FEATURE_MATRIX
 
 ```bash
 RUN_LIVE_DNS_CLOUDFLARE=1 ... cargo test --test dns_provider_contract -- --ignored
-RUN_REDIS=... cargo test --test repository_contract -- --ignored
+ACMEX_TEST_REDIS_URL=... cargo test --features redis --test repository_redis_contract -- --ignored
+ACMEX_LIVE_HTTP_AGENT_URL=... ACMEX_LIVE_HTTP_AGENT_TOKEN_REF=env:... cargo test --test http_agent_sink_live -- --ignored
 scripts/run_live_infra.sh    # 编排上述门控入口
 # 无环境：全部显式跳过；默认测试集不受影响
 ```
@@ -87,7 +88,7 @@ scripts/run_live_infra.sh    # 编排上述门控入口
 ## 7. 验收标准
 
 - [ ] Cloudflare 与 Route53 隔离 zone 契约通过且无记录残留断言；其余 provider 状态如实记录。
-- [ ] Redis repository live 契约通过；failover 范围文档合入（RELEASE_CHECKLIST 对应行勾选）。
+- [x] Redis repository live 契约通过；failover 范围文档合入（RELEASE_CHECKLIST 对应行勾选）。
 - [ ] K8s、Vault、reference HTTP agent 至少两项实环境契约通过；外部远端 agent 若未执行必须留在 release notes/FEATURE_MATRIX 限制中；各项 scope 文档合入。
 - [ ] 双进程并发续签/部署演练通过（唯一副作用有测试断言）；时钟偏差扫描无重复副作用。
 - [ ] 全部凭据无入库；secret-scan 通过；证据存档在任务文档中链接。

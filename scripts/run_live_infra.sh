@@ -65,6 +65,17 @@ if scenario_selected reference-http-agent; then
     cargo test --test agent_live -- --nocapture
 fi
 
+if scenario_selected redis; then
+  export ACMEX_TEST_REDIS_URL="${ACMEX_LIVE_REDIS_URL:?missing ACMEX_LIVE_REDIS_URL}"
+  run_cargo_gate redis-repository-contract \
+    cargo test --features redis --test repository_redis_contract -- --ignored --nocapture
+fi
+
+if scenario_selected sink-http-agent; then
+  run_cargo_gate sink-http-agent \
+    cargo test --test http_agent_sink_live -- --ignored --nocapture
+fi
+
 if [[ "${RUN_LIVE_DNS_CLOUDFLARE:-}" == "1" ]]; then
   export ACMEX_LIVE_DNS_TYPE=cloudflare
   export ACMEX_LIVE_DNS_ZONE="${ACMEX_LIVE_DNS_CLOUDFLARE_ZONE:?missing ACMEX_LIVE_DNS_CLOUDFLARE_ZONE}"

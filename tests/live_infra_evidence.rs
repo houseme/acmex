@@ -143,9 +143,11 @@ async fn live_infra_preflight_manifest_gate() {
         "evidence_files_expected": [
             "live-dns-cloudflare.log",
             "live-dns-route53.log",
-            "redis-scope.md",
+            "redis-repository-contract.log",
             "reference-http-agent.log",
-            "sink-scope.md",
+            "sink-http-agent.log",
+            "sink-kubernetes-scope.md",
+            "sink-vault-scope.md",
             "dual-process-fencing.log"
         ],
         "secret_values_recorded": false,
