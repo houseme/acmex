@@ -664,10 +664,13 @@ impl PrepareChallengesStep {
     /// set overrides the worker-level default ([`ChallengeStepDeps::
     /// allowed_challenges`]), and `prepare_all_supported` lives only on the
     /// intent — it is a per-certificate choice, not a worker knob.
+    /// Resolves the intent's validation policy; a repository READ FAILURE is
+    /// retriable and must not silently downgrade to the worker defaults, so
+    /// it surfaces as an error the caller maps onto the step result.
     async fn intent_validation_policy(
         &self,
         ctx: &StepContext<'_>,
-    ) -> Option<crate::domain::ValidationPolicy> {
+    ) -> crate::error::Result<Option<crate::domain::ValidationPolicy>> {
         let record = ctx.operation;
         if let Some(intent_id) = &record.subject.intent_id {
             return ctx
@@ -675,29 +678,20 @@ impl PrepareChallengesStep {
                 .intents
                 .get(intent_id)
                 .await
-                .ok()
-                .flatten()
-                .map(|stored| stored.value.validation_policy);
+                .map(|stored| stored.map(|stored| stored.value.validation_policy));
         }
-        if let Some(lineage_id) = &record.subject.lineage_id
-            && let Some(lineage) = ctx
-                .repositories
-                .lineages
-                .get(lineage_id)
-                .await
-                .ok()
-                .flatten()
-            && let Some(intent) = ctx
+        if let Some(lineage_id) = &record.subject.lineage_id {
+            let Some(lineage) = ctx.repositories.lineages.get(lineage_id).await? else {
+                return Ok(None);
+            };
+            return ctx
                 .repositories
                 .intents
                 .get(&lineage.value.intent_id)
                 .await
-                .ok()
-                .flatten()
-        {
-            return Some(intent.value.validation_policy);
+                .map(|stored| stored.map(|stored| stored.value.validation_policy));
         }
-        None
+        Ok(None)
     }
 
     /// Prepares one (authorization, challenge) candidate as an independent,
@@ -941,7 +935,12 @@ impl StepExecutor for PrepareChallengesStep {
         // fallback; the operation's intent (directly or through its lineage)
         // overrides it when it pins an explicit set, and carries the
         // prepare-all-supported flag.
-        let intent_policy = self.intent_validation_policy(&ctx).await;
+        let intent_policy = match self.intent_validation_policy(&ctx).await {
+            Ok(policy) => policy,
+            // A repository read failure is transient: retry the step rather
+            // than silently planning against the worker defaults.
+            Err(err) => return retryable(err.to_string()),
+        };
         let mut policy = crate::domain::ValidationPolicy {
             allowed_challenges: self.deps.allowed_challenges.clone(),
             ..Default::default()

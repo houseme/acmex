@@ -185,9 +185,9 @@ pub enum ChallengeType {
     /// Validation via a DNS TXT record bound to the ACME account URL
     /// (draft-ietf-acme-dns-account-01). The TXT value matches DNS-01
     /// (`base64url(SHA256(key authorization))`), but the record lives at
-    /// `_acme-challenge_<base32(SHA256(account URL))[..10]>.<domain>` — it
-    /// does not depend on the account key thumbprint, so account key
-    /// rollover never invalidates in-flight authorizations.
+    /// `_acme-challenge_<base32(SHA256(account URL))[..10]>.<domain>` so
+    /// multiple accounts validating the same domain never clobber each
+    /// other's records.
     DnsAccount01,
     /// Validation via a *persistent* DNS TXT record
     /// (draft-ietf-acme-dns-persist-01). The record lives at

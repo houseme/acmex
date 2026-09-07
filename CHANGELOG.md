@@ -45,7 +45,8 @@ must call out any unverified external evidence.
   material never leaves the service and `export` is always `None`.
 - DNS challenge types for the new CA draft landscape: `dns-account-01`
   (TXT value reuses the DNS-01 digest; the record name is derived from the
-  ACME account URL, so authorizations survive account key rollover) and
+  ACME account URL, so multiple accounts never clobber each other's
+  validation records) and
   `dns-persist-01` (persistent `_validation-persist` records binding the
   account URI, opt-in via validation policy, cleanup preserves the record).
   Multi-challenge preparation (`prepare_all_supported`) provisions every

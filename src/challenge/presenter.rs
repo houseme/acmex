@@ -42,16 +42,16 @@ pub fn dns01_validation_value(key_authorization: &str) -> String {
 /// Per the draft, the TXT value is computed exactly like DNS-01 —
 /// `base64url(SHA256(key authorization))`; what differs is the **record
 /// name**, which is derived from the ACME account URL (see
-/// [`dns_account01_record_name`]). That makes existing authorizations
-/// survive account key rollover: the record does not depend on the
-/// account key thumbprint at all.
+/// [`dns_account01_record_name`]). The account binding in the name lets
+/// multiple accounts validate the same domain without clobbering each
+/// other's records.
 pub fn dns_account01_validation_value(key_authorization: &str) -> String {
     dns01_validation_value(key_authorization)
 }
 
 /// DNS-ACCOUNT-01 record name (draft-ietf-acme-dns-account-01 §3):
 /// `_acme-challenge_` + base32(SHA-256(account URL))[..10] + "." + domain
-/// (RFC 4648 base32, lowercase, no padding).
+/// (RFC 4648 base32, uppercase, no padding — matching Boulder/Pebble).
 pub fn dns_account01_record_name(account_url: &str, domain: &str) -> String {
     use sha2::{Digest, Sha256};
 
@@ -620,7 +620,7 @@ mod tests {
             label
                 .chars()
                 .all(|c| "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".contains(c)),
-            "record label must be lowercase base32: {record}"
+            "record label must be uppercase base32: {record}"
         );
     }
 
