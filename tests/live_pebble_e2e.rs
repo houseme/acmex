@@ -25,6 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 use acmex::account::KeyPair;
@@ -66,19 +68,7 @@ impl PebbleEnv {
             directory_url: env_or("PEBBLE_DIRECTORY_URL", "https://127.0.0.1:14000/dir"),
             challtestsrv_admin: env_or("PEBBLE_CHALLTESTSRV_ADMIN", "http://127.0.0.1:8055"),
             challtestsrv_dns: env_or("PEBBLE_CHALLTESTSRV_DNS", "127.0.0.1:8053"),
-            // Unique domain per test run: the six E2E variants share one
-            // challtestsrv instance, and parallel cleanup (clear-txt) would
-            // otherwise delete another test's TXT record mid-validation.
-            domain: env_or(
-                "PEBBLE_E2E_DOMAIN",
-                &format!(
-                    "acmex-test-{}.example.com",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                ),
-            ),
+            domain: env_or("PEBBLE_E2E_DOMAIN", "acmex-test.example.com"),
             trust_anchor_pem_file: std::env::var("PEBBLE_TRUST_ANCHOR_PEM_FILE").ok(),
         }
     }
@@ -119,7 +109,6 @@ impl InsecurePebbleTransport {
     fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
-                .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
                 .danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true)
                 .timeout(Duration::from_secs(30))
@@ -192,10 +181,7 @@ impl ChalltestsrvAdmin {
     fn new(admin: String) -> Self {
         Self {
             admin,
-            client: reqwest::Client::builder()
-                .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .expect("admin http client"),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -216,12 +202,23 @@ impl ChalltestsrvAdmin {
         }
         Ok(())
     }
+
+    async fn get_text(&self, path: &str) -> acmex::error::Result<String> {
+        let response = self
+            .client
+            .get(format!("{}{path}", self.admin))
+            .send()
+            .await
+            .map_err(|e| acmex::error::AcmeError::transport(format!("challtestsrv: {e}")))?;
+        Ok(response.text().await.unwrap_or_default())
+    }
 }
 
 #[derive(Clone)]
 struct ChalltestsrvDnsPresenter {
     admin: ChalltestsrvAdmin,
-    /// challtestsrv DNS endpoint (`host:8053`) for the real TXT lookup.
+    /// DNS endpoint of challtestsrv; observe proves visibility with a real
+    /// TXT query instead of trusting the management API.
     dns_server: String,
     /// record name + value hash → TXT value. This is an optimization for the
     /// single-process E2E path; observe still falls back to the challtestsrv
@@ -230,70 +227,11 @@ struct ChalltestsrvDnsPresenter {
 }
 
 impl ChalltestsrvDnsPresenter {
-    fn new(admin: String) -> Self {
-        // The DNS server shares the management host; compose maps
-        // management on :8055 and DNS on :8053.
-        let dns_server = {
-            let url = reqwest::Url::parse(&admin).expect("challtestsrv admin URL");
-            let host = url.host_str().unwrap_or("127.0.0.1");
-            format!("{host}:8053")
-        };
+    fn new(admin: String, dns_server: String) -> Self {
         Self {
             admin: ChalltestsrvAdmin::new(admin),
             dns_server,
             txt_values: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// Real DNS TXT lookup against the challtestsrv DNS server: the new
-    /// challtestsrv removed the `/dump-dns` endpoint this used to fall back
-    /// to, and a live query is the honest check anyway.
-    async fn txt_value_visible(&self, record_name: &str, value_hash: &str) -> bool {
-        let addr: std::net::SocketAddr = match self.dns_server.parse() {
-            Ok(addr) => addr,
-            Err(err) => {
-                eprintln!("bad challtestsrv DNS address {}: {err}", self.dns_server);
-                return false;
-            }
-        };
-        let mut udp = hickory_resolver::config::ConnectionConfig::udp();
-        udp.port = addr.port();
-        let mut tcp = hickory_resolver::config::ConnectionConfig::tcp();
-        tcp.port = addr.port();
-        let config = hickory_resolver::config::ResolverConfig::from_parts(
-            None,
-            Vec::new(),
-            vec![hickory_resolver::config::NameServerConfig::new(
-                addr.ip(),
-                true,
-                vec![udp, tcp],
-            )],
-        );
-        let resolver = hickory_resolver::TokioResolver::builder_with_config(
-            config,
-            hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
-        )
-        .build()
-        .expect("challtestsrv TXT resolver");
-        let lookup = resolver
-            .lookup(
-                record_name.to_string(),
-                hickory_resolver::proto::rr::RecordType::TXT,
-            )
-            .await;
-        match lookup {
-            Ok(records) => records.answers().iter().any(|record| match &record.data {
-                hickory_resolver::proto::rr::RData::TXT(txt) => {
-                    let value: String = txt
-                        .txt_data
-                        .iter()
-                        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
-                        .collect();
-                    acmex::dns::record::txt_value_hash(&value) == value_hash
-                }
-                _ => false,
-            }),
-            Err(_) => false,
         }
     }
 }
@@ -377,8 +315,14 @@ impl ChallengePresenter for ChalltestsrvDnsPresenter {
                 });
             }
         };
-        let _ = cached_value;
-        if self.txt_value_visible(&record_name, &value_hash).await {
+        // Prove external visibility with a real TXT query against the
+        // challtestsrv DNS server (the challenge answer must be served over
+        // DNS itself, not just registered in the management API).
+        let served = self
+            .txt_served_over_dns(record_name.as_str(), cached_value.as_deref())
+            .await
+            .unwrap_or(false);
+        if served {
             Ok(Observation::Propagated)
         } else {
             Ok(Observation::NotYet {
@@ -405,6 +349,67 @@ impl ChallengePresenter for ChalltestsrvDnsPresenter {
             }
             _ => Ok(CleanupOutcome::AlreadyAbsent),
         }
+    }
+
+}
+
+impl ChalltestsrvDnsPresenter {
+    /// Queries `record_name` TXT on the challtestsrv DNS endpoint and
+    /// matches either the exact value or its SHA-256 hash form.
+    async fn txt_served_over_dns(
+        &self,
+        record_name: &str,
+        cached_value: Option<&str>,
+    ) -> acmex::error::Result<bool> {
+        use hickory_resolver::config::{
+            ConnectionConfig, NameServerConfig, ProtocolConfig, ResolverConfig, ResolverOpts,
+        };
+        use hickory_resolver::net::runtime::TokioRuntimeProvider;
+        use hickory_resolver::proto::rr::RecordType;
+        use hickory_resolver::TokioResolver;
+        use std::net::SocketAddr;
+        use std::str::FromStr;
+
+        let socket = SocketAddr::from_str(&self.dns_server)
+            .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 8053)));
+        let mut connection = ConnectionConfig::udp();
+        connection.port = socket.port();
+        let mut name_server = NameServerConfig::udp_and_tcp(socket.ip());
+        name_server.connections = vec![connection];
+        let mut config = ResolverConfig::default();
+        config.name_servers = vec![name_server];
+        let resolver: TokioResolver =
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+                .build()
+                .map_err(|e| {
+                    acmex::error::AcmeError::transport(format!("dns resolver build: {e}"))
+                })?;
+        let lookup = resolver
+            .lookup(record_name, RecordType::TXT)
+            .await
+            .map_err(|e| {
+                acmex::error::AcmeError::transport(format!(
+                    "TXT query for {record_name}: {e}"
+                ))
+            })?;
+        let expected_hash = cached_value.map(acmex::dns::record::txt_value_hash);
+        Ok(lookup.answers().iter().any(|record| {
+            let hickory_resolver::proto::rr::RData::TXT(txt) = &record.data else {
+                return false;
+            };
+            let served: String = txt
+                .txt_data
+                .iter()
+                .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+                .collect();
+            served == cached_value.unwrap_or_default()
+                || expected_hash
+                    .as_deref()
+                    .is_some_and(|hash| {
+                        !served.is_empty()
+                            && acmex::dns::record::txt_value_hash(&served) == hash
+                    })
+        }))
     }
 }
 
@@ -517,11 +522,7 @@ impl ChallengePresenter for ChalltestsrvTlsAlpnPresenter {
                 "TLS-ALPN-01 cannot validate wildcard DNS identifiers",
             ));
         }
-        // challtestsrv stores the host verbatim; Pebble's SNI has no
-        // trailing dot, so the map key must not have one either.
-        let host = chall_host(request.session.identifier.acme_value())
-            .trim_end_matches('.')
-            .to_string();
+        let host = chall_host(request.session.identifier.acme_value());
         self.admin
             .post(
                 "/add-tlsalpn01",
@@ -580,9 +581,12 @@ enum PebbleRunMode {
     Rollback,
 }
 
-fn pebble_presenters(admin: &str) -> PresenterRegistry {
+fn pebble_presenters(admin: &str, dns_server: &str) -> PresenterRegistry {
     let mut presenters = PresenterRegistry::new();
-    presenters.register(Arc::new(ChalltestsrvDnsPresenter::new(admin.to_string())));
+    presenters.register(Arc::new(ChalltestsrvDnsPresenter::new(
+        admin.to_string(),
+        dns_server.to_string(),
+    )));
     presenters.register(Arc::new(ChalltestsrvHttpPresenter::new(admin.to_string())));
     presenters.register(Arc::new(ChalltestsrvTlsAlpnPresenter::new(
         admin.to_string(),
@@ -623,7 +627,6 @@ async fn run_pebble_issue(
 
     // Readiness probe with an actionable message.
     match reqwest::Client::builder()
-        .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
         .danger_accept_invalid_certs(true)
         .build()
         .unwrap()
@@ -632,15 +635,10 @@ async fn run_pebble_issue(
         .await
     {
         Ok(response) if response.status().is_success() => {}
-        Ok(response) => {
-            let status = response.status();
-            let version = format!("{:?}", response.version());
-            let body = response.text().await.unwrap_or_default();
-            panic!(
-                "Pebble answered HTTP {status} ({version}) body: {} — check the pebble config",
-                &body[..body.len().min(300)]
-            );
-        }
+        Ok(response) => panic!(
+            "Pebble answered HTTP {} — check the pebble config",
+            response.status()
+        ),
         Err(err) => panic!(
             "Pebble unreachable at {}: {err} — start it with \
              `docker compose -f scripts/docker-compose.pebble.yml up -d`",
@@ -700,24 +698,15 @@ async fn run_pebble_issue(
             .unwrap()
             .as_nanos()
     ));
-    // ES256 (P-256): Pebble supports only [RS256 ES256 ES384 ES512] and
-    // rejects Ed25519 account keys. `Jwk::for_key_pair` below must describe
-    // the actual key, so the thumbprint (key authorization) matches.
     let account_key = Arc::new(KeyPair::generate().unwrap());
-    let account_jwk = acmex::ca_backend::backend::AccountJwkHandle::new(
-        Jwk::for_key_pair(&account_key.0).unwrap(),
-    );
-    let acme_backend = AcmeCaBackend::new(
+    let backend: Arc<dyn CaBackend> = Arc::new(AcmeCaBackend::new(
         "pebble",
         env.directory_url.clone(),
         Arc::new(InsecurePebbleTransport::new()),
-        account_key,
+        account_key.clone(),
         repositories.clone(),
-    );
-    // Key authorizations read the thumbprint through this handle; the
-    // backend refreshes it when an account key rollover completes.
-    acme_backend.attach_jwk_handle(account_jwk.clone());
-    let backend: Arc<dyn CaBackend> = Arc::new(acme_backend);
+    ));
+    let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
 
     let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
         FileSecretStore::new(key_dir.clone()),
@@ -737,13 +726,12 @@ async fn run_pebble_issue(
                 challenge_poll_interval: Duration::from_secs(2),
                 trust_anchor_pems: vec![trust_anchor_pem.clone()],
                 terms_agreed: true,
-                allowed_challenges: ChallengeSet::new([challenge_type]),
                 ..Default::default()
             },
             WorkflowWorkerComponents {
                 backend: backend.clone(),
                 account_jwk: account_jwk.clone(),
-                presenters: pebble_presenters(&env.challtestsrv_admin),
+                presenters: pebble_presenters(&env.challtestsrv_admin, &env.challtestsrv_dns),
                 key_provider: key_provider.clone(),
                 orchestrator: orchestrator.clone(),
             },
@@ -830,8 +818,7 @@ async fn run_pebble_issue(
     assert_eq!(
         record.status,
         acmex::domain::OperationStatus::Succeeded,
-        "op error: {:#?}; steps: {:#?}",
-        record.error,
+        "steps: {:#?}",
         record.steps
     );
 
@@ -863,11 +850,7 @@ async fn run_pebble_issue(
             .value;
         assert_eq!(deployment.state, DeploymentState::Active);
         let staged_ref = deployment.staged_ref.expect("deployment staged ref");
-        // The record's staged_ref is the serialized StagedDeployment (it
-        // also carries the rollback retry baseline); the sink-local staged
-        // reference inside it is the version directory.
-        let staged: acmex::delivery::StagedDeployment = serde_json::from_str(&staged_ref).unwrap();
-        let metadata = std::path::Path::new(&staged.staged_ref).join("metadata.json");
+        let metadata = std::path::Path::new(&staged_ref).join("metadata.json");
         let mut payload: serde_json::Value =
             serde_json::from_slice(&tokio::fs::read(&metadata).await.unwrap()).unwrap();
         payload["leaf_sha256"] = serde_json::json!("corrupted-by-pebble-rollback-test");
@@ -931,21 +914,6 @@ async fn run_pebble_issue(
     assert_eq!(lineage.active_version_id.as_ref(), Some(&version_id));
 
     if mode == PebbleRunMode::Lifecycle {
-        let mut entries = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&key_dir) {
-            for e in rd.flatten() {
-                entries.push(e.file_name().to_string_lossy().to_string());
-            }
-        }
-        eprintln!(
-            "LIFECYCLE-DIAG post-first-issuance key_dir={} entries={:?} key_ref={:?}",
-            key_dir.display(),
-            entries,
-            version.key_ref
-        );
-    }
-
-    if mode == PebbleRunMode::Lifecycle {
         let renew_op = OperationId::new(format!("op_pebble_renew_{suffix}")).unwrap();
         repositories
             .operations
@@ -968,32 +936,10 @@ async fn run_pebble_issue(
             .run_until_terminal(&renew_op, Duration::from_secs(300))
             .await
             .unwrap();
-        if renewed_record.status != acmex::domain::OperationStatus::Succeeded {
-            let mut entries = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(&key_dir) {
-                for e in rd.flatten() {
-                    entries.push(e.file_name().to_string_lossy().to_string());
-                }
-            }
-            eprintln!(
-                "RENEW-FAIL diag: key_dir={} entries={:?} active_version_key_ref={:?} first_version={:?}",
-                key_dir.display(),
-                entries,
-                lineage.active_version_id,
-                repositories
-                    .versions
-                    .get(&version_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|v| v.value.key_ref.clone())
-            );
-        }
         assert_eq!(
             renewed_record.status,
             acmex::domain::OperationStatus::Succeeded,
-            "renew op error: {:#?}; renew steps: {:#?}",
-            renewed_record.error,
+            "renew steps: {:#?}",
             renewed_record.steps
         );
         let renewed_version_id = VersionId::new(format!("ver_{renew_op}")).unwrap();
