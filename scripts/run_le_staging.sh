@@ -3,8 +3,10 @@
 #
 #   RUN_LE_STAGING=1 scripts/run_le_staging.sh
 #
-# The Rust test performs preflight checks and writes a non-secret manifest under
-# target/le-staging. Preflight-only output is not a release pass.
+# The Rust test performs scenario-aware preflight checks and writes a non-secret
+# manifest under target/le-staging. `ACMEX_LE_STAGING_SCENARIOS=directory` is a
+# non-mutating CA directory smoke; issuance scenarios still require caller-owned
+# validation assets. Preflight-only output is not a release pass.
 set -euo pipefail
 
 if [[ "${RUN_LE_STAGING:-}" != "1" ]]; then
@@ -41,5 +43,5 @@ if [[ -x "$SCRIPT_DIR/secret_scan.sh" ]]; then
   "$SCRIPT_DIR/secret_scan.sh"
 fi
 
-echo "== LE staging preflight completed; this is not a release pass until full issuance evidence is attached"
+echo "== LE staging gate completed; directory-only or preflight-only output is not a release pass until full issuance evidence is attached"
 echo "== artifacts: $ACMEX_LE_STAGING_ARTIFACT_DIR"

@@ -142,6 +142,21 @@ recurrence is directly diagnosable.
   rollback to the previous active route, cleanup, and repeated cleanup
   idempotency against a separately deployed HTTP agent.
 
+## Let's Encrypt Staging Directory Gate
+
+- `RUN_LE_STAGING=1 ACMEX_LE_STAGING_SCENARIOS=directory \
+  scripts/run_le_staging.sh`: PASS (2026-09-07,
+  `target/le-staging/20260907T103107Z/`). The run fetched the public staging
+  directory, confirmed `newNonce`, `newAccount` and `newOrder`, recorded ARI
+  `renewalInfo` support, observed no advertised profiles, and wrote a
+  non-secret preflight manifest.
+- A non-elevated attempt immediately before this failed at DNS lookup because
+  the sandbox could not resolve `acme-staging-v02.api.letsencrypt.org`; the
+  elevated rerun is the valid evidence.
+- This is a non-mutating T19 smoke only. It is not LE issuance evidence and
+  does not satisfy the release checklist row for Let's Encrypt staging smoke,
+  ARI `replaces`, profile behavior, IP identifiers or EAB CA registration.
+
 ## Fixed During This Pass
 
 - `src/certificate/chain.rs`: the `not(any(aws-lc-rs, ring-crypto))` fallback

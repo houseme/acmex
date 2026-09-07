@@ -47,7 +47,7 @@ evidence.
 `RUN_PEBBLE_E2E=1` and a prepared Pebble/challenge-test-server environment it
 exits with code 77 and prints a skip reason. A skipped run is not a release pass.
 
-**Update (2026-09-02)**: the Pebble gate is now a real harness. The script
+**Update (2026-09-02; refreshed 2026-09-07)**: the Pebble gate is now a real harness. The script
 brings up pebble + challtestsrv via `scripts/docker-compose.pebble.yml` (pebble
 resolves through challtestsrv's DNS) and runs
 `tests/live_pebble_e2e.rs` — the full production executor set
@@ -56,9 +56,11 @@ disabled; Pebble's certificate is invalid by design), with DNS-01, HTTP-01
 and TLS-ALPN-01 programmed through the challtestsrv admin API, driving
 intent → order → challenge → CSR → finalize → download → strict verification
 → File sink deploy → activation. The DNS-01 lifecycle scenario also covers
-renewal replacement and CA revocation. It has not yet been *executed* in a
-prepared environment (no docker in the dev sandbox) — an executed run is still
-required before L4 counts as passed.
+renewal replacement and CA revocation. 2026-09-07 validation refresh recorded
+multiple green prepared-environment runs, including restart windows and
+failure rollback, so the Pebble L4 release evidence now counts as passed. Real
+public CA, DNS provider and remote sink evidence remains outside Pebble's
+scope.
 
 Successful runs archive `environment.txt`, `cargo-test-live-pebble-e2e.log`,
 and `compose.log` under `target/pebble-e2e/<timestamp>/`; CI uploads the

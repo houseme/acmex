@@ -38,14 +38,17 @@ reproducible L4/L5 evidence exists.
 - T13: Pebble L4 evidence for HTTP-01, DNS-01, TLS-ALPN-01, renewal,
   revocation and real executor restart runs is complete as of the 2026-09-07
   validation refresh.
+- T19: the non-mutating Let's Encrypt staging `directory` smoke is recorded;
+  it confirms the staging directory and ARI endpoint are reachable without
+  creating accounts, orders or certificates.
 - T20: Redis repository single-node contract, Kubernetes/Vault scope evidence,
   reference HTTP agent child-process contract and dual-instance fencing
   evidence are recorded.
 
 ## Not Yet Release-Validated
 
-- T19: Let's Encrypt staging, ARI `replaces`, profile behavior and IP
-  identifier behavior are still pending.
+- T19: Let's Encrypt staging issuance, ARI `replaces`, profile behavior, EAB
+  CA registration and IP identifier behavior are still pending.
 - T20: live DNS zones and external remote HTTP agent execution are still
   pending. Redis managed failover behavior remains an operator-environment
   evidence item.

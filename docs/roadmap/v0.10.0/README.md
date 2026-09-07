@@ -1,6 +1,6 @@
 # AcmeX v0.10.0 验证与收口实施路线图
 
-**状态**：T13-T18 代码级完成；T13 L4 证据完成；T20 live 证据完成 3/5 场景（K8s/Vault/Redis 契约/fencing），reference HTTP agent 子进程契约、Redis 契约脚本入口与外部 HTTP agent ignored 契约已纳入 gate；剩余 T19 全部与 T20 live DNS、外部远端 agent；T21 待发布 cut
+**状态**：T13-T18 代码级完成；T13 L4 证据完成；T19 `directory` 非变更 smoke 完成但完整 CA 签发未执行；T20 live 证据完成 3/5 场景（K8s/Vault/Redis 契约/fencing），reference HTTP agent 子进程契约、Redis 契约脚本入口与外部 HTTP agent ignored 契约已纳入 gate；剩余 T19 签发/续签/IP/EAB 与 T20 live DNS、外部远端 agent；T21 待发布 cut
 **基线**：`main@f38a460` + 2026-09-02 多轮优化批次；当前 main 后续已追加 T13-T18 与 T21 本地发布工程实现
 **目标**：把 v0.9.0 已合并的控制平面闭环，变成被可复现证据验证过的可发布产品
 **最后更新**：2026-09-07
@@ -38,7 +38,7 @@ v0.9.0 的 T01-T12 已全部合并，本地门槛（fmt/test/check/feature matri
 - `Cargo.toml` 版本仍为 `0.8.0`，v0.9.0 尚未发布。
 - v0.9.0 审计确认了若干代码级验收缺口：EAB 为 stub、Account Key Rollover 缺失、双 JWS 栈并存、证书验收报告不完整、DNS 传播策略无配置入口、`PATCH /certificate-intents` 为 stub、可观测性三项收尾未完成。
 
-**当前实现复核（2026-09-02）**：main 已补入真实 Pebble DNS-01 harness 骨架、EAB/keyChange、VerificationReport、DNS propagation schema、PATCH/challenge status API、repository error metrics 与 webhook replay-window。上述代码仍需按各任务验收标准复跑 focused/full gates；Pebble/LE/live DNS/Redis/K8s/Vault/双实例等 L4/L5 证据未执行前不得标记为发布通过。
+**当前实现复核（2026-09-02；2026-09-07 刷新）**：main 已补入真实 Pebble DNS-01 harness 骨架、EAB/keyChange、VerificationReport、DNS propagation schema、PATCH/challenge status API、repository error metrics 与 webhook replay-window。Pebble L4、Redis repository 单节点契约、reference HTTP agent 子进程契约、K8s/Vault scope 与双实例 fencing 已有证据；LE 完整签发、live DNS zone、外部远端 HTTP agent 与 Redis managed failover 仍需按各任务验收标准补齐后才能发布。
 
 v0.10.0 承接两类工作：
 
@@ -93,9 +93,9 @@ v0.9.0 的主题是架构：可恢复、可扩展、可安全接入上下游的�
 | T16 | [DNS 传播策略配置化](./T16_DNS_PROPAGATION_POLICY_CONFIG.md) | quorum/递归 resolver 配置 schema 与运行时接线 | 无 | M2 | 代码已落地，待验收复核 |
 | T17 | [API 契约与遗留面收口](./T17_API_CONTRACT_CLOSURE.md) | PATCH intents、授权/挑战状态 API、legacy `/api` 弃用计划、OpenAPI 校验门槛 | 无 | M2 | 代码级完成；OpenAPI/docs gate 覆盖 |
 | T18 | [可观测性收尾](./T18_OBSERVABILITY_CLOSEOUT.md) | `repository_errors_total`、trace span 注入、webhook 重放窗口、告警资产 | 无 | M2 | 代码已落地，待验收复核 |
-| T19 | [Let's Encrypt Staging 与真实 CA 特性实测](./T19_LETSENCRYPT_STAGING_VALIDATION.md) | staging 冒烟、ARI replaces、profiles、IPv4/IPv6 证据 | T13、T14（硬）；T15、T16、T20（软） | M3 | 本地 gate/runbook 已就绪；未执行 live CA |
+| T19 | [Let's Encrypt Staging 与真实 CA 特性实测](./T19_LETSENCRYPT_STAGING_VALIDATION.md) | staging 冒烟、ARI replaces、profiles、IPv4/IPv6 证据 | T13、T14（硬）；T15、T16、T20（软） | M3 | `directory` 非变更 smoke 已执行（2026-09-07，确认 staging directory/ARI 可达）；完整签发、ARI `replaces`、profile、IP、EAB CA 仍待外部资产 |
 | T20 | [生产基础设施实测与多实例证据](./T20_LIVE_INFRASTRUCTURE_AND_HA_EVIDENCE.md) | live DNS zone 契约、K8s/Vault/远端 agent、Redis live、双进程 fencing | 无硬依赖（建议在 T18 后） | M3 | 部分执行：K8s/Vault sink、Redis repository 契约、双进程 fencing 均有 live 证据（2026-09-06/07，含跨环境复现）；reference HTTP agent 已有真实二进制子进程契约；Redis 和外部 HTTP agent 均已接入 `scripts/run_live_infra.sh`；剩余：live DNS zone、外部远端 HTTP agent 实跑 |
-| T21 | [发布工程与版本策略](./T21_RELEASE_ENGINEERING.md) | 发布路径决策、CHANGELOG、迁移文档、性能基线、版本 cut | T13-T20 | M4 | 部分实现；CHANGELOG/RELEASE_NOTES/MIGRATION/semver gate/性能基线已落地，semver 差异为 0.x 预期 breaking（待发布 waiver 记录），版本 bump/tag/publish 被剩余外部证据阻塞（T19 全部、T20 live DNS/外部远端 agent） |
+| T21 | [发布工程与版本策略](./T21_RELEASE_ENGINEERING.md) | 发布路径决策、CHANGELOG、迁移文档、性能基线、版本 cut | T13-T20 | M4 | 部分实现；CHANGELOG/RELEASE_NOTES/MIGRATION/semver gate/性能基线已落地，semver 差异为 0.x 预期 breaking（待发布 waiver 记录），版本 bump/tag/publish 被剩余外部证据阻塞（T19 签发/续签/IP/EAB、T20 live DNS/外部远端 agent） |
 
 ---
 

@@ -7,7 +7,9 @@ tests into implied success.
   `scripts/docker-compose.pebble.yml`, driven by `scripts/run_pebble_e2e.sh`)
   and has green 2026-09-07 L4 evidence for HTTP-01, DNS-01, TLS-ALPN-01,
   renewal, revocation, restart and failure rollback.
-- Let's Encrypt staging is not yet validated.
+- Let's Encrypt staging has a non-mutating directory smoke, but issuance,
+  renewal, ARI `replaces`, profile, EAB CA and IP identifier behavior are not
+  yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.
 - File Sink and fake agent sink have local contract tests on current main, but
