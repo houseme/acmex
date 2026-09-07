@@ -11,6 +11,7 @@ const ALL_SCENARIOS: &[&str] = &[
     "dns-cloudflare",
     "dns-route53",
     "redis",
+    "reference-http-agent",
     "sink-http-agent",
     "sink-kubernetes",
     "sink-vault",
@@ -143,6 +144,7 @@ async fn live_infra_preflight_manifest_gate() {
             "live-dns-cloudflare.log",
             "live-dns-route53.log",
             "redis-scope.md",
+            "reference-http-agent.log",
             "sink-scope.md",
             "dual-process-fencing.log"
         ],

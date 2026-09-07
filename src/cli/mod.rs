@@ -133,6 +133,12 @@ pub async fn run() -> crate::error::Result<()> {
             tracing::info!("Starting AcmeX REST API server on {}", args.addr);
             commands::handle_serve(args.addr, args.config).await?;
         }
+        Commands::Agent(args) => match args.command {
+            args::AgentCommands::Serve(serve) => {
+                tracing::info!("Starting reference delivery agent on {}", serve.listen);
+                commands::handle_agent_serve(serve.listen, serve.token_ref).await?;
+            }
+        },
     }
 
     tracing::info!("Command execution completed successfully");

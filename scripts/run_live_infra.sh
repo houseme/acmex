@@ -38,8 +38,32 @@ run_cargo_gate() {
   fi
 }
 
+scenario_selected() {
+  local needle="$1"
+  local raw="${ACMEX_LIVE_INFRA_SCENARIOS:-all}"
+  if [[ "$raw" == "all" ]]; then
+    return 0
+  fi
+
+  local item
+  IFS=',' read -ra items <<<"$raw"
+  for item in "${items[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_cargo_gate live-infra-preflight \
   cargo test --test live_infra_evidence -- --ignored --nocapture
+
+if scenario_selected reference-http-agent; then
+  run_cargo_gate reference-http-agent \
+    cargo test --test agent_live -- --nocapture
+fi
 
 if [[ "${RUN_LIVE_DNS_CLOUDFLARE:-}" == "1" ]]; then
   export ACMEX_LIVE_DNS_TYPE=cloudflare

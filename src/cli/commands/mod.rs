@@ -1,4 +1,5 @@
 pub mod account;
+pub mod agent;
 pub mod cert;
 pub mod daemon;
 pub mod info;
@@ -10,6 +11,7 @@ pub mod serve;
 pub mod status;
 
 pub use account::{handle_deactivate, handle_register, handle_rotate_key, handle_update};
+pub use agent::handle_agent_serve;
 pub use cert::{handle_cert_list, handle_cert_revoke};
 pub use daemon::handle_daemon;
 pub use info::handle_info;
