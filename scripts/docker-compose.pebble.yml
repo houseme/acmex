@@ -44,9 +44,9 @@ services:
         "-dnsserver",
         ":8053",
         "-http01",
-        ":8052",
+        ":5002",
         "-tlsalpn01",
-        ":8051",
+        ":5001",
         "-defaultIPv4",
         "10.30.50.3",
         "-defaultIPv6",
@@ -60,8 +60,8 @@ services:
       - "8055:8055" # admin HTTP API (set-txt / clear-txt / dump-dns)
       - "8053:8053/udp" # DNS for pebble's resolver
       - "8053:8053/tcp"
-      - "8052:8052" # HTTP-01 (unused by the DNS-01 flow, exposed for T07)
-      - "8051:8051" # TLS-ALPN-01 (unused by the DNS-01 flow, exposed for T07)
+      - "5002:5002" # HTTP-01 — MUST match pebble's httpPort
+      - "5001:5001" # TLS-ALPN-01 — MUST match pebble's tlsPort
     networks:
       pebble-net:
         ipv4_address: 10.30.50.3

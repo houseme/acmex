@@ -66,7 +66,19 @@ impl PebbleEnv {
             directory_url: env_or("PEBBLE_DIRECTORY_URL", "https://127.0.0.1:14000/dir"),
             challtestsrv_admin: env_or("PEBBLE_CHALLTESTSRV_ADMIN", "http://127.0.0.1:8055"),
             challtestsrv_dns: env_or("PEBBLE_CHALLTESTSRV_DNS", "127.0.0.1:8053"),
-            domain: env_or("PEBBLE_E2E_DOMAIN", "acmex-test.example.com"),
+            // Unique domain per test run: the six E2E variants share one
+            // challtestsrv instance, and parallel cleanup (clear-txt) would
+            // otherwise delete another test's TXT record mid-validation.
+            domain: env_or(
+                "PEBBLE_E2E_DOMAIN",
+                &format!(
+                    "acmex-test-{}.example.com",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                ),
+            ),
             trust_anchor_pem_file: std::env::var("PEBBLE_TRUST_ANCHOR_PEM_FILE").ok(),
         }
     }
