@@ -200,7 +200,6 @@ impl ChalltestsrvAdmin {
         }
         Ok(())
     }
-
 }
 
 #[derive(Clone)]
@@ -339,7 +338,6 @@ impl ChallengePresenter for ChalltestsrvDnsPresenter {
             _ => Ok(CleanupOutcome::AlreadyAbsent),
         }
     }
-
 }
 
 impl ChalltestsrvDnsPresenter {
@@ -350,10 +348,10 @@ impl ChalltestsrvDnsPresenter {
         record_name: &str,
         cached_value: Option<&str>,
     ) -> acmex::error::Result<bool> {
+        use hickory_resolver::TokioResolver;
         use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
         use hickory_resolver::net::runtime::TokioRuntimeProvider;
         use hickory_resolver::proto::rr::RecordType;
-        use hickory_resolver::TokioResolver;
         use std::net::SocketAddr;
         use std::str::FromStr;
 
@@ -375,9 +373,7 @@ impl ChalltestsrvDnsPresenter {
             .lookup(record_name, RecordType::TXT)
             .await
             .map_err(|e| {
-                acmex::error::AcmeError::transport(format!(
-                    "TXT query for {record_name}: {e}"
-                ))
+                acmex::error::AcmeError::transport(format!("TXT query for {record_name}: {e}"))
             })?;
         let expected_hash = cached_value.map(acmex::dns::record::txt_value_hash);
         Ok(lookup.answers().iter().any(|record| {
@@ -390,12 +386,9 @@ impl ChalltestsrvDnsPresenter {
                 .map(|chunk| String::from_utf8_lossy(chunk).to_string())
                 .collect();
             served == cached_value.unwrap_or_default()
-                || expected_hash
-                    .as_deref()
-                    .is_some_and(|hash| {
-                        !served.is_empty()
-                            && acmex::dns::record::txt_value_hash(&served) == hash
-                    })
+                || expected_hash.as_deref().is_some_and(|hash| {
+                    !served.is_empty() && acmex::dns::record::txt_value_hash(&served) == hash
+                })
         }))
     }
 }

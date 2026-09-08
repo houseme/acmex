@@ -985,8 +985,7 @@ impl OutboxRepository for RedisRepository {
         let now = self.clock.now();
         let mut events = Vec::new();
         for (sequence, (raw, state)) in sequences.into_iter().zip(pairs) {
-            let Some(event) =
-                decode_pending_entry(&prefix, sequence, raw.as_deref(), &state)?
+            let Some(event) = decode_pending_entry(&prefix, sequence, raw.as_deref(), &state)?
             else {
                 continue;
             };
@@ -1004,7 +1003,11 @@ impl OutboxRepository for RedisRepository {
     async fn mark_processed(&self, sequence: u64) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: () = conn
-            .hset(outbox_state_key(&self.store.key_prefix, sequence), "processed", 1)
+            .hset(
+                outbox_state_key(&self.store.key_prefix, sequence),
+                "processed",
+                1,
+            )
             .await
             .map_err(|e| redis_error("HSET outbox", e))?;
         Ok(())
@@ -1226,7 +1229,10 @@ mod tests {
             entries_scan_pattern(DEFAULT_KEY_PREFIX),
             "acmex:v1:migration:manifest-*"
         );
-        assert_eq!(lease_lock_key(DEFAULT_KEY_PREFIX, "op/1"), "acmex:v1:locks:op%2F1");
+        assert_eq!(
+            lease_lock_key(DEFAULT_KEY_PREFIX, "op/1"),
+            "acmex:v1:locks:op%2F1"
+        );
         assert_eq!(
             lease_token_counter_key(DEFAULT_KEY_PREFIX, "op/1"),
             "acmex:v1:lease-tokens:op%2F1"
@@ -1510,9 +1516,11 @@ mod tests {
         assert_eq!(decoded.sequence, 5);
 
         // Event deleted between SCAN and GET → skip.
-        assert!(decode_pending_entry(DEFAULT_KEY_PREFIX, 5, None, &state)
-            .unwrap()
-            .is_none());
+        assert!(
+            decode_pending_entry(DEFAULT_KEY_PREFIX, 5, None, &state)
+                .unwrap()
+                .is_none()
+        );
         // Undecodable JSON (truncated, wrong shape) → skip, not a
         // whole-scan corrupt failure.
         assert!(
@@ -1542,7 +1550,10 @@ mod tests {
     #[test]
     fn outbox_scan_keys_with_bad_ids_are_skippable() {
         assert_eq!(
-            outbox_sequence_from_key(DEFAULT_KEY_PREFIX, &outbox_event_key(DEFAULT_KEY_PREFIX, 42)),
+            outbox_sequence_from_key(
+                DEFAULT_KEY_PREFIX,
+                &outbox_event_key(DEFAULT_KEY_PREFIX, 42)
+            ),
             Some(42)
         );
         // Non-numeric id and non-outbox keys report `None` (logged and
@@ -1551,7 +1562,10 @@ mod tests {
             outbox_sequence_from_key(DEFAULT_KEY_PREFIX, "acmex:v1:outbox:not-a-number"),
             None
         );
-        assert_eq!(outbox_sequence_from_key(DEFAULT_KEY_PREFIX, "acmex:v1:elsewhere:1"), None);
+        assert_eq!(
+            outbox_sequence_from_key(DEFAULT_KEY_PREFIX, "acmex:v1:elsewhere:1"),
+            None
+        );
     }
 
     #[test]
@@ -1606,7 +1620,10 @@ mod tests {
             manifest_dedup_key(DEFAULT_KEY_PREFIX, "cert:a.example.com").unwrap(),
             "same source key must map to the same dedup marker"
         );
-        assert_ne!(key, manifest_dedup_key(DEFAULT_KEY_PREFIX, "cert:b.example.com").unwrap());
+        assert_ne!(
+            key,
+            manifest_dedup_key(DEFAULT_KEY_PREFIX, "cert:b.example.com").unwrap()
+        );
         assert!(key.starts_with("acmex:v1:manifest-dedup:"));
         let hex = key.trim_start_matches("acmex:v1:manifest-dedup:");
         assert_eq!(hex.len(), 64, "SHA-256 hex is 64 characters");
