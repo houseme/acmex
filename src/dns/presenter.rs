@@ -131,18 +131,10 @@ impl ChallengePresenter for Dns01Presenter {
             })?
             .clone();
 
-        let record_name = challenge_record_name(&identifier);
-        let resolution = self.zone_resolver.resolve(&record_name).await?;
-        let provider = self
-            .router
-            .route(&resolution.zone_apex, self.selector.as_deref())?;
-
-        // dns-01: TXT at _acme-challenge.<domain> carrying
-        // base64url(SHA256(token.thumbprint)). dns-account-01: same TXT
-        // value, but the record name is derived from the account URL.
-        // dns-persist-01: a persistent _validation-persist.<domain> record
-        // binding the CA identity and the account URI (never cleaned by
-        // AcmeX — removal is a zone-owner operation).
+        // Compute the FINAL record name first, then resolve the zone against
+        // it: the per-type prefix lives under the same zone apex except in
+        // the (rare) label-delegation edge case, where resolving the actual
+        // name is what routes to the right provider.
         let (record_name, value) = match challenge_type {
             ChallengeType::DnsAccount01 => (
                 dns_account01_record_name(&request.account_url, identifier.base_name()),
@@ -170,11 +162,22 @@ impl ChallengePresenter for Dns01Presenter {
                 )
             }
             _ => (
-                record_name.clone(),
+                challenge_record_name(&identifier).clone(),
                 dns01_validation_value(&request.key_authorization),
             ),
         };
 
+        let resolution = self.zone_resolver.resolve(&record_name).await?;
+        let provider = self
+            .router
+            .route(&resolution.zone_apex, self.selector.as_deref())?;
+
+        // dns-01: TXT at _acme-challenge.<domain> carrying
+        // base64url(SHA256(token.thumbprint)). dns-account-01: same TXT
+        // value, but the record name is derived from the account URL.
+        // dns-persist-01: a persistent _validation-persist.<domain> record
+        // binding the CA identity and the account URI (never cleaned by
+        // AcmeX — removal is a zone-owner operation).
         let locator = provider
             .present_txt(PresentTxt {
                 zone: resolution.zone_apex.clone(),

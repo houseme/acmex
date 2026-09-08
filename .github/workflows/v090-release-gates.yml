@@ -37,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: High-confidence secret scan
         run: scripts/secret_scan.sh
 
@@ -64,6 +66,9 @@ jobs:
           RUN_PEBBLE_E2E: "1"
           PEBBLE_E2E_ARTIFACT_DIR: target/pebble-e2e/ci
         run: scripts/run_pebble_e2e.sh
+      - name: Install ripgrep
+        if: always()
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Secret scan Pebble evidence
         if: always()
         run: scripts/secret_scan.sh

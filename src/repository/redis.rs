@@ -69,8 +69,11 @@ use crate::domain::AccountRecord;
 use crate::error::{AcmeError, Result};
 
 /// Namespace prefix for every key written by this backend. The version
-/// segment (`v1`) allows future layout migrations to coexist.
-const KEY_PREFIX: &str = "acmex:v1:";
+/// segment (`v1`) allows future layout migrations to coexist. A custom
+/// prefix (see [`RedisRepository::with_key_prefix`]) namespaces a whole
+/// repository set — tests use a unique prefix per run to avoid cross-run
+/// contamination on a shared Redis.
+const DEFAULT_KEY_PREFIX: &str = "acmex:v1:";
 
 /// Lua CAS: reads the stored envelope, compares the revision and swaps the
 /// value — all in one atomic script. Returns
@@ -289,20 +292,20 @@ fn decode_key_component(encoded: &str) -> Option<String> {
 }
 
 /// The full Redis key for one entity of an aggregate.
-fn entity_key(aggregate: &str, id: &str) -> String {
-    format!("{KEY_PREFIX}{aggregate}:{}", encode_key_component(id))
+fn entity_key(prefix: &str, aggregate: &str, id: &str) -> String {
+    format!("{prefix}{aggregate}:{}", encode_key_component(id))
 }
 
 /// The SCAN pattern matching every entity key of an aggregate.
-fn aggregate_pattern(aggregate: &str) -> String {
-    format!("{KEY_PREFIX}{aggregate}:*")
+fn aggregate_pattern(prefix: &str, aggregate: &str) -> String {
+    format!("{prefix}{aggregate}:*")
 }
 
 /// Recovers the entity id from a key produced by [`entity_key`].
-fn id_from_key(aggregate: &str, key: &str) -> Result<String> {
-    let prefix = format!("{KEY_PREFIX}{aggregate}:");
+fn id_from_key(prefix: &str, aggregate: &str, key: &str) -> Result<String> {
+    let aggregate_prefix = format!("{prefix}{aggregate}:");
     let encoded = key
-        .strip_prefix(&prefix)
+        .strip_prefix(&aggregate_prefix)
         .ok_or_else(|| corrupt(format!("key {key:?} is not a `{aggregate}` entity key")))?;
     decode_key_component(encoded)
         .ok_or_else(|| corrupt(format!("unencodable key {key:?} for `{aggregate}`")))
@@ -310,34 +313,36 @@ fn id_from_key(aggregate: &str, key: &str) -> Result<String> {
 
 /// The delivery-state hash key for an outbox sequence. Lives outside the
 /// `outbox:*` namespace so entity scans never see it.
-fn outbox_state_key(sequence: u64) -> String {
-    format!("{KEY_PREFIX}outbox-state:{sequence:012}")
+fn outbox_state_key(prefix: &str, sequence: u64) -> String {
+    format!("{prefix}outbox-state:{sequence:012}")
 }
 
 /// The immutable outbox event JSON key for a sequence.
-fn outbox_event_key(sequence: u64) -> String {
-    entity_key("outbox", &format!("{sequence:012}"))
+fn outbox_event_key(prefix: &str, sequence: u64) -> String {
+    entity_key(prefix, "outbox", &format!("{sequence:012}"))
 }
 
 /// Namespace prefix of every migration-manifest entry key. Shared with
 /// [`MANIFEST_SAVE_SCRIPT`] (passed as an argument, which appends the
 /// zero-padded sequence with Lua `string.format('%06d', …)`) so the script
 /// builds exactly the keys [`MigrationManifestStore::entries`] scans for.
-const MANIFEST_KEY_PREFIX: &str = "acmex:v1:migration:manifest-";
+fn manifest_key_prefix(prefix: &str) -> String {
+    format!("{prefix}migration:manifest-")
+}
 
 /// The SCAN pattern matching every manifest entry key.
-fn entries_scan_pattern() -> String {
-    format!("{MANIFEST_KEY_PREFIX}*")
+fn entries_scan_pattern(prefix: &str) -> String {
+    format!("{}*", manifest_key_prefix(prefix))
 }
 
 /// Fencing-token counter for one lease key.
-fn lease_token_counter_key(key: &str) -> String {
-    format!("{KEY_PREFIX}lease-tokens:{}", encode_key_component(key))
+fn lease_token_counter_key(prefix: &str, key: &str) -> String {
+    format!("{prefix}lease-tokens:{}", encode_key_component(key))
 }
 
 /// Lease state hash for one lease key.
-fn lease_lock_key(key: &str) -> String {
-    format!("{KEY_PREFIX}locks:{}", encode_key_component(key))
+fn lease_lock_key(prefix: &str, key: &str) -> String {
+    format!("{prefix}locks:{}", encode_key_component(key))
 }
 
 /// Maps a Redis driver error into the storage error class.
@@ -482,8 +487,8 @@ fn compose_outbox_event(mut event: OutboxEvent, state: &HashMap<String, String>)
 /// Parses one outbox scan key into its sequence number; `None` marks a key
 /// that cannot be decoded (the caller logs and skips it instead of failing
 /// the whole `list_pending` scan).
-fn outbox_sequence_from_key(key: &str) -> Option<u64> {
-    id_from_key("outbox", key)
+fn outbox_sequence_from_key(prefix: &str, key: &str) -> Option<u64> {
+    id_from_key(prefix, "outbox", key)
         .ok()
         .and_then(|id| id.parse::<u64>().ok())
 }
@@ -495,11 +500,12 @@ fn outbox_sequence_from_key(key: &str) -> Option<u64> {
 /// cannot hide every healthy event; only connection-level errors ever fail
 /// the call. The `Err` variant is reserved for such hard failures.
 fn decode_pending_entry(
+    prefix: &str,
     sequence: u64,
     raw: Option<&str>,
     state: &HashMap<String, String>,
 ) -> Result<Option<OutboxEvent>> {
-    let key = outbox_event_key(sequence);
+    let key = outbox_event_key(prefix, sequence);
     let Some(json) = raw else {
         tracing::debug!(key, "outbox event vanished between SCAN and GET; skipping");
         return Ok(None);
@@ -518,9 +524,9 @@ fn decode_pending_entry(
 /// SHA-256 of the source key (hex) under a dedicated namespace. This gives
 /// [`MANIFEST_SAVE_SCRIPT`]'s `SET NX` idempotency check a bounded,
 /// collision-free key even for hostile or very long source keys.
-fn manifest_dedup_key(source_key: &str) -> Result<String> {
+fn manifest_dedup_key(prefix: &str, source_key: &str) -> Result<String> {
     let hash = crate::crypto::Sha256Hash::hash_hex(source_key.as_bytes())?;
-    Ok(format!("{KEY_PREFIX}manifest-dedup:{hash}"))
+    Ok(format!("{prefix}manifest-dedup:{hash}"))
 }
 
 /// Interprets the [`MANIFEST_SAVE_SCRIPT`] reply. `0` means the dedup
@@ -572,11 +578,14 @@ fn redact_url(url: &str) -> String {
 #[derive(Clone)]
 pub struct RedisEntityStore {
     conn: ConnectionManager,
+    /// Namespace prefix of every key written through this store. Clones
+    /// share the same prefix; tests pass a unique one per run.
+    key_prefix: Arc<str>,
 }
 
 impl RedisEntityStore {
-    fn new(conn: ConnectionManager) -> Self {
-        Self { conn }
+    fn new(conn: ConnectionManager, key_prefix: Arc<str>) -> Self {
+        Self { conn, key_prefix }
     }
 }
 
@@ -591,7 +600,7 @@ impl std::fmt::Debug for RedisEntityStore {
 #[async_trait]
 impl EntityStore for RedisEntityStore {
     async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>> {
-        let key = entity_key(aggregate, id);
+        let key = entity_key(&self.key_prefix, aggregate, id);
         let mut conn = self.conn.clone();
         let raw: Option<String> = conn.get(&key).await.map_err(|e| redis_error("GET", e))?;
         match raw {
@@ -616,7 +625,7 @@ impl EntityStore for RedisEntityStore {
         // taken. (The crate's `set_nx` helper is the legacy SETNX command,
         // whose integer reply cannot distinguish the two outcomes.)
         let created: Option<()> = redis::cmd("SET")
-            .arg(entity_key(aggregate, id))
+            .arg(entity_key(&self.key_prefix, aggregate, id))
             .arg(json)
             .arg("NX")
             .query_async(&mut conn)
@@ -636,7 +645,7 @@ impl EntityStore for RedisEntityStore {
         data: &Value,
         now: Timestamp,
     ) -> Result<CasOutcome> {
-        let key = entity_key(aggregate, id);
+        let key = entity_key(&self.key_prefix, aggregate, id);
         // Read the current envelope to build the bumped one (preserving
         // created_at); the script re-validates the revision atomically
         // before writing, so a racing writer turns this into a Conflict.
@@ -661,7 +670,7 @@ impl EntityStore for RedisEntityStore {
     }
 
     async fn env_list(&self, aggregate: &str) -> Result<Vec<Envelope>> {
-        let keys = scan_keys(&self.conn, &aggregate_pattern(aggregate)).await?;
+        let keys = scan_keys(&self.conn, &aggregate_pattern(&self.key_prefix, aggregate)).await?;
         // An empty aggregate has nothing to fetch; issuing the pipeline anyway
         // sends a zero-command request, which the redis client rejects with
         // "empty command" (exposed by the live dual-instance fencing run on a
@@ -690,7 +699,7 @@ impl EntityStore for RedisEntityStore {
             let parsed: Value = serde_json::from_str(&json)
                 .map_err(|e| corrupt(format!("corrupt entity key {key}: {e}")))?;
             out.push(Envelope {
-                id: id_from_key(aggregate, &key)?,
+                id: id_from_key(&self.key_prefix, aggregate, &key)?,
                 value: Arc::new(parsed),
             });
         }
@@ -701,7 +710,7 @@ impl EntityStore for RedisEntityStore {
     async fn env_delete(&self, aggregate: &str, id: &str) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: () = conn
-            .del(entity_key(aggregate, id))
+            .del(entity_key(&self.key_prefix, aggregate, id))
             .await
             .map_err(|e| redis_error("DEL", e))?;
         Ok(())
@@ -762,7 +771,20 @@ impl RedisRepository {
     /// Connects to `url` with an injected clock (lease expiry and outbox
     /// retry scheduling are judged against it, enabling virtual time).
     pub async fn with_clock(url: impl AsRef<str>, clock: Arc<dyn Clock>) -> Result<Self> {
+        Self::with_key_prefix(url, DEFAULT_KEY_PREFIX, clock).await
+    }
+
+    /// Opens a Redis repository under a custom key prefix. The default
+    /// prefix is stable for production (`acmex:v1:`), while tests can use a
+    /// unique prefix per run to avoid cross-run contamination on a shared
+    /// Redis.
+    pub async fn with_key_prefix(
+        url: impl AsRef<str>,
+        key_prefix: impl Into<Arc<str>>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
         let url = url.as_ref().to_string();
+        let key_prefix = key_prefix.into();
         let client = redis::Client::open(url.as_str())
             .map_err(|e| AcmeError::Storage(format!("failed to open redis client: {e}")))?;
         let conn = client
@@ -777,7 +799,7 @@ impl RedisRepository {
             .map_err(|e| AcmeError::Storage(format!("redis PING failed: {e}")))?;
         tracing::debug!(url = %redact_url(&url), "connected to redis repository");
         Ok(Self {
-            store: RedisEntityStore::new(conn.clone()),
+            store: RedisEntityStore::new(conn.clone(), key_prefix),
             conn,
             url,
             clock,
@@ -813,7 +835,7 @@ impl RedisRepository {
     async fn next_outbox_sequence(&self) -> Result<u64> {
         let mut conn = self.conn.clone();
         let sequence: i64 = conn
-            .incr(format!("{KEY_PREFIX}counters:outbox"), 1)
+            .incr(format!("{}counters:outbox", self.store.key_prefix), 1)
             .await
             .map_err(|e| redis_error("INCR outbox", e))?;
         u64::try_from(sequence)
@@ -846,8 +868,8 @@ impl LeaseManager for RedisRepository {
         let now = self.clock.now();
         let mut conn = self.conn.clone();
         let reply: Vec<redis::Value> = LEASE_ACQUIRE_SCRIPT
-            .key(lease_lock_key(key))
-            .key(lease_token_counter_key(key))
+            .key(lease_lock_key(&self.store.key_prefix, key))
+            .key(lease_token_counter_key(&self.store.key_prefix, key))
             .arg(epoch_ms(now))
             .arg(ttl_ms(ttl))
             .arg(owner)
@@ -867,7 +889,7 @@ impl LeaseManager for RedisRepository {
         let now = self.clock.now();
         let mut conn = self.conn.clone();
         let reply: redis::Value = LEASE_RENEW_SCRIPT
-            .key(lease_lock_key(key))
+            .key(lease_lock_key(&self.store.key_prefix, key))
             .arg(epoch_ms(now))
             .arg(ttl_ms(ttl))
             .arg(owner)
@@ -881,7 +903,7 @@ impl LeaseManager for RedisRepository {
     async fn release(&self, key: &str, owner: &str, fencing_token: FencingToken) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: i64 = LEASE_RELEASE_SCRIPT
-            .key(lease_lock_key(key))
+            .key(lease_lock_key(&self.store.key_prefix, key))
             .arg(owner)
             .arg(fencing_token.to_string())
             .invoke_async(&mut conn)
@@ -917,9 +939,9 @@ impl OutboxRepository for RedisRepository {
         // Event JSON and delivery-state hash land in one MULTI/EXEC block.
         let _: () = redis::pipe()
             .atomic()
-            .set(outbox_event_key(sequence), json)
+            .set(outbox_event_key(&self.store.key_prefix, sequence), json)
             .hset_multiple(
-                outbox_state_key(sequence),
+                outbox_state_key(&self.store.key_prefix, sequence),
                 &[
                     ("attempts", 0i64),
                     ("processed", 0i64),
@@ -933,10 +955,11 @@ impl OutboxRepository for RedisRepository {
     }
 
     async fn list_pending(&self, limit: usize) -> Result<Vec<OutboxEvent>> {
-        let keys = scan_keys(&self.conn, &aggregate_pattern("outbox")).await?;
+        let prefix = self.store.key_prefix.clone();
+        let keys = scan_keys(&self.conn, &aggregate_pattern(&prefix, "outbox")).await?;
         let mut sequences = Vec::with_capacity(keys.len());
         for key in &keys {
-            match outbox_sequence_from_key(key) {
+            match outbox_sequence_from_key(&prefix, key) {
                 Some(sequence) => sequences.push(sequence),
                 None => {
                     tracing::warn!(
@@ -951,8 +974,8 @@ impl OutboxRepository for RedisRepository {
         let mut conn = self.conn.clone();
         let mut pipe = redis::pipe();
         for sequence in &sequences {
-            pipe.get(outbox_event_key(*sequence))
-                .hgetall(outbox_state_key(*sequence));
+            pipe.get(outbox_event_key(&prefix, *sequence))
+                .hgetall(outbox_state_key(&prefix, *sequence));
         }
         let pairs: Vec<(Option<String>, HashMap<String, String>)> = pipe
             .query_async(&mut conn)
@@ -962,7 +985,8 @@ impl OutboxRepository for RedisRepository {
         let now = self.clock.now();
         let mut events = Vec::new();
         for (sequence, (raw, state)) in sequences.into_iter().zip(pairs) {
-            let Some(event) = decode_pending_entry(sequence, raw.as_deref(), &state)? else {
+            let Some(event) = decode_pending_entry(&prefix, sequence, raw.as_deref(), &state)?
+            else {
                 continue;
             };
             if !event.processed
@@ -979,7 +1003,11 @@ impl OutboxRepository for RedisRepository {
     async fn mark_processed(&self, sequence: u64) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: () = conn
-            .hset(outbox_state_key(sequence), "processed", 1)
+            .hset(
+                outbox_state_key(&self.store.key_prefix, sequence),
+                "processed",
+                1,
+            )
             .await
             .map_err(|e| redis_error("HSET outbox", e))?;
         Ok(())
@@ -993,7 +1021,7 @@ impl OutboxRepository for RedisRepository {
     ) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: i64 = OUTBOX_MARK_FAILED_SCRIPT
-            .key(outbox_state_key(sequence))
+            .key(outbox_state_key(&self.store.key_prefix, sequence))
             .arg(error)
             // `None` becomes the empty string so the script clears the
             // stored retry time; "0" would pin it to the epoch instead.
@@ -1007,7 +1035,7 @@ impl OutboxRepository for RedisRepository {
     async fn dead_letter(&self, sequence: u64, reason: &str) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: i64 = OUTBOX_DEAD_LETTER_SCRIPT
-            .key(outbox_state_key(sequence))
+            .key(outbox_state_key(&self.store.key_prefix, sequence))
             .arg(reason)
             .invoke_async(&mut conn)
             .await
@@ -1023,7 +1051,7 @@ impl OutboxRepository for RedisRepository {
     async fn requeue(&self, sequence: u64) -> Result<()> {
         let mut conn = self.conn.clone();
         let _: i64 = OUTBOX_REQUEUE_SCRIPT
-            .key(outbox_state_key(sequence))
+            .key(outbox_state_key(&self.store.key_prefix, sequence))
             .invoke_async(&mut conn)
             .await
             .map_err(|e| redis_error("EVAL outbox requeue", e))?;
@@ -1041,14 +1069,15 @@ impl MigrationManifestStore for RedisRepository {
     /// observable behavior (the previously raced full-scan-then-insert could
     /// write two entries for one source key).
     async fn save_entry(&self, entry: MigrationManifestEntry) -> Result<()> {
-        let dedup_key = manifest_dedup_key(&entry.source_key)?;
+        let prefix = self.store.key_prefix.clone();
+        let dedup_key = manifest_dedup_key(&prefix, &entry.source_key)?;
         let json = serde_json::to_string_pretty(&entry)?;
         let mut conn = self.conn.clone();
         let reply: redis::Value = MANIFEST_SAVE_SCRIPT
             .key(dedup_key)
-            .key(format!("{KEY_PREFIX}counters:manifest"))
+            .key(format!("{}counters:manifest", prefix))
             .arg(json)
-            .arg(MANIFEST_KEY_PREFIX)
+            .arg(manifest_key_prefix(&prefix))
             .invoke_async(&mut conn)
             .await
             .map_err(|e| redis_error("EVAL manifest save", e))?;
@@ -1056,7 +1085,7 @@ impl MigrationManifestStore for RedisRepository {
     }
 
     async fn entries(&self) -> Result<Vec<MigrationManifestEntry>> {
-        let keys = scan_keys(&self.conn, &entries_scan_pattern()).await?;
+        let keys = scan_keys(&self.conn, &entries_scan_pattern(&self.store.key_prefix)).await?;
         // Same empty-aggregate guard as `env_list`: a zero-command pipeline is
         // rejected by the redis client.
         if keys.is_empty() {
@@ -1161,28 +1190,31 @@ mod tests {
 
     #[test]
     fn entity_keys_are_namespaced_and_decodable() {
-        assert_eq!(entity_key("intents", "int_x"), "acmex:v1:intents:int_x");
+        assert_eq!(
+            entity_key(DEFAULT_KEY_PREFIX, "intents", "int_x"),
+            "acmex:v1:intents:int_x"
+        );
         // A hostile id may not introduce extra namespace separators (`_`
         // and `-` are safe, `:` and `/` are percent-encoded).
-        let key = entity_key("accounts", "ten_default:lets-encrypt");
+        let key = entity_key(DEFAULT_KEY_PREFIX, "accounts", "ten_default:lets-encrypt");
         assert_eq!(key, "acmex:v1:accounts:ten_default%3Alets-encrypt");
         assert_eq!(
-            id_from_key("accounts", &key).unwrap(),
+            id_from_key(DEFAULT_KEY_PREFIX, "accounts", &key).unwrap(),
             "ten_default:lets-encrypt"
         );
-        assert!(id_from_key("intents", &key).is_err());
+        assert!(id_from_key(DEFAULT_KEY_PREFIX, "intents", &key).is_err());
         assert_eq!(
-            aggregate_pattern("challenge-leases"),
+            aggregate_pattern(DEFAULT_KEY_PREFIX, "challenge-leases"),
             "acmex:v1:challenge-leases:*"
         );
     }
 
     #[test]
     fn outbox_state_keys_stay_outside_the_entity_scan_pattern() {
-        let pattern = aggregate_pattern("outbox");
+        let pattern = aggregate_pattern(DEFAULT_KEY_PREFIX, "outbox");
         assert_eq!(pattern, "acmex:v1:outbox:*");
-        let event_key = outbox_event_key(1);
-        let state_key = outbox_state_key(1);
+        let event_key = outbox_event_key(DEFAULT_KEY_PREFIX, 1);
+        let state_key = outbox_state_key(DEFAULT_KEY_PREFIX, 1);
         assert_eq!(event_key, "acmex:v1:outbox:000000000001");
         assert_eq!(state_key, "acmex:v1:outbox-state:000000000001");
         assert!(event_key.starts_with(pattern.trim_end_matches('*')));
@@ -1191,12 +1223,18 @@ mod tests {
         // prefix plus a zero-padded sequence) are matched by the `entries`
         // scan pattern.
         let sequence = 7u64;
-        let manifest = format!("{MANIFEST_KEY_PREFIX}{sequence:06}");
+        let manifest = format!("{}{sequence:06}", manifest_key_prefix(DEFAULT_KEY_PREFIX));
         assert_eq!(manifest, "acmex:v1:migration:manifest-000007");
-        assert_eq!(entries_scan_pattern(), "acmex:v1:migration:manifest-*");
-        assert_eq!(lease_lock_key("op/1"), "acmex:v1:locks:op%2F1");
         assert_eq!(
-            lease_token_counter_key("op/1"),
+            entries_scan_pattern(DEFAULT_KEY_PREFIX),
+            "acmex:v1:migration:manifest-*"
+        );
+        assert_eq!(
+            lease_lock_key(DEFAULT_KEY_PREFIX, "op/1"),
+            "acmex:v1:locks:op%2F1"
+        );
+        assert_eq!(
+            lease_token_counter_key(DEFAULT_KEY_PREFIX, "op/1"),
             "acmex:v1:lease-tokens:op%2F1"
         );
     }
@@ -1472,22 +1510,26 @@ mod tests {
         let state = HashMap::new();
 
         // A healthy entry decodes (with delivery state composed on top).
-        let decoded = decode_pending_entry(5, Some(&json), &state)
+        let decoded = decode_pending_entry(DEFAULT_KEY_PREFIX, 5, Some(&json), &state)
             .unwrap()
             .expect("healthy entry decodes");
         assert_eq!(decoded.sequence, 5);
 
         // Event deleted between SCAN and GET → skip.
-        assert!(decode_pending_entry(5, None, &state).unwrap().is_none());
+        assert!(
+            decode_pending_entry(DEFAULT_KEY_PREFIX, 5, None, &state)
+                .unwrap()
+                .is_none()
+        );
         // Undecodable JSON (truncated, wrong shape) → skip, not a
         // whole-scan corrupt failure.
         assert!(
-            decode_pending_entry(5, Some("{not json"), &state)
+            decode_pending_entry(DEFAULT_KEY_PREFIX, 5, Some("{not json"), &state)
                 .unwrap()
                 .is_none()
         );
         assert!(
-            decode_pending_entry(5, Some("null"), &state)
+            decode_pending_entry(DEFAULT_KEY_PREFIX, 5, Some("null"), &state)
                 .unwrap()
                 .is_none()
         );
@@ -1495,6 +1537,7 @@ mod tests {
         // An empty (partially written) delivery hash still composes to
         // event defaults rather than erroring.
         let decoded = decode_pending_entry(
+            DEFAULT_KEY_PREFIX,
             5,
             Some(&json),
             &HashMap::from([("processed".to_string(), "1".to_string())]),
@@ -1506,14 +1549,23 @@ mod tests {
 
     #[test]
     fn outbox_scan_keys_with_bad_ids_are_skippable() {
-        assert_eq!(outbox_sequence_from_key(&outbox_event_key(42)), Some(42));
+        assert_eq!(
+            outbox_sequence_from_key(
+                DEFAULT_KEY_PREFIX,
+                &outbox_event_key(DEFAULT_KEY_PREFIX, 42)
+            ),
+            Some(42)
+        );
         // Non-numeric id and non-outbox keys report `None` (logged and
         // skipped by list_pending) instead of failing the whole scan.
         assert_eq!(
-            outbox_sequence_from_key("acmex:v1:outbox:not-a-number"),
+            outbox_sequence_from_key(DEFAULT_KEY_PREFIX, "acmex:v1:outbox:not-a-number"),
             None
         );
-        assert_eq!(outbox_sequence_from_key("acmex:v1:elsewhere:1"), None);
+        assert_eq!(
+            outbox_sequence_from_key(DEFAULT_KEY_PREFIX, "acmex:v1:elsewhere:1"),
+            None
+        );
     }
 
     #[test]
@@ -1562,13 +1614,16 @@ mod tests {
 
     #[test]
     fn manifest_dedup_keys_are_stable_per_source_key() {
-        let key = manifest_dedup_key("cert:a.example.com").unwrap();
+        let key = manifest_dedup_key(DEFAULT_KEY_PREFIX, "cert:a.example.com").unwrap();
         assert_eq!(
             key,
-            manifest_dedup_key("cert:a.example.com").unwrap(),
+            manifest_dedup_key(DEFAULT_KEY_PREFIX, "cert:a.example.com").unwrap(),
             "same source key must map to the same dedup marker"
         );
-        assert_ne!(key, manifest_dedup_key("cert:b.example.com").unwrap());
+        assert_ne!(
+            key,
+            manifest_dedup_key(DEFAULT_KEY_PREFIX, "cert:b.example.com").unwrap()
+        );
         assert!(key.starts_with("acmex:v1:manifest-dedup:"));
         let hex = key.trim_start_matches("acmex:v1:manifest-dedup:");
         assert_eq!(hex.len(), 64, "SHA-256 hex is 64 characters");
@@ -1599,10 +1654,11 @@ mod tests {
     fn manifest_script_builds_the_same_keys_as_rust() {
         // The script concatenates the passed prefix with `%06d` of the
         // sequence; that must equal the keys the `entries` scan pattern
-        // (`{MANIFEST_KEY_PREFIX}*`) matches on the Rust side. `%06d` in
+        // (`{manifest prefix}*`) matches on the Rust side. `%06d` in
         // Lua and `{_:06}` in Rust pad identically (wider numbers overflow
         // the padding in both).
-        let rust_key = |sequence: u64| format!("{MANIFEST_KEY_PREFIX}{sequence:06}");
+        let rust_key =
+            |sequence: u64| format!("{}{sequence:06}", manifest_key_prefix(DEFAULT_KEY_PREFIX));
         assert_eq!(rust_key(7), "acmex:v1:migration:manifest-000007");
         assert_eq!(rust_key(123_456), "acmex:v1:migration:manifest-123456");
         assert_eq!(
