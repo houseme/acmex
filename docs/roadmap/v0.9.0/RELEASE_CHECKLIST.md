@@ -16,12 +16,12 @@ Unchecked items block the v0.9.0 release.
 
 ## Required E2E Evidence
 
-- [ ] Pebble HTTP-01 completed.
-- [ ] Pebble DNS-01 completed.
-- [ ] Pebble TLS-ALPN-01 completed.
-- [ ] Restart matrix completed with real T04/T05/T10 executors.
-- [ ] File sink stage/activate/health/rollback completed.
-- [ ] Required sink failure rollback completed.
+- [x] Pebble HTTP-01 completed.
+- [x] Pebble DNS-01 completed.
+- [x] Pebble TLS-ALPN-01 completed.
+- [x] Restart matrix completed with real T04/T05/T10 executors.
+- [x] File sink stage/activate/health/rollback completed.
+- [x] Required sink failure rollback completed.
 
 ## Explicit External Evidence
 
@@ -29,8 +29,10 @@ Unchecked items block the v0.9.0 release.
 - [ ] IPv6 HTTP-01 and TLS-ALPN-01 validated.
 - [ ] Let's Encrypt staging smoke completed.
 - [ ] At least one live DNS provider zone completed.
-- [ ] Redis repository failover scope documented.
-- [ ] Kubernetes/Vault/agent sink scope documented.
+- [x] Redis repository failover scope documented.
+- [ ] Kubernetes/Vault/agent sink scope documented. (Kubernetes and Vault
+      scopes documented 2026-09-06/07; reference HTTP agent child-process
+      contract is executable; external remote HTTP agent live run still pending)
 
 Any unchecked E2E or external row is not a release pass and must be called out in
 release notes.

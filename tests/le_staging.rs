@@ -12,6 +12,7 @@ use std::time::Duration;
 const DEFAULT_DIRECTORY_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 
 const ALL_SCENARIOS: &[&str] = &[
+    "directory",
     "http-01",
     "dns-01",
     "renewal",
@@ -21,8 +22,7 @@ const ALL_SCENARIOS: &[&str] = &[
     "eab-ca",
 ];
 
-fn scenarios_from_env() -> BTreeSet<String> {
-    let raw = std::env::var("ACMEX_LE_STAGING_SCENARIOS").unwrap_or_else(|_| "all".to_string());
+fn parse_scenarios(raw: &str) -> BTreeSet<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -37,13 +37,32 @@ fn scenarios_from_env() -> BTreeSet<String> {
         .collect()
 }
 
+fn scenarios_from_env() -> BTreeSet<String> {
+    let raw = std::env::var("ACMEX_LE_STAGING_SCENARIOS").unwrap_or_else(|_| "all".to_string());
+    parse_scenarios(&raw)
+}
+
+fn unknown_scenarios(scenarios: &BTreeSet<String>) -> Vec<String> {
+    scenarios
+        .iter()
+        .filter(|scenario| !ALL_SCENARIOS.contains(&scenario.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn has_issuance_scenario(scenarios: &BTreeSet<String>) -> bool {
+    scenarios.iter().any(|scenario| scenario != "directory")
+}
+
 fn missing_required_env(scenarios: &BTreeSet<String>) -> Vec<&'static str> {
-    let mut required = BTreeSet::from([
-        "ACMEX_LE_STAGING_ACCOUNT_EMAIL",
-        "ACMEX_LE_STAGING_ARTIFACT_DIR",
-        "ACMEX_LE_STAGING_DOMAIN",
-        "ACMEX_LE_STAGING_TRUST_ANCHOR_PEM_FILE",
-    ]);
+    let mut required = BTreeSet::from(["ACMEX_LE_STAGING_ARTIFACT_DIR"]);
+    if has_issuance_scenario(scenarios) {
+        required.extend([
+            "ACMEX_LE_STAGING_ACCOUNT_EMAIL",
+            "ACMEX_LE_STAGING_DOMAIN",
+            "ACMEX_LE_STAGING_TRUST_ANCHOR_PEM_FILE",
+        ]);
+    }
     if scenarios.contains("dns-01") {
         required.extend([
             "ACMEX_LIVE_DNS_TYPE",
@@ -102,6 +121,7 @@ fn le_staging_all_scenarios_are_named_in_the_roadmap() {
     let task = include_str!("../docs/roadmap/v0.10.0/T19_LETSENCRYPT_STAGING_VALIDATION.md");
     let task_compact = task.replace(['-', '_'], "").to_ascii_lowercase();
     for (scenario, aliases) in [
+        ("directory", &["directory", "目录"][..]),
         ("http-01", &["http01"][..]),
         ("dns-01", &["dns01"][..]),
         ("renewal", &["renewal", "续签"][..]),
@@ -117,6 +137,18 @@ fn le_staging_all_scenarios_are_named_in_the_roadmap() {
     }
 }
 
+#[test]
+fn le_staging_scenario_parser_expands_all_and_rejects_unknown_names() {
+    let scenarios = parse_scenarios("directory, profile, all, made-up");
+    for scenario in ALL_SCENARIOS {
+        assert!(
+            scenarios.contains(*scenario),
+            "`all` should include {scenario}"
+        );
+    }
+    assert_eq!(unknown_scenarios(&scenarios), vec!["made-up".to_string()]);
+}
+
 #[tokio::test]
 #[ignore = "talks to Let's Encrypt staging and requires caller-owned validation assets"]
 async fn le_staging_preflight_and_manifest_gate() {
@@ -126,6 +158,12 @@ async fn le_staging_preflight_and_manifest_gate() {
     }
 
     let scenarios = scenarios_from_env();
+    let unknown = unknown_scenarios(&scenarios);
+    assert!(
+        unknown.is_empty(),
+        "ACMEX_LE_STAGING_SCENARIOS contains unknown entries: {unknown:?}; known scenarios: {ALL_SCENARIOS:?}"
+    );
+    let issuance_assets_required = has_issuance_scenario(&scenarios);
     let missing = missing_required_env(&scenarios);
     assert!(
         missing.is_empty(),
@@ -157,6 +195,15 @@ async fn le_staging_preflight_and_manifest_gate() {
             "directory must advertise `{key}`"
         );
     }
+    let profiles = directory
+        .get("profiles")
+        .and_then(serde_json::Value::as_object)
+        .map(|profiles| profiles.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let supports_ari = directory
+        .get("renewalInfo")
+        .and_then(serde_json::Value::as_str)
+        .is_some();
 
     let out_dir = artifact_dir();
     std::fs::create_dir_all(&out_dir).expect("artifact dir");
@@ -164,7 +211,10 @@ async fn le_staging_preflight_and_manifest_gate() {
         "gate": "le-staging",
         "directory_url": directory_url,
         "directory_keys": ["newNonce", "newAccount", "newOrder"],
+        "directory_supports_ari": supports_ari,
+        "profiles_advertised": profiles,
         "requested_scenarios": scenarios.into_iter().collect::<Vec<_>>(),
+        "issuance_assets_required": issuance_assets_required,
         "secret_values_recorded": false,
     });
     let manifest_path = out_dir.join("preflight-manifest.json");

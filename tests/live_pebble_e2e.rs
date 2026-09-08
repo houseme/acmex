@@ -25,8 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 
 use acmex::account::KeyPair;
@@ -203,15 +201,6 @@ impl ChalltestsrvAdmin {
         Ok(())
     }
 
-    async fn get_text(&self, path: &str) -> acmex::error::Result<String> {
-        let response = self
-            .client
-            .get(format!("{}{path}", self.admin))
-            .send()
-            .await
-            .map_err(|e| acmex::error::AcmeError::transport(format!("challtestsrv: {e}")))?;
-        Ok(response.text().await.unwrap_or_default())
-    }
 }
 
 #[derive(Clone)]
@@ -295,7 +284,7 @@ impl ChallengePresenter for ChalltestsrvDnsPresenter {
     }
 
     async fn observe(&self, lease: &ChallengeLease) -> acmex::error::Result<Observation> {
-        let (record_name, value_hash, cached_value) = match &lease.locator {
+        let (record_name, cached_value) = match &lease.locator {
             ChallengeLeaseLocator::Dns {
                 record_name,
                 value_hash,
@@ -307,7 +296,7 @@ impl ChallengePresenter for ChalltestsrvDnsPresenter {
                     .await
                     .get(&(record_name.clone(), value_hash.clone()))
                     .cloned();
-                (record_name.clone(), value_hash.clone(), cached)
+                (record_name.clone(), cached)
             }
             _ => {
                 return Ok(Observation::NotYet {
@@ -361,9 +350,7 @@ impl ChalltestsrvDnsPresenter {
         record_name: &str,
         cached_value: Option<&str>,
     ) -> acmex::error::Result<bool> {
-        use hickory_resolver::config::{
-            ConnectionConfig, NameServerConfig, ProtocolConfig, ResolverConfig, ResolverOpts,
-        };
+        use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
         use hickory_resolver::net::runtime::TokioRuntimeProvider;
         use hickory_resolver::proto::rr::RecordType;
         use hickory_resolver::TokioResolver;
@@ -699,14 +686,22 @@ async fn run_pebble_issue(
             .as_nanos()
     ));
     let account_key = Arc::new(KeyPair::generate().unwrap());
-    let backend: Arc<dyn CaBackend> = Arc::new(AcmeCaBackend::new(
+    // Pebble rejects Ed25519 account keys. `Jwk::for_key_pair` below must
+    // describe the actual key, so the thumbprint (key authorization) matches.
+    let account_jwk = acmex::ca_backend::backend::AccountJwkHandle::new(
+        Jwk::for_key_pair(&account_key.0).unwrap(),
+    );
+    let acme_backend = AcmeCaBackend::new(
         "pebble",
         env.directory_url.clone(),
         Arc::new(InsecurePebbleTransport::new()),
         account_key.clone(),
         repositories.clone(),
-    ));
-    let account_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(account_key.public_key_bytes()));
+    );
+    // Key authorizations read the thumbprint through this handle; the
+    // backend refreshes it when an account key rollover completes.
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn CaBackend> = Arc::new(acme_backend);
 
     let key_provider: Arc<dyn acmex::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
         FileSecretStore::new(key_dir.clone()),

@@ -27,12 +27,14 @@ RELEASE_CHECKLIST "Explicit External Evidence" 区的剩余行与 FEATURE_MATRIX
    - 传播确认配合 T16 策略真实运行（权威 NS 查询）；
    - 其余 provider 保留门控入口与 runbook，按资产可用性执行并如实记录。
 2. **Redis repository live 契约**：
-   - 对真实 Redis（docker 或受控实例）运行与 File/Memory 相同的 repository 契约套件；
+   - `RedisRepository` 实现与 File/Memory 相同的 aggregate repository trait surface（intent/lineage/version/operation/challenge/deployment/account/outbox/lease/manifest），create/CAS/lease 使用 Redis 原子操作；
+   - 对真实 Redis（docker、本机临时实例或受控实例）运行与 File/Memory 相同的 repository 契约套件；
    - **failover 范围文档**：连接丢失/超时期间的行为（CAS 结果未知时的重试语义、Operation 状态不回退、恢复后 resume）、数据持久性边界（AOF/RDB 差异说明）、以及"哪些故障需要人工介入"清单。
 3. **远端 Sink 实测（至少两项）**：
    - Kubernetes Secret sink（kind 或受控集群）：stage/activate/health/rollback 全契约；
    - Vault KV sink（dev server 或受控实例）：同上；
-   - 真实远端 agent（与 HttpAgentSink 协议一致的可执行 agent 部署于独立进程/主机）：部署、健康、回滚；
+   - reference HTTP agent：真实 `acmex agent serve` 子进程与 `HttpAgentSink` 的 stage/activate/health/rollback/cleanup 契约；
+   - 外部远端 agent（与 HttpAgentSink 协议一致的可执行 agent 部署于独立主机/环境）：部署、健康、回滚；
    - 每项产出 "scope documented"：支持的资源形态、权限要求、已知限制。
 4. **双进程 fencing 演练**：
    - 两个真实 `acmex` 进程（File repository 共享目录，或 Redis）对同一 lineage 并发续签：断言仅一个完成 ACME 续签与部署激活，另一个观察到 lease/CAS 冲突并安全退出重试；
@@ -65,7 +67,7 @@ RELEASE_CHECKLIST "Explicit External Evidence" 区的剩余行与 FEATURE_MATRIX
 
 1. live DNS 契约 harness（provider 参数化、zone 清理断言）+ Cloudflare/Route53 执行与存档。
 2. Redis repository 契约在真实实例上跑通；failover 行为测试（kill Redis 中途 + 恢复）与文档。
-3. K8s/Vault/agent sink 实测（kind/dev vault/独立 agent 进程）与 scope 文档。
+3. K8s/Vault/reference agent sink 实测（kind/dev vault/独立 agent 进程）与 scope 文档；外部远端 agent 作为独立环境证据保留门控入口。
 4. 双进程 fencing 与时钟偏差演练测试。
 5. 更新 RELEASE_CHECKLIST / FEATURE_MATRIX / KNOWN_LIMITATIONS；审计 T02/T10/T11 行对应缺口勾销。
 
@@ -75,18 +77,21 @@ RELEASE_CHECKLIST "Explicit External Evidence" 区的剩余行与 FEATURE_MATRIX
 
 ```bash
 RUN_LIVE_DNS_CLOUDFLARE=1 ... cargo test --test dns_provider_contract -- --ignored
-RUN_REDIS=... cargo test --test repository_contract -- --ignored
+ACMEX_TEST_REDIS_URL=... cargo test --features redis --test repository_redis_contract -- --ignored
+ACMEX_LIVE_HTTP_AGENT_URL=... ACMEX_LIVE_HTTP_AGENT_TOKEN_REF=env:... cargo test --test http_agent_sink_live -- --ignored
 scripts/run_live_infra.sh    # 编排上述门控入口
 # 无环境：全部显式跳过；默认测试集不受影响
 ```
+
+`scripts/run_live_infra.sh` 对每个 `ACMEX_LIVE_INFRA_SCENARIOS` 条目必须有显式路由；未知条目直接失败。当前仓库尚无 Kubernetes/Vault sink 实现与双进程 fencing runner，因此 `sink-kubernetes`、`sink-vault`、`dual-process-fencing` 被选中时必须提供对应非空归档证据文件（`sink-kubernetes-scope.md`、`sink-vault-scope.md`、`dual-process-fencing.log`），否则脚本失败，避免 preflight-only 假绿。
 
 ---
 
 ## 7. 验收标准
 
 - [ ] Cloudflare 与 Route53 隔离 zone 契约通过且无记录残留断言；其余 provider 状态如实记录。
-- [ ] Redis repository live 契约通过；failover 范围文档合入（RELEASE_CHECKLIST 对应行勾选）。
-- [ ] K8s、Vault、远端 agent 至少两项实环境契约通过；各项 scope 文档合入。
+- [x] Redis repository live 契约通过；failover 范围文档合入（RELEASE_CHECKLIST 对应行勾选）。
+- [ ] K8s、Vault、reference HTTP agent 至少两项实环境契约通过；外部远端 agent 若未执行必须留在 release notes/FEATURE_MATRIX 限制中；各项 scope 文档合入。
 - [ ] 双进程并发续签/部署演练通过（唯一副作用有测试断言）；时钟偏差扫描无重复副作用。
 - [ ] 全部凭据无入库；secret-scan 通过；证据存档在任务文档中链接。
 - [ ] FEATURE_MATRIX 与 KNOWN_LIMITATIONS 与事实一致。
