@@ -4,6 +4,7 @@
 **前置依赖**：T13（harness 经验与脚本模式）、T14（EAB，硬）；T15（验收报告）、T16（传播策略）、T20（live zone harness，软——未就绪时 DNS-01 可降级为 HTTP-01 并显式记录）
 **主要后继**：T21（发布）
 **建议改动范围**：`scripts/run_le_staging.sh`（新增）、`tests/le_staging.rs`（新增，环境门控）、`docs/roadmap/v0.9.0/{RELEASE_CHECKLIST,KNOWN_LIMITATIONS,FEATURE_MATRIX}.md` 更新、docs
+**资产准备手册**：[T19/T20 外部验证资产准备手册](./EXTERNAL_VALIDATION_ASSET_RUNBOOK.md)
 
 ---
 

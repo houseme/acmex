@@ -37,13 +37,12 @@
 //! prefix, so prefer a throwaway DB index or an ephemeral container.
 #![cfg(feature = "redis")]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "common/repository_contract.rs"]
 mod repository_contract;
 
-use acmex::repository::{RedisRepository, RepositorySet, SystemClock};
+use acmex::repository::{RedisRepository, RepositorySet};
 use repository_contract::{
     account_contract, intent_contract, lease_contract, lineage_version_contract,
     operation_contract, outbox_contract,
@@ -67,9 +66,12 @@ fn redis_url_or_skip() -> String {
 }
 
 async fn redis_set() -> RepositorySet {
-    let index = TEST_PREFIX_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let prefix = format!("acmex:test:{}:{index}", std::process::id());
-    RedisRepository::with_key_prefix(&redis_url_or_skip(), prefix, Arc::new(SystemClock))
+    // Isolation comes from the URL's DB index plus the shared contract
+    // bodies' globally unique id counter (see tests/common/repository_contract.rs),
+    // not from a per-run key prefix: the RedisRepository key namespace is a
+    // fixed versioned prefix by design.
+    let _index = TEST_PREFIX_COUNTER.fetch_add(1, Ordering::Relaxed);
+    RedisRepository::connect(redis_url_or_skip())
         .await
         .map(RedisRepository::into_set)
         .expect("connect to redis at ACMEX_TEST_REDIS_URL")
