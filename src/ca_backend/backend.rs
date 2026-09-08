@@ -8,6 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::json;
 
 use crate::account::KeyPair;
+use crate::crypto::keypair::KeyType;
 use crate::dns::spec::{EnvFileSecretResolver, SecretResolver};
 use crate::domain::{AccountRecord, AccountStatus, KeyAlgorithm, KeyId, KeyRef, TenantId};
 use crate::error::{AcmeError, Result};
@@ -117,6 +118,76 @@ pub trait CaBackend: Send + Sync {
 
     /// Revokes a certificate.
     async fn revoke(&self, account: &AccountHandle, request: &RevocationRequest) -> Result<()>;
+
+    /// The JWK of the backend's *current* account key (RFC 7638), the re-sync
+    /// source for the validation pipeline's key-authorization thumbprint.
+    ///
+    /// A rollover performed inside this process refreshes the pipeline's
+    /// [`AccountJwkHandle`] directly; this method covers every other path —
+    /// the key was changed out of band (another process, or before this
+    /// worker assembled) — by letting `EnsureAccountStep` compare and
+    /// re-publish before any key authorization is computed.
+    ///
+    /// The default reports a configuration error: backends that cannot
+    /// expose their account key simply never trigger the re-sync. A
+    /// default-implemented method keeps the frozen v0.9 trait
+    /// source-compatible.
+    async fn current_account_jwk(&self) -> Result<Jwk> {
+        let _ = self;
+        Err(AcmeError::configuration(
+            "this CA backend does not expose its current account JWK",
+        ))
+    }
+}
+
+/// Shared, refreshable view of the account key's JWK.
+///
+/// The validation pipeline derives key authorizations (`token.thumbprint`,
+/// RFC 8555 §8.1) from this JWK. It is deliberately a handle, not a startup
+/// snapshot: an RFC 8555 §7.3.5 account key rollover changes the thumbprint,
+/// and a pipeline computing key authorizations from the old JWK would fail
+/// CA validation forever (review P3-6). The owning [`AcmeCaBackend`]
+/// publishes the new key's JWK through the attached handle when its
+/// rollover completes, and `EnsureAccountStep` re-syncs it from
+/// [`CaBackend::current_account_jwk`] on every issuance. Cloning shares one
+/// underlying slot.
+///
+/// The interior lock is a `std::sync::RwLock` whose critical sections never
+/// await, so the handle is safe to read and write from async code.
+#[derive(Clone)]
+pub struct AccountJwkHandle {
+    jwk: Arc<std::sync::RwLock<Jwk>>,
+}
+
+impl AccountJwkHandle {
+    /// Pins the JWK of the account key current at assembly time.
+    pub fn new(jwk: Jwk) -> Self {
+        Self {
+            jwk: Arc::new(std::sync::RwLock::new(jwk)),
+        }
+    }
+
+    /// The current account JWK (cloned out; the lock is never held across
+    /// an await).
+    pub fn get(&self) -> Jwk {
+        self.jwk
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Publishes the JWK of the new current account key (rollover refresh).
+    pub fn set(&self, jwk: Jwk) {
+        *self
+            .jwk
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = jwk;
+    }
+
+    /// The RFC 7638 thumbprint of the current account JWK.
+    pub fn thumbprint_sha256(&self) -> Result<String> {
+        self.get().thumbprint_sha256()
+    }
 }
 
 /// ACME (RFC 8555) implementation of [`CaBackend`].
@@ -129,11 +200,23 @@ pub struct AcmeCaBackend {
     /// cache. Always cloned out (never held across another lock): rollover
     /// acquires this lock first, then the session-cache lock.
     key_pair: tokio::sync::RwLock<Arc<KeyPair>>,
+    /// The pipeline's account-JWK handle when attached
+    /// ([`attach_jwk_handle`](Self::attach_jwk_handle)); refreshed after a
+    /// successful rollover so key authorizations use the new thumbprint.
+    /// A std lock taken outside the `key_pair`/`sessions` locks, and its
+    /// critical sections never await.
+    jwk_handle: std::sync::RwLock<Option<AccountJwkHandle>>,
     repositories: RepositorySet,
     tenant: TenantId,
     secrets: Arc<dyn SecretResolver>,
     nonce_pool: Arc<super::session::SharedNoncePool>,
     sessions: tokio::sync::RwLock<Vec<(String, Arc<AcmeSession>)>>,
+    /// Deployment-declared identifier types the CA accepts (`dns`, `ip`, ...).
+    /// The ACME directory has no field to advertise these, so the default is
+    /// empty (DNS-only); deployments targeting an RFC 8738-capable CA declare
+    /// the extra types via
+    /// [`with_identifier_types`](Self::with_identifier_types).
+    identifier_types: Vec<String>,
 }
 
 impl AcmeCaBackend {
@@ -151,11 +234,13 @@ impl AcmeCaBackend {
             directory_url: directory_url.into(),
             transport,
             key_pair: tokio::sync::RwLock::new(key_pair),
+            jwk_handle: std::sync::RwLock::new(None),
             repositories,
             tenant: TenantId::default_tenant(),
             secrets: Arc::new(EnvFileSecretResolver),
             nonce_pool: Arc::new(super::session::SharedNoncePool::new()),
             sessions: tokio::sync::RwLock::new(Vec::new()),
+            identifier_types: Vec::new(),
         }
     }
 
@@ -174,6 +259,51 @@ impl AcmeCaBackend {
     pub fn with_secret_resolver(mut self, secrets: Arc<dyn SecretResolver>) -> Self {
         self.secrets = secrets;
         self
+    }
+
+    /// Declares the identifier types this CA accepts (`dns`, `ip`, ...).
+    ///
+    /// The ACME directory (RFC 8555 §7.1.1) has no field advertising
+    /// identifier types, so [`capabilities`](CaBackend::capabilities) cannot
+    /// discover them. Without a declaration the pipeline treats the CA as
+    /// DNS-only and rejects IP-identifier orders (RFC 8738) as a policy
+    /// violation before any order is created — deployments targeting an
+    /// IP-capable CA (Pebble, or public CAs with RFC 8738 support) declare
+    /// the capability here so the pre-order gate passes.
+    /// Declares the identifier types this CA accepts. The set is exact:
+    /// the pre-order gate rejects intents whose identifier type is not in
+    /// the list, so `["ip"]` alone also *removes* DNS support — include
+    /// `"dns"` unless the deployment really is IP-only (ACME CAs
+    /// effectively always support DNS).
+    pub fn with_identifier_types(mut self, identifier_types: Vec<String>) -> Self {
+        self.identifier_types = identifier_types;
+        self
+    }
+
+    /// Attaches the validation pipeline's account-JWK handle. After a
+    /// successful [`roll_account_key`](CaBackend::roll_account_key) the
+    /// backend publishes the new key's JWK through it, so every key
+    /// authorization computed afterwards uses the new thumbprint.
+    pub fn attach_jwk_handle(&self, handle: AccountJwkHandle) {
+        *self
+            .jwk_handle
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+    }
+
+    /// Publishes `jwk` as the current account JWK on the attached handle
+    /// (no-op without one). Called after the rollover's in-memory switch,
+    /// outside both the `key_pair` and `sessions` locks; the std critical
+    /// section never awaits.
+    fn publish_account_jwk(&self, jwk: Jwk) {
+        if let Some(handle) = self
+            .jwk_handle
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            handle.set(jwk);
+        }
     }
 
     fn account_repo_id(&self) -> String {
@@ -253,8 +383,7 @@ impl AcmeCaBackend {
                 eab.hmac_key.describe()
             ))
         })?;
-        let account_jwk =
-            Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.current_key().await.public_key_bytes()));
+        let account_jwk = Jwk::for_key_pair(&self.current_key().await.0)?;
         eab_binding_jws(
             &account_jwk.to_value(),
             &eab.key_id,
@@ -290,9 +419,10 @@ impl CaBackend for AcmeCaBackend {
         Ok(CaCapabilities {
             ca_id: self.ca_id.clone(),
             directory_url: self.directory_url.clone(),
-            // The ACME directory does not advertise identifier types; leave
-            // unknown (DNS-only default) unless metadata says otherwise.
-            identifier_types: Vec::new(),
+            // The ACME directory does not advertise identifier types; the
+            // deployment-declared set (with_identifier_types) is authoritative
+            // and stays empty (DNS-only default) when not declared.
+            identifier_types: self.identifier_types.clone(),
             supports_ari: directory.renewal_info.is_some(),
             profiles,
             requires_eab: directory
@@ -356,6 +486,7 @@ impl CaBackend for AcmeCaBackend {
         // Persist immediately: a restart must reuse, not re-register.
         let key_id = account_key_id(&self.current_key().await.public_key_bytes());
         let now = self.repositories.clock.now();
+        let current_key = self.current_key().await;
         self.repositories
             .accounts
             .upsert(AccountRecord {
@@ -364,7 +495,10 @@ impl CaBackend for AcmeCaBackend {
                 ca_id: self.ca_id.clone(),
                 directory_url: self.directory_url.clone(),
                 account_url: Some(account_url.clone()),
-                key_ref: KeyRef::software(KeyId::new(key_id.clone())?, KeyAlgorithm::Ed25519),
+                key_ref: KeyRef::software(
+                    KeyId::new(key_id.clone())?,
+                    domain_key_algorithm(&current_key)?,
+                ),
                 contacts: account.contacts.clone(),
                 eab_bound: account.external_account_binding.is_some(),
                 status: AccountStatus::Active,
@@ -411,14 +545,22 @@ impl CaBackend for AcmeCaBackend {
         // Inner JWS (RFC 8555 §7.3.5): shared with the legacy facade so the
         // nested signature semantics have one implementation while the outer
         // request still goes through the session for nonce/error handling.
-        let old_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes()));
-        let inner_object =
+        let old_jwk = Jwk::for_key_pair(&old_key.0)?;
+        // The pipeline refresh target, derived before anything can switch:
+        // a JWK derivation failure must abort before the keyChange request,
+        // never leave a half-refreshed pipeline behind.
+        let new_account_jwk = Jwk::for_key_pair(&new_key.0)?;
+        let inner_jws =
             key_change_inner_jws(&account.account_url, &key_change_url, &old_jwk, &new_key)?;
 
         // Outer JWS: the ordinary account-authenticated request path signs
         // it with the OLD key (kid = account URL, url = keyChange) — nonce
         // handling, badNonce recovery, Replay-Nonce capture and status
-        // classification included. Its payload is the inner JWS object.
+        // classification included. Its payload IS the inner JWS object
+        // (verified against Let's Encrypt staging: a JSON-string wrapping
+        // is rejected with "payload did not parse as JSON").
+        let inner_object: serde_json::Value = serde_json::from_str(&inner_jws)
+            .map_err(|e| AcmeError::protocol(format!("inner key-change JWS: {e}")))?;
         session
             .execute_jws(&key_change_url, JwsPayload::Object(inner_object))
             .await?;
@@ -431,7 +573,7 @@ impl CaBackend for AcmeCaBackend {
         let key_id = account_key_id(&new_key.public_key_bytes());
         let now = self.repositories.clock.now();
         let mut record = existing.value;
-        record.key_ref = KeyRef::software(KeyId::new(key_id)?, KeyAlgorithm::Ed25519);
+        record.key_ref = KeyRef::software(KeyId::new(key_id)?, domain_key_algorithm(&new_key)?);
         record.updated_at = now;
         self.repositories.accounts.upsert(record).await?;
 
@@ -447,6 +589,12 @@ impl CaBackend for AcmeCaBackend {
             let mut sessions = self.sessions.write().await;
             sessions.retain(|(url, _)| url != &account.account_url);
         }
+
+        // Last, outside both backend locks: the pipeline's account-JWK
+        // handle moves to the new thumbprint, so the next key
+        // authorization (`token.thumbprint`) is computed from the key the
+        // CA now holds (review P3-6).
+        self.publish_account_jwk(new_account_jwk);
 
         tracing::info!(
             ca = self.ca_id,
@@ -614,6 +762,10 @@ impl CaBackend for AcmeCaBackend {
             .await?;
         Ok(())
     }
+
+    async fn current_account_jwk(&self) -> Result<Jwk> {
+        Jwk::for_key_pair(&self.current_key().await.0)
+    }
 }
 
 impl AccountRef {
@@ -628,6 +780,23 @@ pub fn account_key_id(public_key: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(public_key);
     format!("key_acct_{}", &hex::encode(hasher.finalize())[..16])
+}
+
+/// The domain key algorithm recorded for an account key in the persisted
+/// [`AccountRecord`]. The key id already derives from the public key bytes
+/// (type-agnostic); this mapping only fixes the informational algorithm
+/// label. Metadata only, never a protocol input: JWS signing always derives
+/// the algorithm from the actual key.
+fn domain_key_algorithm(key: &KeyPair) -> Result<KeyAlgorithm> {
+    let key_type = KeyType::for_key_pair(&key.0)?;
+    Ok(match key_type {
+        KeyType::Ed25519 => KeyAlgorithm::Ed25519,
+        KeyType::EcdsaP256 => KeyAlgorithm::EcP256,
+        KeyType::EcdsaP384 => KeyAlgorithm::EcP384,
+        KeyType::EcdsaP521 => KeyAlgorithm::EcP521,
+        KeyType::Rsa2048 => KeyAlgorithm::Rsa2048,
+        KeyType::Rsa4096 => KeyAlgorithm::Rsa4096,
+    })
 }
 
 /// Builds the RFC 8555 §7.3.4 `externalAccountBinding` JWS: the protected
@@ -660,16 +829,18 @@ fn eab_binding_jws(
 ///
 /// This is shared by the production `ca_backend` path and the legacy
 /// `AccountManager` facade, so the double-JWS core cannot drift between
-/// stacks while the old public API remains available.
+/// stacks while the old public API remains available. Both the inner JWK and
+/// the inner `alg` derive from the NEW key, whatever its type.
 pub(crate) fn key_change_inner_jws(
     account_url: &str,
     key_change_url: &str,
     old_jwk: &Jwk,
     new_key: &KeyPair,
-) -> Result<serde_json::Value> {
-    let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
+) -> Result<String> {
+    let new_jwk = Jwk::for_key_pair(&new_key.0)?;
+    let inner_alg = KeyType::for_key_pair(&new_key.0)?.jwa_algorithm();
     let inner_header = json!({
-        "alg": "EdDSA",
+        "alg": inner_alg,
         "jwk": new_jwk.to_value(),
         "url": key_change_url,
     });
@@ -677,32 +848,9 @@ pub(crate) fn key_change_inner_jws(
         "account": account_url,
         "oldKey": old_jwk.to_value(),
     });
-    let inner_jws = JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)?;
-    compact_jws_to_object(&inner_jws)
-}
-
-/// Converts compact JWS serialization into the JSON object used by ACME.
-pub(crate) fn compact_jws_to_object(jws: &str) -> Result<serde_json::Value> {
-    let mut parts = jws.split('.');
-    let protected = parts
-        .next()
-        .ok_or_else(|| AcmeError::protocol("compact JWS missing protected header"))?;
-    let payload = parts
-        .next()
-        .ok_or_else(|| AcmeError::protocol("compact JWS missing payload"))?;
-    let signature = parts
-        .next()
-        .ok_or_else(|| AcmeError::protocol("compact JWS missing signature"))?;
-    if parts.next().is_some() {
-        return Err(AcmeError::protocol(
-            "compact JWS has more than three segments".to_string(),
-        ));
-    }
-    Ok(json!({
-        "protected": protected,
-        "payload": payload,
-        "signature": signature,
-    }))
+    // RFC 8555 §7.3.5: the outer payload is the inner flattened JWS,
+    // carried as a JSON string.
+    JwsSigner::new(&new_key.0).sign(&inner_header, &inner_payload)
 }
 
 /// HMAC-SHA256, the only symmetric ACME signature (EAB, RFC 8555 §7.3.4).
@@ -727,6 +875,7 @@ pub fn identifiers_to_wire(identifiers: &[Identifier]) -> Vec<serde_json::Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ca_backend::transport::ScriptedResponse;
 
     #[test]
     fn account_key_id_is_deterministic() {
@@ -736,5 +885,55 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert!(a.starts_with("key_acct_"));
+    }
+
+    fn directory_body() -> serde_json::Value {
+        serde_json::json!({
+            "newNonce": "https://acme.example/new-nonce",
+            "newAccount": "https://acme.example/new-account",
+            "newOrder": "https://acme.example/new-order",
+            "revokeCert": "https://acme.example/revoke-cert",
+            "keyChange": "https://acme.example/key-change",
+        })
+    }
+
+    fn test_backend(fake: Arc<FakeAcmeTransport>) -> AcmeCaBackend {
+        let repositories = crate::repository::MemoryRepository::new().into_set();
+        AcmeCaBackend::new(
+            "test-ca",
+            "https://acme.example/directory",
+            fake,
+            Arc::new(KeyPair::generate().unwrap()),
+            repositories,
+        )
+    }
+
+    /// Capabilities default to DNS-only: the ACME directory has no
+    /// identifier-type field, so an undeclared CA must not report `ip`.
+    #[tokio::test]
+    async fn undeclared_capabilities_stay_dns_only() {
+        let fake = Arc::new(FakeAcmeTransport::new(jiff::Timestamp::now()));
+        fake.push(ScriptedResponse::json("directory", 200, directory_body()).uses(100));
+        let caps = test_backend(fake).capabilities().await.unwrap();
+        assert!(caps.identifier_types.is_empty());
+        assert!(caps.supports_identifier_type("dns"));
+        assert!(!caps.supports_identifier_type("ip"));
+    }
+
+    /// The deployment declaration (with_identifier_types) is what the
+    /// capability gate (CreateOrResumeOrder) consults for RFC 8738 orders
+    /// against CAs the directory cannot describe.
+    #[tokio::test]
+    async fn declared_identifier_types_reach_capabilities() {
+        let fake = Arc::new(FakeAcmeTransport::new(jiff::Timestamp::now()));
+        fake.push(ScriptedResponse::json("directory", 200, directory_body()).uses(100));
+        let caps = test_backend(fake)
+            .with_identifier_types(vec!["dns".to_string(), "ip".to_string()])
+            .capabilities()
+            .await
+            .unwrap();
+        assert_eq!(caps.identifier_types, vec!["dns", "ip"]);
+        assert!(caps.supports_identifier_type("ip"));
+        assert!(caps.supports_identifier_type("dns"));
     }
 }

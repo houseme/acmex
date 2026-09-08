@@ -52,6 +52,39 @@ Webhook consumers validate signatures with a bounded replay window. Configure
 the receiver and signing secret through SecretRef-backed webhook settings, and
 ensure clocks are synchronized on every receiving host.
 
+### Repository File Durability (`[repository.file]`)
+
+New optional settings control how durably the file repository makes entity
+writes (intents, operations, outbox events, leases):
+
+```toml
+[repository.file]
+path = "/var/lib/acmex/repository"
+fsync = "always"            # "always" (default) or "interval"
+fsync_interval_ms = 100     # sweep window; only used when fsync = "interval"
+```
+
+- `fsync = "always"` (the default) is the behavior of every earlier
+  release: every write is fsynced before its atomic rename, so once a write
+  returns it survives an abrupt crash (process kill, power loss). **No
+  configuration change is required to keep this behavior** — absent keys
+  resolve to `always` exactly as before.
+- `fsync = "interval"` is an explicit opt-in that weakens durability for
+  throughput: writes become visible immediately, but the fsync is performed
+  by a background sweeper at most `fsync_interval_ms` later. **Warning: an
+  abrupt crash can lose up to one interval window of acknowledged writes.**
+  Only choose this for bulk-write workloads (imports, mass issuance) that
+  tolerate that window; `fsync_interval_ms` must be at least 1.
+
+Unknown `fsync` values and `fsync_interval_ms = 0` are configuration errors:
+startup fails with an explicit message instead of silently degrading
+durability.
+
+The `secrets/` directory (ACME account keys) is **never** governed by these
+settings. Secret writes always fsync immediately and unconditionally, both in
+`always` and in `interval` mode: a lost account key permanently orphans the
+ACME account on the CA side, so that latency is never traded away.
+
 ## API Changes
 
 - `PATCH /api/v1/certificate-intents/{id}` updates mutable intent fields only:
@@ -81,6 +114,9 @@ API v1. Set `ACMEX_API_KEY` or pass `--api-key` for protected servers.
 
 - Move EAB settings to `[ca.eab]`.
 - Move DNS-01 propagation tuning to `[dns.propagation]` or provider overrides.
+- Only opt into `[repository.file].fsync = "interval"` after confirming the
+  workload tolerates the documented crash-loss window; keep `always` for
+  anything durability-sensitive.
 - Update clients to tolerate `verification_report` on certificate versions.
 - Update support runbooks to use challenge observation and cleanup APIs.
 - Keep legacy `/api` consumers on the documented migration path before

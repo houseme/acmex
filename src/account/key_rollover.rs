@@ -58,16 +58,18 @@ impl<'a> KeyRollover<'a> {
         let nonce = self.account_manager.nonce_manager.get_nonce().await?;
 
         let outer_header = json!({
-            "alg": "EdDSA",
+            "alg": self.account_manager.get_signer().jwa_algorithm()?,
             "kid": account_url,
             "nonce": nonce,
             "url": key_change_url
         });
 
+        let inner_object: serde_json::Value = serde_json::from_str(&inner_jws_obj)
+            .map_err(|e| crate::error::AcmeError::protocol(format!("inner key-change JWS: {e}")))?;
         let outer_jws = self
             .account_manager
             .get_signer()
-            .sign(&outer_header, &inner_jws_obj)?;
+            .sign(&outer_header, &inner_object)?;
 
         // 4. Send request to the keyChange endpoint
         tracing::info!("Sending keyChange request to: {}", key_change_url);

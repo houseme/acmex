@@ -56,11 +56,43 @@ disabled; Pebble's certificate is invalid by design), with DNS-01, HTTP-01
 and TLS-ALPN-01 programmed through the challtestsrv admin API, driving
 intent → order → challenge → CSR → finalize → download → strict verification
 → File sink deploy → activation. The DNS-01 lifecycle scenario also covers
-renewal replacement and CA revocation. 2026-09-07 validation refresh recorded
-multiple green prepared-environment runs, including restart windows and
-failure rollback, so the Pebble L4 release evidence now counts as passed. Real
-public CA, DNS provider and remote sink evidence remains outside Pebble's
-scope.
+renewal replacement and CA revocation. First executed green on 2026-09-06 and re-executed on 2026-09-07: the
+2026-09-07 evidence pass recorded two consecutive 6/6 greens (all scenarios)
+after one archived transient 2/6 failure; see `VALIDATION_EVIDENCE.md`
+(2026-09-07 section). The terminal `VALIDATION_CHALLENGE_INCOMPATIBLE` error
+now records per-challenge status and the CA problem summary, so any
+recurrence is directly diagnosable. Artifacts: `target/pebble-e2e/<ts>/`.
+
+**Update (2026-09-07/08)**: the harness now covers RFC 8738 IP identifiers
+(scenario count 6 → 9). For IP identifiers Pebble's VA dials the identifier
+address:port directly (no DNS), so the new scenarios are:
+
+- `pebble_full_issuance_ip_http01` — IPv4 identifier = challtestsrv's static
+  address (`ACMEX_CHALLTESTSRV_IPV4`, default 10.30.50.3); challtestsrv
+  answers HTTP-01 token-keyed on its own address.
+- `pebble_full_issuance_ip_tlsalpn01` — IPv4 identifier with TLS-ALPN-01.
+  challtestsrv only mints dNSName-SAN certificates, which Pebble correctly
+  rejects for IP identifiers (RFC 8737 requires exactly one iPAddress SAN
+  under the `in-addr.arpa` SNI), so this scenario is served by acmex's own
+  production `LocalTlsListener` + `TlsAlpn01Presenter` — the same edge the
+  worker assembly binds — over an address routable from pebble's container
+  (`PEBBLE_E2E_HOST_IPV4`).
+- `pebble_full_issuance_ip_http01_v6` — IPv6 identifier = challtestsrv's
+  static IPv6 (`ACMEX_CHALLTESTSRV_IPV6`); the compose network enables IPv6
+  with a ULA subnet. Requires a runtime that honours `enable_ipv6` with
+  static container addresses (verified on the local OrbStack/docker 29.4.0
+  host); absent that support the scenario fails rather than fakes success.
+
+Supporting changes: the compose file gained a fixed project name
+(`acmex-pebble-e2e`) and overridable host ports/subnets so coexisting local
+stacks do not collide; `AcmeCaBackend::with_identifier_types` declares
+identifier types the ACME directory cannot advertise (previously the
+pre-order capability gate rejected every IP order for real CAs). Two
+consecutive 9/9 greens recorded 2026-09-07 UTC; see `VALIDATION_EVIDENCE.md`
+(2026-09-07/08 section). These are local Pebble (RFC 8738) evidence only —
+external CA IP validation is still not a release pass.
+
+multiple green prepared-environment runs, including restart windows and failure rollback, so the Pebble L4 release evidence now counts as passed. Real public CA, DNS provider and remote sink evidence remains outside Pebble's scope.
 
 Successful runs archive `environment.txt`, `cargo-test-live-pebble-e2e.log`,
 and `compose.log` under `target/pebble-e2e/<timestamp>/`; CI uploads the

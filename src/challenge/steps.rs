@@ -25,14 +25,15 @@ use serde::{Deserialize, Serialize};
 use jiff::Timestamp;
 
 use crate::ca_backend::CaBackend;
+use crate::ca_backend::backend::AccountJwkHandle;
 use crate::ca_backend::{
     AccountHandle, AuthorizationRef, ChallengeRef, ExternalAccountBindingRef, OrderHandle,
     OrderRequest,
 };
 use crate::domain::challenge::{ChallengeLeaseLocator, ChallengeLeaseState};
 use crate::domain::{
-    ClassifiedError, ErrorClass, OperationRecord, WorkflowStepKind, error_codes,
-    validate_order_policy,
+    ClassifiedError, ErrorClass, OperationRecord, ValidationPlanItem, WorkflowStepKind,
+    error_codes, validate_order_policy,
 };
 use crate::error::{AcmeError, Result};
 use crate::protocol::Jwk;
@@ -49,9 +50,15 @@ pub struct ChallengeStepDeps {
     pub backend: Arc<dyn CaBackend>,
     /// Presenters by challenge type.
     pub presenters: PresenterRegistry,
-    /// The account key's JWK (for key authorizations).
-    pub account_jwk: Jwk,
+    /// The account key's JWK (for key authorizations). A handle, not a
+    /// startup snapshot: refreshed when the account key rolls over so key
+    /// authorizations always use the current thumbprint.
+    pub account_jwk: AccountJwkHandle,
     /// Identifier policy (allowed challenges; empty = any compatible).
+    ///
+    /// This is the worker-level fallback: an operation whose intent pins a
+    /// non-empty `validation_policy.allowed_challenges` set overrides it at
+    /// prepare time (see `PrepareChallengesStep::intent_validation_policy`).
     pub allowed_challenges: crate::domain::ChallengeSet,
     /// Maximum time from prepare to propagation.
     pub propagation_timeout: Duration,
@@ -60,7 +67,9 @@ pub struct ChallengeStepDeps {
 }
 
 impl ChallengeStepDeps {
-    /// Computes the ACME key authorization `token.thumbprint`.
+    /// Computes the ACME key authorization `token.thumbprint`. The
+    /// thumbprint comes from the handle's *current* JWK, so a refresh after
+    /// an account key rollover takes effect for every later prepare.
     fn key_authorization(&self, token: &str) -> Result<String> {
         Ok(format!(
             "{}.{}",
@@ -77,6 +86,12 @@ impl ChallengeStepDeps {
 #[derive(Serialize, Deserialize)]
 struct AccountPayload {
     account: AccountHandle,
+    /// The account JWK as observed by EnsureAccount (audit trail for
+    /// thumbprint changes); `None` when the backend cannot report it.
+    /// `#[serde(default)]` keeps step outputs written before this field
+    /// existed deserializable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_jwk: Option<Jwk>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,6 +120,14 @@ struct ChallengeSnapshot {
     url: String,
     token: String,
     status: String,
+    /// `issuer-domain-names` of a dns-persist-01 challenge
+    /// (draft-ietf-acme-dns-persist-01). `#[serde(default)]` keeps step
+    /// outputs persisted before this field existed deserializable.
+    #[serde(default)]
+    issuer_domain_names: Vec<String>,
+    /// The `accounturi` of a dns-persist-01 challenge, verbatim.
+    #[serde(default)]
+    accounturi: Option<String>,
 }
 
 fn read_payload<T: serde::de::DeserializeOwned>(
@@ -158,9 +181,15 @@ fn ca_challenge_error_summary(
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("acme_error");
+            let detail = problem
+                .get("detail")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
             match problem.get("status").and_then(serde_json::Value::as_u64) {
-                Some(status) => format!("CA challenge error type={problem_type} status={status}"),
-                None => format!("CA challenge error type={problem_type}"),
+                Some(status) => format!(
+                    "CA challenge error type={problem_type} status={status} detail={detail}"
+                ),
+                None => format!("CA challenge error type={problem_type} detail={detail}"),
             }
         })
         .unwrap_or_else(|| "authorization invalid".to_string())
@@ -270,8 +299,53 @@ impl StepExecutor for EnsureAccountStep {
         let account_ref = self.account_ref();
         match self.deps.backend.ensure_account(&account_ref).await {
             Ok(handle) => {
-                let payload =
-                    serde_json::to_string(&AccountPayload { account: handle }).unwrap_or_default();
+                // Cross-process self-heal: re-sync the pipeline's account
+                // JWK with the backend's *current* account key before any
+                // key authorization of this operation is computed. A
+                // rollover that happened out of band (another process, or a
+                // backend that swapped its key without this handle attached)
+                // leaves the pinned thumbprint stale — the CA, holding the
+                // new public key, would reject every challenge value
+                // derived from it.
+                // Converge the handle to the backend's current key. A
+                // concurrent rollover between our read and the handle set
+                // could push a stale JWK, so after setting we re-read the
+                // backend once and converge again if it moved.
+                let mut account_jwk = match self.deps.backend.current_account_jwk().await {
+                    Ok(jwk) => Some(jwk),
+                    Err(err) => {
+                        tracing::debug!(
+                            ca = %self.deps.backend.ca_id(),
+                            error = %err,
+                            "backend cannot report its account JWK; keeping the pinned handle"
+                        );
+                        None
+                    }
+                };
+                if let Some(jwk) = &account_jwk
+                    && jwk != &self.deps.account_jwk.get()
+                {
+                    tracing::info!(
+                        ca = %self.deps.backend.ca_id(),
+                        "account key changed out of band; refreshing the \
+                         key-authorization JWK"
+                    );
+                    self.deps.account_jwk.set(jwk.clone());
+                    // Re-read: if the backend moved again, converge to the
+                    // freshest value rather than trusting the first read.
+                    if let Ok(fresh) = self.deps.backend.current_account_jwk().await {
+                        let moved = fresh != *jwk;
+                        account_jwk = Some(fresh.clone());
+                        if moved {
+                            self.deps.account_jwk.set(fresh);
+                        }
+                    }
+                }
+                let payload = serde_json::to_string(&AccountPayload {
+                    account: handle,
+                    account_jwk,
+                })
+                .unwrap_or_default();
                 StepResult::Complete {
                     output_ref: Some(payload),
                     side_effect_locator: None,
@@ -538,6 +612,8 @@ impl StepExecutor for LoadAuthorizationsStep {
                                 url: c.url.clone(),
                                 token: c.token.clone(),
                                 status: c.status.clone(),
+                                issuer_domain_names: c.issuer_domain_names.clone(),
+                                accounturi: c.accounturi.clone(),
                             })
                             .collect(),
                     })
@@ -561,6 +637,14 @@ impl StepExecutor for LoadAuthorizationsStep {
 
 /// Creates external resources for every authorization; each session is
 /// independent and persisted, with crash-idempotent session ids.
+///
+/// By default one challenge type per authorization is prepared (the
+/// preference-selected one). When the operation's intent sets
+/// `validation_policy.prepare_all_supported`, *every* CA-offered challenge
+/// that the policy allows and a registered presenter can serve gets its own
+/// session — CAs like Pebble validate all offered challenges in parallel, so
+/// each supportable one must be resolvable. Acknowledgement then follows the
+/// plan's preference order (sessions are created in it).
 pub struct PrepareChallengesStep {
     deps: Arc<ChallengeStepDeps>,
 }
@@ -570,18 +654,255 @@ impl PrepareChallengesStep {
     pub fn new(deps: Arc<ChallengeStepDeps>) -> Self {
         Self { deps }
     }
+
+    /// The validation policy of the operation's intent, resolved directly
+    /// through the subject's `intent_id` or through its lineage (same
+    /// precedence as identifier resolution in `CreateOrderStep`).
+    ///
+    /// This is the wiring that carries a per-certificate validation policy
+    /// into the challenge pipeline: a non-empty intent `allowed_challenges`
+    /// set overrides the worker-level default ([`ChallengeStepDeps::
+    /// allowed_challenges`]), and `prepare_all_supported` lives only on the
+    /// intent — it is a per-certificate choice, not a worker knob.
+    /// Resolves the intent's validation policy; a repository READ FAILURE is
+    /// retriable and must not silently downgrade to the worker defaults, so
+    /// it surfaces as an error the caller maps onto the step result.
+    async fn intent_validation_policy(
+        &self,
+        ctx: &StepContext<'_>,
+    ) -> crate::error::Result<Option<crate::domain::ValidationPolicy>> {
+        let record = ctx.operation;
+        if let Some(intent_id) = &record.subject.intent_id {
+            return ctx
+                .repositories
+                .intents
+                .get(intent_id)
+                .await
+                .map(|stored| stored.map(|stored| stored.value.validation_policy));
+        }
+        if let Some(lineage_id) = &record.subject.lineage_id {
+            let Some(lineage) = ctx.repositories.lineages.get(lineage_id).await? else {
+                return Ok(None);
+            };
+            return ctx
+                .repositories
+                .intents
+                .get(&lineage.value.intent_id)
+                .await
+                .map(|stored| stored.map(|stored| stored.value.validation_policy));
+        }
+        Ok(None)
+    }
+
+    /// Prepares one (authorization, challenge) candidate as an independent,
+    /// crash-idempotent session. `Err` carries the step result to surface.
+    ///
+    /// `session_seed` feeds the deterministic session id: single mode seeds
+    /// with the authorization URL (historical ids unchanged); prepare-all
+    /// mode disambiguates per challenge type.
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_candidate(
+        &self,
+        repositories: &RepositorySet,
+        operation: &OperationRecord,
+        account_url: &str,
+        authz: &AuthzSnapshot,
+        chosen: &ChallengeSnapshot,
+        session_seed: &str,
+        prepare_all: bool,
+    ) -> std::result::Result<(), StepResult> {
+        let id = session_id(operation, session_seed);
+
+        // Crash idempotency: sessions whose external resource already
+        // exists are not re-prepared. A `Preparing` session (transient
+        // failure or crash mid-prepare) IS re-attempted — prepare is
+        // idempotent per session id and resource value.
+        if let Ok(Some(stored)) = repositories.challenge_sessions.get(&id).await
+            && matches!(
+                stored.value.state,
+                ChallengeSessionState::Prepared
+                    | ChallengeSessionState::Observing
+                    | ChallengeSessionState::Propagated
+                    | ChallengeSessionState::Acknowledged
+                    | ChallengeSessionState::Processing
+                    | ChallengeSessionState::Valid
+            )
+        {
+            return Ok(());
+        }
+
+        let challenge_type: ChallengeType = match chosen.challenge_type.parse() {
+            Ok(kind) => kind,
+            Err(_) => return Err(policy_error("unknown challenge type")),
+        };
+        let Some(presenter) = self.deps.presenters.get(challenge_type) else {
+            if prepare_all {
+                tracing::warn!(
+                    challenge_type = %challenge_type,
+                    identifier = %authz.identifier,
+                    "no presenter registered; skipping this offered challenge \
+                     in prepare-all-supported mode"
+                );
+                return Ok(());
+            }
+            return Err(policy_error(format!(
+                "no presenter registered for `{challenge_type}`"
+            )));
+        };
+
+        let mut session = ChallengeSession {
+            id: id.clone(),
+            operation_id: operation.id.clone(),
+            authorization_url: authz.url.clone(),
+            challenge_url: chosen.url.clone(),
+            identifier: authz.identifier.clone(),
+            challenge_type,
+            token_hash: ChallengeSession::hash_token(&chosen.token),
+            state: ChallengeSessionState::Selected,
+            lease_id: None,
+            deadline: repositories
+                .clock
+                .now()
+                .checked_add(
+                    jiff::Span::new().seconds(self.deps.propagation_timeout.as_secs() as i64),
+                )
+                .expect("deadline overflow"),
+            last_propagation_check_at: None,
+            last_propagation_status: None,
+            last_ca_poll_at: None,
+            last_ca_status: None,
+            last_error: None,
+        };
+
+        // Persist the session before creating the external resource.
+        let _ = repositories
+            .challenge_sessions
+            .create(session.clone())
+            .await;
+        session = session
+            .transition(ChallengeSessionState::Preparing)
+            .expect("selected -> preparing");
+        if let Some(stored) = repositories.challenge_sessions.get(&id).await.unwrap() {
+            let _ = repositories
+                .challenge_sessions
+                .update(stored.revision, session.clone())
+                .await;
+        }
+
+        // draft-ietf-acme-dns-persist-01 §3.1: a challenge with more than
+        // ten issuer-domain-names, or any name longer than 253 octets, is
+        // malformed and MUST be rejected rather than retried.
+        if chosen.issuer_domain_names.len() > 10 {
+            return Err(policy_error(
+                "dns-persist-01 challenge carries more than ten issuer-domain-names".to_string(),
+            ));
+        }
+        for name in &chosen.issuer_domain_names {
+            if name.len() > 253 {
+                return Err(policy_error(format!(
+                    "dns-persist-01 issuer-domain-name exceeds 253 octets: {name}"
+                )));
+            }
+        }
+
+        let key_authorization = match self.deps.key_authorization(&chosen.token) {
+            Ok(value) => value,
+            Err(err) => return Err(retryable(err.to_string())),
+        };
+        match presenter
+            .prepare(PrepareChallenge {
+                session: session.clone(),
+                key_authorization,
+                account_url: account_url.to_string(),
+                issuer_domain_names: chosen.issuer_domain_names.clone(),
+                accounturi: chosen.accounturi.clone(),
+            })
+            .await
+        {
+            Ok(lease) => {
+                record_challenge_trace(&session, Some(&lease.locator));
+                let _ = repositories.challenge_leases.create(lease.clone()).await;
+                let prepared = session
+                    .transition(ChallengeSessionState::Prepared)
+                    .expect("preparing -> prepared");
+                if let Some(stored) = repositories.challenge_sessions.get(&id).await.unwrap() {
+                    let mut updated = prepared;
+                    updated.lease_id = Some(lease.id);
+                    let _ = repositories
+                        .challenge_sessions
+                        .update(stored.revision, updated)
+                        .await;
+                }
+                Ok(())
+            }
+            Err(err) => {
+                // Transient provider failure: stay in Preparing so the
+                // retry re-attempts idempotently.
+                if let Some(stored) = repositories.challenge_sessions.get(&id).await.unwrap() {
+                    let mut updated = session.clone();
+                    updated.last_error = Some(err.to_string());
+                    let _ = repositories
+                        .challenge_sessions
+                        .update(stored.revision, updated)
+                        .await;
+                }
+                Err(retryable(format!(
+                    "prepare failed for `{}`: {err}",
+                    authz.identifier
+                )))
+            }
+        }
+    }
 }
 
 /// Deterministic session id: stable across retries of the same operation.
-fn session_id(operation: &OperationRecord, authorization_url: &str) -> String {
+fn session_id(operation: &OperationRecord, seed: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(authorization_url.as_bytes());
+    hasher.update(seed.as_bytes());
     format!(
         "chs_{}_{}",
         operation.id.as_str(),
         &hex::encode(hasher.finalize())[..8]
     )
+}
+
+/// Challenge candidates for one authorization, in the order sessions are
+/// created (and later acknowledged).
+///
+/// * Single mode (`prepare_all = false`): the first CA-offered challenge the
+///   plan allows — the historical behavior, one session per authorization.
+/// * Prepare-all mode (`prepare_all = true`): *every* CA-offered challenge
+///   the plan allows, in plan preference order. The single-mode candidate is
+///   always the first preference match, so single mode is a strict subset of
+///   prepare-all mode.
+fn challenge_candidates<'a>(
+    plan_item: &ValidationPlanItem,
+    challenges: &'a [ChallengeSnapshot],
+    prepare_all: bool,
+) -> Vec<&'a ChallengeSnapshot> {
+    if prepare_all {
+        plan_item
+            .allowed
+            .iter()
+            .filter_map(|kind| {
+                challenges
+                    .iter()
+                    .find(|c| c.challenge_type == kind.as_str())
+            })
+            .collect()
+    } else {
+        challenges
+            .iter()
+            .find(|c| {
+                plan_item
+                    .allowed
+                    .iter()
+                    .any(|allowed| allowed.as_str() == c.challenge_type)
+            })
+            .into_iter()
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -600,6 +921,37 @@ impl StepExecutor for PrepareChallengesStep {
             Err(_) => return policy_error("LoadAuthorizations has not completed yet"),
         };
         let repositories = ctx.repositories;
+        // The account URL (kid) rides along on every prepare request:
+        // dns-account-01 binds its TXT value to it. It is re-read from the
+        // persisted EnsureAccount payload on every (re)execution, so it does
+        // not need separate persistence.
+        let account =
+            match read_payload::<AccountPayload>(ctx.operation, WorkflowStepKind::EnsureAccount) {
+                Ok(payload) => payload.account,
+                Err(_) => return policy_error("EnsureAccount has not completed yet"),
+            };
+
+        // Effective validation policy: the worker-level allowed set is the
+        // fallback; the operation's intent (directly or through its lineage)
+        // overrides it when it pins an explicit set, and carries the
+        // prepare-all-supported flag.
+        let intent_policy = match self.intent_validation_policy(&ctx).await {
+            Ok(policy) => policy,
+            // A repository read failure is transient: retry the step rather
+            // than silently planning against the worker defaults.
+            Err(err) => return retryable(err.to_string()),
+        };
+        let mut policy = crate::domain::ValidationPolicy {
+            allowed_challenges: self.deps.allowed_challenges.clone(),
+            ..Default::default()
+        };
+        if let Some(intent_policy) = intent_policy {
+            if !intent_policy.allowed_challenges.is_empty() {
+                policy.allowed_challenges = intent_policy.allowed_challenges;
+            }
+            policy.prepare_all_supported = intent_policy.prepare_all_supported;
+        }
+        let prepare_all = policy.prepare_all_supported;
 
         // Per-identifier validation plan rejects impossible combinations
         // before creating any external resource.
@@ -608,10 +960,6 @@ impl StepExecutor for PrepareChallengesStep {
             .iter()
             .map(|a| a.identifier.clone())
             .collect();
-        let policy = crate::domain::ValidationPolicy {
-            allowed_challenges: self.deps.allowed_challenges.clone(),
-            ..Default::default()
-        };
         // The CA offers the union of all authorizations' challenges.
         let mut offered = crate::domain::ChallengeSet::default();
         for authz in &payload.authorizations {
@@ -627,34 +975,13 @@ impl StepExecutor for PrepareChallengesStep {
         };
 
         for authz in &payload.authorizations {
-            let id = session_id(ctx.operation, &authz.url);
-
-            // Crash idempotency: sessions whose external resource already
-            // exists are not re-prepared. A `Preparing` session (transient
-            // failure or crash mid-prepare) IS re-attempted — prepare is
-            // idempotent per session id and resource value.
-            if let Ok(Some(stored)) = repositories.challenge_sessions.get(&id).await
-                && matches!(
-                    stored.value.state,
-                    ChallengeSessionState::Prepared
-                        | ChallengeSessionState::Observing
-                        | ChallengeSessionState::Propagated
-                        | ChallengeSessionState::Acknowledged
-                        | ChallengeSessionState::Processing
-                        | ChallengeSessionState::Valid
-                )
-            {
-                continue;
-            }
-
-            // Choose the challenge for this identifier.
+            // Wildcard authorizations come back for the base name.
             let plan_item = plan
                 .items
                 .iter()
                 .find(|item| item.identifier == authz.identifier)
                 .cloned()
                 .unwrap_or_else(|| {
-                    // Wildcard authorizations come back for the base name.
                     plan.items
                         .iter()
                         .find(|item| {
@@ -666,103 +993,36 @@ impl StepExecutor for PrepareChallengesStep {
                         .cloned()
                         .expect("plan covers every authorization identifier")
                 });
-            let chosen = authz.challenges.iter().find(|c| {
-                plan_item
-                    .allowed
-                    .iter()
-                    .any(|allowed| allowed.as_str() == c.challenge_type)
-            });
-            let Some(chosen) = chosen else {
+
+            let candidates = challenge_candidates(&plan_item, &authz.challenges, prepare_all);
+            if candidates.is_empty() {
                 return policy_error(format!(
                     "CA offers no compatible challenge for `{}`",
                     authz.identifier
                 ));
-            };
-            let challenge_type: ChallengeType = match chosen.challenge_type.parse() {
-                Ok(kind) => kind,
-                Err(_) => return policy_error("unknown challenge type"),
-            };
-            let Some(presenter) = self.deps.presenters.get(challenge_type) else {
-                return policy_error(format!("no presenter registered for `{challenge_type}`"));
-            };
-
-            let mut session = ChallengeSession {
-                id: id.clone(),
-                operation_id: ctx.operation.id.clone(),
-                authorization_url: authz.url.clone(),
-                challenge_url: chosen.url.clone(),
-                identifier: authz.identifier.clone(),
-                challenge_type,
-                token_hash: ChallengeSession::hash_token(&chosen.token),
-                state: ChallengeSessionState::Selected,
-                lease_id: None,
-                deadline: repositories
-                    .clock
-                    .now()
-                    .checked_add(
-                        jiff::Span::new().seconds(self.deps.propagation_timeout.as_secs() as i64),
-                    )
-                    .expect("deadline overflow"),
-                last_propagation_check_at: None,
-                last_propagation_status: None,
-                last_ca_poll_at: None,
-                last_ca_status: None,
-                last_error: None,
-            };
-
-            // Persist the session before creating the external resource.
-            let _ = repositories
-                .challenge_sessions
-                .create(session.clone())
-                .await;
-            session = session
-                .transition(ChallengeSessionState::Preparing)
-                .expect("selected -> preparing");
-            if let Some(stored) = repositories.challenge_sessions.get(&id).await.unwrap() {
-                let _ = repositories
-                    .challenge_sessions
-                    .update(stored.revision, session.clone())
-                    .await;
             }
 
-            let key_authorization = match self.deps.key_authorization(&chosen.token) {
-                Ok(value) => value,
-                Err(err) => return retryable(err.to_string()),
-            };
-            match presenter
-                .prepare(PrepareChallenge {
-                    session: session.clone(),
-                    key_authorization,
-                })
-                .await
-            {
-                Ok(lease) => {
-                    record_challenge_trace(&session, Some(&lease.locator));
-                    let _ = repositories.challenge_leases.create(lease.clone()).await;
-                    let prepared = session
-                        .transition(ChallengeSessionState::Prepared)
-                        .expect("preparing -> prepared");
-                    if let Some(stored) = repositories.challenge_sessions.get(&id).await.unwrap() {
-                        let mut updated = prepared;
-                        updated.lease_id = Some(lease.id);
-                        let _ = repositories
-                            .challenge_sessions
-                            .update(stored.revision, updated)
-                            .await;
-                    }
-                }
-                Err(err) => {
-                    // Transient provider failure: stay in Preparing so the
-                    // retry re-attempts idempotently.
-                    if let Some(stored) = repositories.challenge_sessions.get(&id).await.unwrap() {
-                        let mut updated = session.clone();
-                        updated.last_error = Some(err.to_string());
-                        let _ = repositories
-                            .challenge_sessions
-                            .update(stored.revision, updated)
-                            .await;
-                    }
-                    return retryable(format!("prepare failed for `{}`: {err}", authz.identifier));
+            for chosen in candidates {
+                // Prepare-all mode disambiguates session ids per challenge
+                // type; single mode keeps the historical URL-seeded id.
+                let session_seed = if prepare_all {
+                    format!("{}#{}", authz.url, chosen.challenge_type)
+                } else {
+                    authz.url.clone()
+                };
+                if let Err(result) = self
+                    .prepare_candidate(
+                        repositories,
+                        ctx.operation,
+                        &account.account_url,
+                        authz,
+                        chosen,
+                        &session_seed,
+                        prepare_all,
+                    )
+                    .await
+                {
+                    return result;
                 }
             }
         }
@@ -1029,7 +1289,43 @@ impl StepExecutor for AcknowledgeChallengesStep {
                             .await;
                     }
                 }
-                Err(err) => return retryable(err.to_string()),
+                // A 400 on the ack POST usually means the CA already moved
+                // the challenge past `pending` (proactive validation, or a
+                // parallel worker acked first). Re-check the authorization:
+                // `valid` means the challenge succeeded and the ack is
+                // moot; anything else keeps the original retryable error.
+                Err(err) => {
+                    let already_valid = self
+                        .deps
+                        .backend
+                        .get_authorization(
+                            &account,
+                            &AuthorizationRef {
+                                url: session.authorization_url.clone(),
+                            },
+                        )
+                        .await
+                        .ok()
+                        .is_some_and(|authz| authz.authorization.status == "valid");
+                    if already_valid {
+                        let acknowledged = session
+                            .transition(ChallengeSessionState::Acknowledged)
+                            .expect("propagated -> acknowledged");
+                        if let Some(fresh) = repositories
+                            .challenge_sessions
+                            .get(&session.id)
+                            .await
+                            .unwrap()
+                        {
+                            let _ = repositories
+                                .challenge_sessions
+                                .update(fresh.revision, acknowledged)
+                                .await;
+                        }
+                        continue;
+                    }
+                    return retryable(err.to_string());
+                }
             }
         }
         StepResult::done()
@@ -1265,13 +1561,28 @@ pub async fn cleanup_operation_leases(
                     .challenge_leases
                     .update(lease_stored.revision, updated)
                     .await;
-                // Sessions record the cleanup dimension too.
-                let mut session_updated = session.clone();
-                session_updated.state = ChallengeSessionState::Cleaned;
-                let _ = repositories
-                    .challenge_sessions
-                    .update(stored.revision, session_updated)
-                    .await;
+                // Sessions record the cleanup dimension through the state
+                // machine (Valid -> CleanupPending -> Cleaned); direct
+                // writes would skip the legal transition path.
+                let session_cleaned = session
+                    .clone()
+                    .transition(ChallengeSessionState::CleanupPending)
+                    .and_then(|pending| pending.transition(ChallengeSessionState::Cleaned));
+                match session_cleaned {
+                    Ok(cleaned_session) => {
+                        let _ = repositories
+                            .challenge_sessions
+                            .update(stored.revision, cleaned_session)
+                            .await;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            session = %session.id,
+                            error = %err,
+                            "challenge session could not transition to cleaned"
+                        );
+                    }
+                }
                 cleaned += 1;
             }
             Err(err) => {
@@ -1320,6 +1631,7 @@ impl StepExecutor for CleanupChallengesStep {
 mod tests {
     use super::*;
     use crate::dns::spec::SecretRef;
+    use crate::domain::{OperationId, OperationKind, OperationSubject};
 
     #[test]
     fn ensure_account_ref_carries_configured_eab() {
@@ -1334,5 +1646,89 @@ mod tests {
         );
         assert_eq!(account.contacts, vec!["mailto:ops@example.com"]);
         assert_eq!(account.external_account_binding, Some(eab));
+    }
+
+    fn snapshot(challenge_type: &str) -> ChallengeSnapshot {
+        ChallengeSnapshot {
+            challenge_type: challenge_type.to_string(),
+            url: format!("https://acme.example/chall/{challenge_type}"),
+            token: "t".to_string(),
+            status: "pending".to_string(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
+        }
+    }
+
+    fn plan_item(allowed: Vec<ChallengeType>) -> crate::domain::ValidationPlanItem {
+        crate::domain::ValidationPlanItem {
+            identifier: crate::domain::Identifier::try_dns("example.com").unwrap(),
+            allowed,
+            exclusions: vec![],
+        }
+    }
+
+    /// Prepare-all mode's candidate list is a strict superset of single
+    /// mode's: the single (preference-selected, CA-offered) candidate is
+    /// always contained, and extra candidates are exactly the other
+    /// CA-offered allowed types, in plan preference order.
+    #[test]
+    fn prepare_all_candidates_are_a_superset_of_single_mode() {
+        let plan = plan_item(vec![
+            ChallengeType::Dns01,
+            ChallengeType::DnsAccount01,
+            ChallengeType::DnsPersist01,
+            ChallengeType::Http01,
+        ]);
+        // CA order deliberately differs from preference order; tls-alpn-01
+        // is offered but not allowed by the plan.
+        let challenges = vec![
+            snapshot("tls-alpn-01"),
+            snapshot("http-01"),
+            snapshot("dns-account-01"),
+            snapshot("dns-01"),
+            snapshot("dns-persist-01"),
+        ];
+
+        let single = challenge_candidates(&plan, &challenges, false);
+        assert_eq!(single.len(), 1, "single mode prepares one session");
+        assert_eq!(single[0].challenge_type, "http-01");
+
+        let multi = challenge_candidates(&plan, &challenges, true);
+        assert_eq!(
+            multi
+                .iter()
+                .map(|c| c.challenge_type.as_str())
+                .collect::<Vec<_>>(),
+            // Preference order, not CA order; unallowed tls-alpn-01 skipped.
+            vec!["dns-01", "dns-account-01", "dns-persist-01", "http-01"]
+        );
+        assert!(
+            multi
+                .iter()
+                .any(|c| c.challenge_type == single[0].challenge_type),
+            "the single-mode candidate must be part of the prepare-all set"
+        );
+    }
+
+    /// Session ids stay deterministic and disjoint across prepare-all
+    /// candidates of the same authorization (crash-idempotency key).
+    #[test]
+    fn prepare_all_session_seeds_are_type_scoped() {
+        let op = OperationRecord::new(
+            OperationId::generate(),
+            OperationKind::Issue,
+            OperationSubject::empty(),
+            None,
+            None,
+            "2026-01-01T00:00:00Z".parse::<Timestamp>().unwrap(),
+        );
+        let url = "https://acme.example/authz/a";
+        let single = session_id(&op, url);
+        let dns = session_id(&op, &format!("{url}#dns-01"));
+        let http = session_id(&op, &format!("{url}#http-01"));
+        assert_ne!(dns, http, "one session id per challenge type");
+        assert_ne!(single, dns);
+        // Stable across repeated computation.
+        assert_eq!(dns, session_id(&op, &format!("{url}#dns-01")));
     }
 }

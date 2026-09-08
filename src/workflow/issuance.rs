@@ -57,7 +57,7 @@ use crate::domain::{
     VersionId, VersionState, WorkflowStepKind, error_codes,
 };
 use crate::error::{AcmeError, Result};
-use crate::key::{CreateCsr, KeyProvider};
+use crate::key::{CreateCsr, ExternalCsr, KeyProvider};
 use crate::repository::RepositorySet;
 use crate::types::RevocationReason;
 use crate::workflow::{StepContext, StepExecutor, StepResult};
@@ -82,6 +82,17 @@ fn policy_reject(detail: impl Into<String>) -> StepResult {
     StepResult::Fail(ClassifiedError {
         code: error_codes::VALIDATION_CHALLENGE_INCOMPATIBLE,
         class: ErrorClass::PolicyViolation,
+        detail: Some(detail.into()),
+    })
+}
+
+/// Stable failure for caller-owned external CSR material: a malformed CSR,
+/// a bad signature or a SAN mismatch can only be fixed by whoever generated
+/// the key, so retrying can never succeed on its own.
+fn operator_action_required(detail: impl Into<String>) -> StepResult {
+    StepResult::Fail(ClassifiedError {
+        code: error_codes::VALIDATION_CHALLENGE_INCOMPATIBLE,
+        class: ErrorClass::OperatorActionRequired,
         detail: Some(detail.into()),
     })
 }
@@ -270,6 +281,20 @@ struct CsrPayload {
     key_ref: domain::KeyRef,
 }
 
+/// Initialization payload seeded onto the `CreateCsr` step by the
+/// application service for external-CSR intents.
+///
+/// The field name is the contract shared with the application service's
+/// issue seeding (`external_csr_init_payload`). The step replaces this
+/// payload with the regular [`CsrPayload`] on first success, so the
+/// material is consumed exactly once per issuance attempt chain and never
+/// written to any secret store.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExternalCsrInitPayload {
+    /// PEM `CERTIFICATE REQUEST` owned by the external key holder.
+    external_csr_pem: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ChainPayload {
     pem: String,
@@ -363,6 +388,14 @@ impl StepExecutor for CreateCsrStep {
             Err(err) => return policy_reject(err.to_string()),
         };
 
+        // External key management: the private key lives with the caller, so
+        // the CSR comes from the operation's initialization payload instead
+        // of managed key generation. AcmeX never generates, imports or
+        // stores a private key on this path.
+        if intent.key_policy.mode == domain::KeyManagementMode::ExternalCsr {
+            return self.execute_external_csr(&intent, ctx.operation).await;
+        }
+
         // Reuse the active version's key when the policy asks for it.
         let mut key_ref = None;
         if intent.key_policy.rotation == domain::KeyRotationPolicy::Reuse
@@ -391,26 +424,117 @@ impl StepExecutor for CreateCsrStep {
             })
             .await
         {
-            Ok(artifact) => {
-                let payload = CsrPayload {
-                    csr_der: BASE64.encode(&artifact.csr_der),
-                    key_ref: artifact.key_ref,
-                };
-                match serde_json::to_string(&payload) {
-                    Ok(json) => StepResult::Complete {
-                        output_ref: Some(json),
-                        side_effect_locator: None,
-                        requires_compensation: false,
-                    },
-                    Err(err) => terminal(
-                        error_codes::INTERNAL,
-                        format!("serialize CSR payload: {err}"),
-                    ),
-                }
-            }
+            Ok(artifact) => complete_csr_payload(artifact),
             Err(err) => terminal(error_codes::INTERNAL, format!("create CSR: {err}")),
         }
     }
+}
+
+impl CreateCsrStep {
+    /// External-CSR path: validates the caller-supplied CSR (signature and
+    /// exact SAN/identifier match, via the KeyProvider's external branch)
+    /// and surfaces it as the same [`CsrPayload`] the managed path produces,
+    /// so FinalizeOrder, VerifyCertificate and PersistVersion stay
+    /// mode-agnostic.
+    ///
+    /// Validation failures are stable
+    /// [`ErrorClass::OperatorActionRequired`](domain::ErrorClass) failures —
+    /// only the CSR owner can fix the material, so retries cannot succeed.
+    async fn execute_external_csr(
+        &self,
+        intent: &CertificateIntent,
+        operation: &domain::OperationRecord,
+    ) -> StepResult {
+        let init =
+            match read_payload::<ExternalCsrInitPayload>(operation, WorkflowStepKind::CreateCsr) {
+                Ok(init) => init,
+                Err(err) => {
+                    return operator_action_required(format!(
+                        "external CSR material missing on the CreateCsr step (the issue request \
+                 must carry external_csr): {err}"
+                    ));
+                }
+            };
+        let external = match ExternalCsr::from_pem(&init.external_csr_pem) {
+            Ok(external) => external,
+            Err(err) => {
+                return operator_action_required(format!(
+                    "external_csr is not a valid PEM CSR: {err}"
+                ));
+            }
+        };
+        let key_ref = match external_key_ref(intent, &external) {
+            Ok(key_ref) => key_ref,
+            Err(err) => {
+                return operator_action_required(format!("external CSR is malformed: {err}"));
+            }
+        };
+        match self
+            .deps
+            .key_provider
+            .create_csr(CreateCsr {
+                identifiers: intent.identifiers.clone(),
+                policy: intent.key_policy.clone(),
+                key_ref: Some(key_ref),
+                external_csr: Some(external),
+            })
+            .await
+        {
+            Ok(artifact) => {
+                debug_assert!(artifact.external, "external CSR must stay external");
+                complete_csr_payload(artifact)
+            }
+            Err(err) => operator_action_required(format!("external CSR rejected: {err}")),
+        }
+    }
+}
+
+/// Persists the CSR artifact as the step's `CsrPayload` output (shared by
+/// the managed and external-CSR paths).
+fn complete_csr_payload(artifact: crate::key::CsrArtifact) -> StepResult {
+    let payload = CsrPayload {
+        csr_der: BASE64.encode(&artifact.csr_der),
+        key_ref: artifact.key_ref,
+    };
+    match serde_json::to_string(&payload) {
+        Ok(json) => StepResult::Complete {
+            output_ref: Some(json),
+            side_effect_locator: None,
+            requires_compensation: false,
+        },
+        Err(err) => terminal(
+            error_codes::INTERNAL,
+            format!("serialize CSR payload: {err}"),
+        ),
+    }
+}
+
+/// Deterministic [`domain::KeyRef`] describing an external CSR's key.
+///
+/// The private key lives outside AcmeX, so the reference only *describes*
+/// it: provider `external`, an id derived from the CSR's SubjectPublicKeyInfo
+/// fingerprint (stable across retries and across renewals that reuse the
+/// same key material) and `exportable: false` — no secret-store entry exists
+/// behind it and none may ever be created. `algorithm` is derived from the
+/// CSR's actual SubjectPublicKeyInfo so the persisted metadata describes the
+/// real key; the intent's declared policy value is only a fallback for
+/// keys [`crate::key::csr_key_algorithm`] cannot classify (the subsequent
+/// `create_csr` validation rejects those with the exact reason).
+fn external_key_ref(intent: &CertificateIntent, external: &ExternalCsr) -> Result<domain::KeyRef> {
+    use sha2::{Digest, Sha256};
+    use x509_parser::asn1_rs::FromDer;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(&external.csr_der)
+            .map_err(|e| AcmeError::certificate(format!("parse CSR: {e}")))?;
+    let spki = csr.certification_request_info.subject_pki.raw.to_vec();
+    let key_id = domain::KeyId::new(format!("ext_csr_{}", hex::encode(Sha256::digest(&spki))))?;
+    let algorithm = crate::key::csr_key_algorithm(&csr).unwrap_or(intent.key_policy.algorithm);
+    Ok(domain::KeyRef {
+        provider: crate::key::EXTERNAL_CSR_KEY_PROVIDER.to_string(),
+        key_id,
+        algorithm,
+        exportable: false,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,5 +1473,103 @@ impl StepExecutor for SubmitRevocationStep {
             },
             Err(err) => acme_backend_error(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent_with_algorithm(algorithm: domain::KeyAlgorithm) -> CertificateIntent {
+        CertificateIntent {
+            id: domain::IntentId::generate(),
+            tenant_id: domain::TenantId::default_tenant(),
+            identifiers: domain::IdentifierSet::parse(["example.com"]).unwrap(),
+            ca_policy: Default::default(),
+            validation_policy: Default::default(),
+            key_policy: domain::KeyPolicy {
+                algorithm,
+                ..Default::default()
+            },
+            renewal_policy: Default::default(),
+            delivery_targets: Vec::new(),
+            idempotency_key: "external-key-ref-test".to_string(),
+            generation: 1,
+        }
+    }
+
+    fn csr_der_for(key: &rcgen::KeyPair) -> Vec<u8> {
+        let params = rcgen::CertificateParams::new(vec!["example.com".to_string()]).unwrap();
+        params
+            .serialize_request(key)
+            .unwrap()
+            .der()
+            .as_ref()
+            .to_vec()
+    }
+
+    /// The KeyRef's `algorithm` describes the CSR's real key: the declared
+    /// policy value must not leak into metadata when the CSR disagrees.
+    #[test]
+    fn external_key_ref_derives_algorithm_from_the_csr_spki() {
+        let p256 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::Rsa2048),
+            &ExternalCsr {
+                csr_der: csr_der_for(&p256),
+            },
+        )
+        .unwrap();
+        assert_eq!(key_ref.provider, "external");
+        assert!(!key_ref.exportable);
+        assert!(key_ref.key_id.as_str().starts_with("ext_csr_"));
+        assert_eq!(
+            key_ref.algorithm,
+            domain::KeyAlgorithm::EcP256,
+            "algorithm must be derived from the CSR, not the policy declaration"
+        );
+
+        let ed25519 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
+            &ExternalCsr {
+                csr_der: csr_der_for(&ed25519),
+            },
+        )
+        .unwrap();
+        assert_eq!(key_ref.algorithm, domain::KeyAlgorithm::Ed25519);
+
+        let p521 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P521_SHA512).unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
+            &ExternalCsr {
+                csr_der: csr_der_for(&p521),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            key_ref.algorithm,
+            domain::KeyAlgorithm::EcP521,
+            "P-521 SPKIs derive EcP521, not the declared policy value"
+        );
+    }
+
+    /// Keys `csr_key_algorithm` cannot classify (e.g. an RSA modulus outside
+    /// the 2048/4096 set) fall back to the policy value here; the provider
+    /// validation that runs right after rejects the material with the exact
+    /// reason, so the fallback never persists a wrong label.
+    #[test]
+    fn external_key_ref_falls_back_to_the_policy_for_unclassifiable_keys() {
+        let rsa3072 =
+            rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_3072)
+                .unwrap();
+        let key_ref = external_key_ref(
+            &intent_with_algorithm(domain::KeyAlgorithm::EcP256),
+            &ExternalCsr {
+                csr_der: csr_der_for(&rsa3072),
+            },
+        )
+        .unwrap();
+        assert_eq!(key_ref.algorithm, domain::KeyAlgorithm::EcP256);
     }
 }

@@ -50,6 +50,18 @@ pub struct Config {
     #[serde(default)]
     pub notifications: Option<NotificationSettings>,
 
+    /// Durable outbox consumer settings.
+    #[serde(default)]
+    pub outbox: OutboxSettings,
+
+    /// Key management settings.
+    #[serde(default)]
+    pub key: Option<KeySettings>,
+
+    /// Remote certificate delivery sinks (Kubernetes Secret, Vault KV).
+    #[serde(default)]
+    pub delivery: DeliverySettings,
+
     /// CLI-specific settings.
     #[serde(default)]
     pub cli: Option<CliSettings>,
@@ -86,6 +98,15 @@ pub struct AcmeSettings {
     #[serde(default)]
     pub external_account_binding: Option<ExternalAccountBinding>,
 
+    /// Identifier types this CA deployment accepts, e.g. `["dns", "ip"]`.
+    /// Drives the pre-order capability gate: an intent whose identifiers the
+    /// deployment does not declare fails at plan time without creating an
+    /// ACME order. Defaults to `["dns"]` (empty or unset); add `"ip"` for
+    /// CAs with RFC 8738 support. Unknown values fail configuration
+    /// validation.
+    #[serde(default)]
+    pub identifier_types: Vec<String>,
+
     /// PEM files containing trusted roots for issued-certificate acceptance.
     #[serde(default)]
     pub trust_anchor_pem_files: Vec<String>,
@@ -107,11 +128,47 @@ pub struct AcmeSettings {
 ///
 /// New v0.10 settings live under `[ca]` so they are not confused with the
 /// legacy ACME endpoint selector in `[acme]`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaSettings {
     /// Optional External Account Binding configuration (`[ca.eab]`).
     #[serde(default)]
     pub eab: Option<ExternalAccountBinding>,
+
+    /// ACME account key type: `"ed25519"` (default), `"ecdsa_p256"`,
+    /// `"ecdsa_p384"`, `"ecdsa_p521"`, `"rsa2048"` or `"rsa4096"`.
+    ///
+    /// Only applied when a *new* account key is generated; an existing
+    /// stored PEM key keeps its own type. The default is unchanged from
+    /// previous releases.
+    #[serde(default = "default_account_key_type")]
+    pub account_key_type: String,
+}
+
+impl Default for CaSettings {
+    fn default() -> Self {
+        Self {
+            eab: None,
+            account_key_type: default_account_key_type(),
+        }
+    }
+}
+
+fn default_account_key_type() -> String {
+    "ed25519".to_string()
+}
+
+impl CaSettings {
+    /// Resolves `account_key_type` to the crypto [`KeyType`], rejecting
+    /// unknown values with an explicit configuration error.
+    pub fn resolve_account_key_type(&self) -> Result<crate::crypto::keypair::KeyType> {
+        crate::crypto::keypair::KeyType::from_config_str(&self.account_key_type).ok_or_else(|| {
+            AcmeError::configuration(format!(
+                "ca.account_key_type `{}` is not supported; expected one of \
+                 ed25519, ecdsa_p256, ecdsa_p384, ecdsa_p521, rsa2048, rsa4096",
+                self.account_key_type
+            ))
+        })
+    }
 }
 
 impl AcmeSettings {
@@ -192,13 +249,19 @@ impl ExternalAccountBinding {
 /// the legacy `storage` KV settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositorySettings {
-    /// Repository backend: "memory" or "file".
+    /// Repository backend: "memory", "file" or (with the `redis` feature)
+    /// "redis".
     #[serde(default = "default_repository_backend")]
     pub backend: String,
 
     /// File backend configuration (required when backend = "file").
     #[serde(default)]
     pub file: Option<FileRepositoryConfig>,
+
+    /// Redis backend configuration (required when backend = "redis" and the
+    /// `redis` feature is compiled in).
+    #[serde(default)]
+    pub redis: Option<RedisRepositoryConfig>,
 
     /// Optional namespace prefix (reserved for multi-tenant deployments).
     #[serde(default)]
@@ -214,6 +277,7 @@ impl Default for RepositorySettings {
         Self {
             backend: default_repository_backend(),
             file: None,
+            redis: None,
             namespace: None,
             migration: MigrationSettings::default(),
         }
@@ -229,6 +293,80 @@ fn default_repository_backend() -> String {
 pub struct FileRepositoryConfig {
     /// Root directory for all repository aggregates.
     pub path: String,
+
+    /// Durability policy for repository writes: `"always"` (the default,
+    /// and the behavior of every earlier release) fsyncs every write before
+    /// its atomic rename, so an acknowledged write survives an abrupt
+    /// crash; `"interval"` defers the fsync to a background sweeper at most
+    /// [`Self::fsync_interval_ms`] after the write, trading a bounded
+    /// durability window for throughput on write-heavy workloads.
+    ///
+    /// This setting never applies to the `secrets/` directory (ACME account
+    /// keys): secret writes always fsync immediately and unconditionally,
+    /// because a lost account key permanently orphans the ACME account on
+    /// the CA side.
+    #[serde(default = "default_repository_fsync")]
+    pub fsync: String,
+
+    /// Sweeper interval in milliseconds for `fsync = "interval"`; ignored
+    /// for `fsync = "always"`. Must be at least 1.
+    #[serde(default = "default_repository_fsync_interval_ms")]
+    pub fsync_interval_ms: u64,
+}
+
+impl Default for FileRepositoryConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            fsync: default_repository_fsync(),
+            fsync_interval_ms: default_repository_fsync_interval_ms(),
+        }
+    }
+}
+
+fn default_repository_fsync() -> String {
+    "always".to_string()
+}
+
+fn default_repository_fsync_interval_ms() -> u64 {
+    100
+}
+
+impl FileRepositoryConfig {
+    /// Resolves the configured durability policy into the repository
+    /// [`crate::repository::FsyncMode`].
+    ///
+    /// Unknown `fsync` values (the set is closed: `always` | `interval`)
+    /// and `fsync_interval_ms = 0` under `fsync = "interval"` are
+    /// configuration errors: repository assembly fails at startup instead
+    /// of silently degrading durability.
+    pub fn fsync_mode(&self) -> Result<crate::repository::FsyncMode> {
+        match self.fsync.as_str() {
+            "always" => Ok(crate::repository::FsyncMode::Always),
+            "interval" => {
+                if self.fsync_interval_ms == 0 {
+                    return Err(AcmeError::configuration(
+                        "repository.file.fsync_interval_ms must be at least 1 when fsync = \"interval\"",
+                    ));
+                }
+                Ok(crate::repository::FsyncMode::Interval(
+                    Duration::from_millis(self.fsync_interval_ms),
+                ))
+            }
+            other => Err(AcmeError::configuration(format!(
+                "repository.file.fsync `{other}` is not supported; expected \"always\" or \"interval\""
+            ))),
+        }
+    }
+}
+
+/// Redis repository configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisRepositoryConfig {
+    /// Redis connection URL, e.g. `redis://127.0.0.1:6379/0`. Credentials
+    /// embedded in the URL must use SecretRef-style injection in deployment
+    /// tooling; the value is never logged (the repository redacts it).
+    pub url: String,
 }
 
 /// Legacy migration settings.
@@ -680,17 +818,6 @@ pub struct RenewalSettings {
     /// Concurrency level for renewals.
     #[serde(default = "default_concurrency")]
     pub concurrency: u32,
-    /// Renewal hooks.
-    #[serde(default)]
-    pub hooks: Option<RenewalHooks>,
-}
-
-/// Renewal hooks configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RenewalHooks {
-    pub before: Option<String>,
-    pub after: Option<String>,
-    pub on_error: Option<String>,
 }
 
 /// Metrics settings.
@@ -718,6 +845,9 @@ pub struct NotificationSettings {
 pub struct WebhookConfig {
     pub name: Option<String>,
     pub url: String,
+    /// Outbox event-type filter applied to the durable delivery (for example
+    /// `"operation.created"` or `"deployment.activated"`). An empty list
+    /// delivers every outbox event to this endpoint.
     #[serde(default)]
     pub events: Vec<String>,
     #[serde(default = "default_webhook_format")]
@@ -731,18 +861,222 @@ pub struct WebhookConfig {
     pub replay_window_secs: u64,
 }
 
-/// Email notification configuration.
+/// Email notification configuration (`[[notifications.email]]`).
+///
+/// Consumed by `notifications::email::EmailNotifier`, which delivers outbox
+/// events over SMTP. The plain `String` settings (`tls_mode`,
+/// `body_format`) are validated at notifier assembly time; unknown or
+/// unsafe values fail assembly instead of every delivery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailConfig {
+    /// Optional instance name used in logs and error messages; derived
+    /// from the endpoint address when omitted.
+    #[serde(default)]
+    pub name: Option<String>,
     pub smtp_host: String,
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
     pub from: String,
     pub to: Vec<String>,
+    /// Outbox event-type filter (for example `"operation.created"`); an
+    /// empty list delivers every outbox event, matching the webhook
+    /// `events` semantics.
     #[serde(default)]
     pub events: Vec<String>,
+    /// SMTP `AUTH PLAIN` user; must be configured together with `password`.
     pub username: Option<String>,
+    /// SMTP password SecretRef (`env:`/`file:`/`vault:`); resolved per
+    /// delivery and never logged.
     pub password: Option<SecretRef>,
+    /// Transport security: `starttls` (default), `implicit` (smtps/465) or
+    /// `none` (explicit plaintext opt-in for local relays).
+    #[serde(default = "default_smtp_tls_mode")]
+    pub tls_mode: String,
+    /// Prefix prepended to every message subject.
+    #[serde(default = "default_smtp_subject_prefix")]
+    pub subject_prefix: String,
+    /// Name presented in the SMTP `EHLO` greeting.
+    #[serde(default = "default_smtp_helo_name")]
+    pub helo_name: String,
+    /// Body MIME type: `text` (default) or `html`.
+    #[serde(default = "default_smtp_body_format")]
+    pub body_format: String,
+    /// Overall timeout for one SMTP delivery (connect + conversation).
+    #[serde(default = "default_smtp_timeout_secs")]
+    pub timeout_secs: u64,
+    /// PEM files with trust anchors for the TLS modes (required for them —
+    /// the SMTP client verifies certificates against exactly these).
+    #[serde(default)]
+    pub ca_pem_files: Vec<String>,
+}
+
+/// Key management settings (`[key]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeySettings {
+    /// Key provider backend: "software" (default) or "kms-aws" (requires
+    /// the `kms-aws` feature).
+    #[serde(default = "default_key_backend")]
+    pub backend: String,
+    /// AWS KMS settings (required when backend = "kms-aws").
+    #[serde(default)]
+    pub kms: Option<KmsKeySettings>,
+}
+
+/// AWS KMS provider settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KmsKeySettings {
+    /// AWS region (e.g. `us-east-1`). Omit to use the ambient AWS
+    /// configuration chain.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// KMS endpoint override (VPC endpoints, contract tests).
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+    /// Pending-deletion window for destroyed keys, in days (7-30).
+    #[serde(default)]
+    pub key_deletion_window_days: Option<i32>,
+}
+
+fn default_key_backend() -> String {
+    "software".to_string()
+}
+
+/// Durable outbox consumer settings (`[outbox]`).
+///
+/// The consumer drains `operation.*`/`deployment.*`/`audit.*` events from the
+/// repository outbox to the webhook delivery; without it the outbox grows
+/// without bound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxSettings {
+    /// Whether the runtime spawns the outbox consumer loop.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Seconds between consumer passes.
+    #[serde(default = "default_outbox_interval_secs")]
+    pub interval_secs: u64,
+    /// Maximum events claimed per pass (maps to the consumer batch size).
+    #[serde(default = "default_outbox_batch_size")]
+    pub batch_size: usize,
+    /// Lease owner the consumer presents when claiming events. Must be
+    /// **globally unique** across every replica sharing the repository: lease
+    /// acquisition re-grants an unexpired lease to a caller presenting the
+    /// same owner, so two replicas configured with the same owner would both
+    /// claim the same events and deliver them concurrently. When unset, a
+    /// process-unique owner (PID + random suffix) is generated at startup,
+    /// which is safe even where replicas share PIDs (e.g. Kubernetes pods).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Outbox lease TTL in seconds. Must be larger than the slowest single
+    /// delivery (the webhook default timeout is 30s), or another consumer
+    /// can take over the lease while the first delivery is still in flight
+    /// and deliver the same event a second time.
+    #[serde(default = "default_outbox_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+    /// Delivery attempts per event before it is moved to the dead letter.
+    #[serde(default = "default_outbox_max_attempts")]
+    pub max_attempts: u32,
+}
+
+impl Default for OutboxSettings {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            interval_secs: default_outbox_interval_secs(),
+            batch_size: default_outbox_batch_size(),
+            owner: None,
+            lease_ttl_secs: default_outbox_lease_ttl_secs(),
+            max_attempts: default_outbox_max_attempts(),
+        }
+    }
+}
+
+/// Remote certificate delivery sink settings (`[delivery]`).
+///
+/// A sink section registers the corresponding [`crate::delivery::CertificateSink`]
+/// implementation with the workflow worker; intents whose delivery targets
+/// reference the kind then deploy to it. Absent sections simply leave the
+/// sink unregistered (issuing still succeeds — activation waits on the
+/// targets the intent actually declares).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DeliverySettings {
+    /// Kubernetes TLS Secret sink (`[delivery.kubernetes]`).
+    #[serde(default)]
+    pub kubernetes: Option<KubernetesSinkSettings>,
+    /// HashiCorp Vault KV v2 sink (`[delivery.vault]`).
+    #[serde(default)]
+    pub vault: Option<VaultSinkSettings>,
+}
+
+/// Kubernetes Secret sink settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KubernetesSinkSettings {
+    /// API server base URL. Omit to discover the in-cluster endpoint from
+    /// `KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Namespace that owns the target and staging Secrets.
+    #[serde(default = "default_k8s_namespace")]
+    pub namespace: String,
+    /// PEM bundle used to verify the API server (defaults to the in-cluster
+    /// `ca.crt` when the endpoint is discovered).
+    #[serde(default)]
+    pub ca_path: Option<String>,
+    #[serde(default = "default_sink_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_sink_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// Bearer token SecretRef (`env:`/`file:`/`vault:`). Omit when running
+    /// in-cluster so the service account token is used.
+    #[serde(default)]
+    pub auth_token: Option<SecretRef>,
+}
+
+impl Default for KubernetesSinkSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            namespace: default_k8s_namespace(),
+            ca_path: None,
+            connect_timeout_secs: default_sink_connect_timeout_secs(),
+            request_timeout_secs: default_sink_request_timeout_secs(),
+            auth_token: None,
+        }
+    }
+}
+
+/// Vault KV v2 sink settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultSinkSettings {
+    /// Vault base URL (e.g. `https://vault.internal:8200`).
+    pub endpoint: String,
+    /// KV v2 engine mount (e.g. `secret`).
+    #[serde(default = "default_vault_mount")]
+    pub mount: String,
+    /// Enterprise namespace sent as `X-Vault-Namespace` (optional).
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default = "default_sink_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    #[serde(default = "default_sink_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    /// Vault token SecretRef (`env:`/`file:`/`vault:`).
+    pub auth_token: SecretRef,
+}
+
+fn default_k8s_namespace() -> String {
+    "default".to_string()
+}
+
+fn default_vault_mount() -> String {
+    "secret".to_string()
+}
+
+fn default_sink_connect_timeout_secs() -> u64 {
+    5
+}
+
+fn default_sink_request_timeout_secs() -> u64 {
+    30
 }
 
 /// CLI settings.
@@ -855,8 +1189,38 @@ fn default_webhook_timeout() -> u64 {
 fn default_webhook_replay_window() -> u64 {
     300
 }
+fn default_outbox_interval_secs() -> u64 {
+    5
+}
+/// Matches `OutboxConsumerConfig::default().batch_size`.
+fn default_outbox_batch_size() -> usize {
+    32
+}
+/// Matches `OutboxConsumerConfig::default().lease_ttl`.
+fn default_outbox_lease_ttl_secs() -> u64 {
+    30
+}
+/// Matches `OutboxConsumerConfig::default().max_attempts`.
+fn default_outbox_max_attempts() -> u32 {
+    6
+}
 fn default_smtp_port() -> u16 {
     587
+}
+fn default_smtp_tls_mode() -> String {
+    "starttls".to_string()
+}
+fn default_smtp_subject_prefix() -> String {
+    "[AcmeX] ".to_string()
+}
+fn default_smtp_helo_name() -> String {
+    "acmex.local".to_string()
+}
+fn default_smtp_body_format() -> String {
+    "text".to_string()
+}
+fn default_smtp_timeout_secs() -> u64 {
+    30
 }
 fn default_output_format() -> String {
     "text".to_string()
@@ -883,6 +1247,7 @@ impl Default for AcmeSettings {
             contact: Vec::new(),
             tos_agreed: true,
             external_account_binding: None,
+            identifier_types: Vec::new(),
             trust_anchor_pem_files: Vec::new(),
             skip_certificate_trust_check: false,
             directory: String::new(),
@@ -922,7 +1287,6 @@ impl Default for RenewalSettings {
             max_retries: default_max_retries(),
             retry_delay_secs: default_retry_delay(),
             concurrency: default_concurrency(),
-            hooks: None,
         }
     }
 }
@@ -1089,6 +1453,15 @@ impl Config {
             ));
         }
 
+        for identifier_type in &self.acme.identifier_types {
+            if !matches!(identifier_type.as_str(), "dns" | "ip") {
+                return Err(AcmeError::configuration(format!(
+                    "acme.identifier_types contains unknown value `{identifier_type}`; \
+                     supported values are \"dns\" and \"ip\""
+                )));
+            }
+        }
+
         match self.storage.backend.as_str() {
             "file" => {
                 if let Some(ref file_config) = self.storage.file
@@ -1109,6 +1482,56 @@ impl Config {
             _ => {}
         }
 
+        if self.repository.backend == "redis"
+            && let Some(ref redis) = self.repository.redis
+            && redis.url.is_empty()
+        {
+            return Err(AcmeError::configuration(
+                "repository.redis.url cannot be empty",
+            ));
+        }
+
+        if let Some(ref file) = self.repository.file {
+            // Unknown fsync modes and zero sweep intervals are
+            // configuration errors, caught at validation time instead of
+            // repository assembly.
+            file.fsync_mode()?;
+        }
+
+        if let Some(ref vault) = self.delivery.vault {
+            if vault.endpoint.is_empty() {
+                return Err(AcmeError::configuration(
+                    "delivery.vault.endpoint cannot be empty",
+                ));
+            }
+            if vault.mount.is_empty() {
+                return Err(AcmeError::configuration(
+                    "delivery.vault.mount cannot be empty",
+                ));
+            }
+        }
+        if let Some(ref kubernetes) = self.delivery.kubernetes
+            && kubernetes.namespace.is_empty()
+        {
+            return Err(AcmeError::configuration(
+                "delivery.kubernetes.namespace cannot be empty",
+            ));
+        }
+
+        if let Some(ref key) = self.key {
+            if key.backend != "software" && key.backend != "kms-aws" {
+                return Err(AcmeError::configuration(format!(
+                    "key.backend `{}` is not one of software|kms-aws",
+                    key.backend
+                )));
+            }
+            if key.backend == "kms-aws" && key.kms.is_none() {
+                return Err(AcmeError::configuration(
+                    "key.kms settings are required when key.backend = \"kms-aws\"",
+                ));
+            }
+        }
+
         if let Some(ref propagation) = self.dns.propagation {
             propagation.validate("dns.propagation")?;
         }
@@ -1122,7 +1545,31 @@ impl Config {
                 .validate(&format!("dns.providers.{provider_id}.propagation"))?;
         }
 
+        if self.outbox.interval_secs == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.interval_secs must be at least 1 second",
+            ));
+        }
+        if self.outbox.batch_size == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.batch_size must be at least 1",
+            ));
+        }
+        if self.outbox.lease_ttl_secs == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.lease_ttl_secs must be at least 1 second",
+            ));
+        }
+        if self.outbox.max_attempts == 0 {
+            return Err(AcmeError::configuration(
+                "outbox.max_attempts must be at least 1",
+            ));
+        }
+
         self.external_account_binding_ref()?;
+        // Unknown account key types are configuration errors, caught at
+        // validation time instead of first key generation.
+        self.ca.resolve_account_key_type()?;
 
         Ok(())
     }
@@ -1555,5 +2002,355 @@ poll_interval_secs = 3
         assert!(policy.recursive_resolvers.is_empty());
         assert_eq!(policy.poll_interval, Duration::from_secs(3));
         assert_eq!(policy.max_wait, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn outbox_settings_default_to_enabled_consuming() {
+        let settings = OutboxSettings::default();
+        assert!(settings.enabled);
+        assert_eq!(settings.interval_secs, 5);
+        assert_eq!(settings.batch_size, 32);
+    }
+
+    /// Config files written before the `[outbox]` section existed must keep
+    /// parsing unchanged and pick up the consuming defaults.
+    #[test]
+    fn config_without_outbox_section_keeps_defaults() {
+        let config = Config::from_str(
+            "[acme]\nca = \"letsencrypt\"\nca_environment = \"staging\"\n\n[[notifications.webhooks]]\nurl = \"https://hooks.example.test/acmex\"\n",
+        )
+        .unwrap();
+        assert!(config.outbox.enabled);
+        assert_eq!(config.outbox.interval_secs, 5);
+        assert_eq!(config.outbox.batch_size, 32);
+    }
+
+    #[test]
+    fn outbox_section_overrides_defaults() {
+        let toml = "\n[outbox]\nenabled = false\ninterval_secs = 15\nbatch_size = 8\n";
+        let config = Config::from_str(toml).unwrap();
+        assert!(!config.outbox.enabled);
+        assert_eq!(config.outbox.interval_secs, 15);
+        assert_eq!(config.outbox.batch_size, 8);
+    }
+
+    /// The tunables added after the section shipped default like the
+    /// consumer defaults: no owner (generated per process), 30s lease TTL,
+    /// 6 attempts — and explicit values parse through.
+    #[test]
+    fn outbox_owner_lease_ttl_and_max_attempts_default_and_override() {
+        let config = Config::from_str("[outbox]\nenabled = true\n").unwrap();
+        assert_eq!(config.outbox.owner, None);
+        assert_eq!(config.outbox.lease_ttl_secs, 30);
+        assert_eq!(config.outbox.max_attempts, 6);
+
+        let config = Config::from_str(
+            "\n[outbox]\nowner = \"outbox-prod-eu-1\"\nlease_ttl_secs = 90\nmax_attempts = 3\n",
+        )
+        .unwrap();
+        assert_eq!(config.outbox.owner.as_deref(), Some("outbox-prod-eu-1"));
+        assert_eq!(config.outbox.lease_ttl_secs, 90);
+        assert_eq!(config.outbox.max_attempts, 3);
+    }
+
+    #[test]
+    fn outbox_validation_rejects_zero_lease_ttl_and_attempts() {
+        let err = Config::from_str("[outbox]\nlease_ttl_secs = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.lease_ttl_secs must be at least 1 second"),
+            "got: {err}"
+        );
+
+        let err = Config::from_str("[outbox]\nmax_attempts = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.max_attempts must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn outbox_validation_rejects_zero_interval_and_batch() {
+        let err = Config::from_str("[outbox]\ninterval_secs = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.interval_secs must be at least 1 second"),
+            "got: {err}"
+        );
+
+        let err = Config::from_str("[outbox]\nbatch_size = 0\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("outbox.batch_size must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    /// The redis repository backend parses from config and keeps the older
+    /// sections untouched; an empty URL is rejected by validation.
+    #[test]
+    fn repository_redis_backend_parses_and_validates() {
+        let config = Config::from_str(
+            "[repository]\nbackend = \"redis\"\n\n[repository.redis]\nurl = \"redis://127.0.0.1:6379/0\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.repository.backend, "redis");
+        assert_eq!(
+            config.repository.redis.as_ref().unwrap().url,
+            "redis://127.0.0.1:6379/0"
+        );
+        // Legacy sections keep their defaults.
+        assert!(config.outbox.enabled);
+
+        let err = Config::from_str(
+            "[repository]\nbackend = \"redis\"\n\n[repository.redis]\nurl = \"\"\n",
+        )
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("repository.redis.url cannot be empty"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn challenge_tls_alpn_section_is_optional_for_old_configs() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        assert!(config.challenge.tls_alpn.is_none());
+    }
+
+    /// `[delivery]` sink settings parse with defaults and reject empty
+    /// required fields at validation time.
+    #[test]
+    fn delivery_sink_settings_parse_and_validate() {
+        let config = Config::from_str(
+            "[delivery.kubernetes]\nnamespace = \"certs\"\n\n[delivery.vault]\nendpoint = \"https://vault.internal:8200\"\nauth_token = \"env:VAULT_TOKEN\"\n",
+        )
+        .unwrap();
+        let kubernetes = config.delivery.kubernetes.as_ref().unwrap();
+        assert_eq!(kubernetes.namespace, "certs");
+        assert!(kubernetes.endpoint.is_none());
+        assert!(kubernetes.auth_token.is_none());
+        let vault = config.delivery.vault.as_ref().unwrap();
+        assert_eq!(vault.mount, "secret");
+        assert_eq!(vault.connect_timeout_secs, 5);
+
+        let err = Config::from_str(
+            "[delivery.vault]\nendpoint = \"\"\nauth_token = \"env:VAULT_TOKEN\"\n",
+        )
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("delivery.vault.endpoint cannot be empty"),
+            "got: {err}"
+        );
+    }
+
+    /// `[key]` parses with the software default; the kms-aws backend
+    /// requires its kms settings section at validation time.
+    #[test]
+    fn key_backend_settings_parse_and_validate() {
+        let config: Config = "[key]\nbackend = \"kms-aws\"\n\n[key.kms]\nregion = \"us-east-1\"\nendpoint_url = \"http://127.0.0.1:8200\"\n".parse().unwrap();
+        let key = config.key.as_ref().unwrap();
+        assert_eq!(key.backend, "kms-aws");
+        assert_eq!(
+            key.kms.as_ref().unwrap().region.as_deref(),
+            Some("us-east-1")
+        );
+        // Omitting the section entirely keeps the software default.
+        let config: Config = "[outbox]\nenabled = false\n".parse().unwrap();
+        assert!(config.key.is_none());
+
+        let err = Config::from_str("[key]\nbackend = \"kms-aws\"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("key.kms settings are required"), "got: {err}");
+    }
+
+    /// The default account key type stays Ed25519 — the compatibility
+    /// baseline for the ECDSA/RSA account key feature.
+    #[test]
+    fn account_key_type_defaults_to_ed25519() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        assert_eq!(config.ca.account_key_type, "ed25519");
+        assert_eq!(
+            config.ca.resolve_account_key_type().unwrap(),
+            crate::crypto::keypair::KeyType::Ed25519
+        );
+        // Serializing and re-parsing keeps the default explicit.
+        let serialized = toml::to_string(&config.ca).unwrap();
+        assert!(
+            serialized.contains("account_key_type = \"ed25519\""),
+            "got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn account_key_type_parses_every_documented_value() {
+        use crate::crypto::keypair::KeyType;
+        let cases = [
+            ("ecdsa_p256", KeyType::EcdsaP256),
+            ("ecdsa_p384", KeyType::EcdsaP384),
+            ("ecdsa_p521", KeyType::EcdsaP521),
+            ("rsa2048", KeyType::Rsa2048),
+            ("rsa4096", KeyType::Rsa4096),
+        ];
+        for (value, expected) in cases {
+            let toml = format!("[ca]\naccount_key_type = \"{value}\"\n");
+            let config = Config::from_str(&toml).unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.ca.resolve_account_key_type().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn account_key_type_rejects_unknown_values_at_validation() {
+        let err = Config::from_str("[ca]\naccount_key_type = \"p256\"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ca.account_key_type"),
+            "error must name the setting: {err}"
+        );
+        assert!(
+            err.contains("ed25519"),
+            "error must list the accepted values: {err}"
+        );
+    }
+
+    // -- [repository.file] fsync durability settings ---------------------------
+
+    /// Absent `fsync` keys default to `always` — byte-identical to the
+    /// pre-config behavior, where `FileRepository::new` hard-wired
+    /// `FsyncMode::Always`.
+    #[test]
+    fn repository_file_fsync_defaults_to_always() {
+        let config = Config::from_str(
+            "[repository]\nbackend = \"file\"\n\n[repository.file]\npath = \"/tmp/acmex-repo\"\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let file = config.repository.file.as_ref().unwrap();
+        assert_eq!(file.fsync, "always");
+        assert_eq!(file.fsync_interval_ms, 100);
+        assert_eq!(
+            file.fsync_mode().unwrap(),
+            crate::repository::FsyncMode::Always
+        );
+    }
+
+    /// An explicit `interval` configuration resolves to the deferred
+    /// durability mode with the configured sweep window.
+    #[test]
+    fn repository_file_fsync_explicit_interval_parses() {
+        let config = Config::from_str(
+            "[repository]\nbackend = \"file\"\n\n[repository.file]\npath = \"/tmp/acmex-repo\"\nfsync = \"interval\"\nfsync_interval_ms = 250\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let file = config.repository.file.as_ref().unwrap();
+        assert_eq!(
+            file.fsync_mode().unwrap(),
+            crate::repository::FsyncMode::Interval(Duration::from_millis(250))
+        );
+    }
+
+    /// `fsync` is a closed set: unknown values are rejected with the
+    /// accepted spellings listed.
+    #[test]
+    fn repository_file_fsync_rejects_unknown_values() {
+        let err =
+            Config::from_str("[repository.file]\npath = \"/tmp/acmex-repo\"\nfsync = \"never\"\n")
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("repository.file.fsync"),
+            "error must name the setting: {err}"
+        );
+        assert!(
+            err.contains("always") && err.contains("interval"),
+            "error must list the accepted values: {err}"
+        );
+    }
+
+    /// A zero sweep interval would busy-loop the fsync sweeper; reject it.
+    #[test]
+    fn repository_file_fsync_rejects_zero_interval() {
+        let err = Config::from_str(
+            "[repository.file]\npath = \"/tmp/acmex-repo\"\nfsync = \"interval\"\nfsync_interval_ms = 0\n",
+        )
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("fsync_interval_ms must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    /// The resolved mode really drives the file repository assembly (the
+    /// exact call `ApplicationServiceBuilder::from_config` makes): an
+    /// `interval` config produces a store whose `fsync_mode()` reports
+    /// `Interval`; the default produces `Always`.
+    #[tokio::test]
+    async fn repository_file_fsync_mode_drives_file_repository_assembly() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        for (case, (fsync_line, expected)) in [
+            (String::new(), crate::repository::FsyncMode::Always),
+            (
+                "\nfsync = \"interval\"\nfsync_interval_ms = 250\n".to_string(),
+                crate::repository::FsyncMode::Interval(Duration::from_millis(250)),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir =
+                std::env::temp_dir().join(format!("acmex-config-fsync-assembly-{unique}-{case}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            let toml = format!(
+                "[repository]\nbackend = \"file\"\n\n[repository.file]\npath = \"{}\"{fsync_line}",
+                dir.display()
+            );
+            let config = Config::from_str(&toml).unwrap();
+            config.validate().unwrap();
+            let file = config.repository.file.as_ref().unwrap();
+            let repository = crate::repository::FileRepository::with_mode(
+                &file.path,
+                file.fsync_mode().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(repository.store().fsync_mode(), expected, "for {toml}");
+            drop(repository);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

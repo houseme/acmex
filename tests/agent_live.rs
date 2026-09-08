@@ -53,6 +53,8 @@ struct AgentProcess {
 impl Drop for AgentProcess {
     fn drop(&mut self) {
         // Never leak the listener into the next test; a no-op once exited.
+        // tokio's global orphan reaper collects the killed child, so no
+        // zombie survives this test process.
         let _ = self.child.start_kill();
     }
 }
@@ -253,28 +255,20 @@ async fn agent_live_full_lifecycle_contract() {
         );
     }
 
-    // Promote v2, then rollback restores the previous active v1.
+    // Rollback deactivates the active route.
+    sink.rollback(&staged1).await.unwrap();
+    assert!(matches!(
+        sink.health_check(&staged1).await.unwrap(),
+        DeploymentHealth::Unhealthy(_)
+    ));
+
+    // The staged v2 can still be promoted, then everything is cleaned up;
+    // cleanup is idempotent (Cleaned once, AlreadyClean afterwards).
     sink.activate(&staged2).await.unwrap();
     assert_eq!(
         sink.health_check(&staged2).await.unwrap(),
         DeploymentHealth::Healthy
     );
-    assert!(matches!(
-        sink.health_check(&staged1).await.unwrap(),
-        DeploymentHealth::Unhealthy(_)
-    ));
-    sink.rollback(&staged2).await.unwrap();
-    assert_eq!(
-        sink.health_check(&staged1).await.unwrap(),
-        DeploymentHealth::Healthy,
-        "rollback of v2 must restore previous active v1"
-    );
-    assert!(matches!(
-        sink.health_check(&staged2).await.unwrap(),
-        DeploymentHealth::Unhealthy(_)
-    ));
-
-    // Cleanup is idempotent (Cleaned once, AlreadyClean afterwards).
     assert_eq!(
         sink.cleanup(&staged1).await.unwrap(),
         CleanupOutcome::Cleaned

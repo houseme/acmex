@@ -65,7 +65,7 @@ pub trait HttpChallengeEdge: Send + Sync {
 }
 
 /// A TLS-ALPN-01 route to install at an edge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TlsChallengeRoute {
     /// Idempotency key, normally the challenge session id.
     pub idempotency_key: String,
@@ -79,6 +79,21 @@ pub struct TlsChallengeRoute {
     pub fingerprint: String,
     /// Route TTL; edges should expire stale routes if the owner vanishes.
     pub ttl_secs: u64,
+}
+
+impl std::fmt::Debug for TlsChallengeRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately redacted: `private_key_der` must never appear in
+        // Debug output (logs, test failures, tracing).
+        f.debug_struct("TlsChallengeRoute")
+            .field("idempotency_key", &self.idempotency_key)
+            .field("sni", &self.sni)
+            .field("certificate_der_len", &self.certificate_der.len())
+            .field("private_key_der_len", &self.private_key_der.len())
+            .field("fingerprint", &self.fingerprint)
+            .field("ttl_secs", &self.ttl_secs)
+            .finish()
+    }
 }
 
 /// A persisted handle on an installed TLS edge route.
@@ -313,5 +328,25 @@ mod tests {
             edge.remove(&lease).await.unwrap(),
             CleanupOutcome::AlreadyAbsent
         );
+    }
+
+    #[test]
+    fn tls_challenge_route_debug_redacts_private_key() {
+        let route = TlsChallengeRoute {
+            idempotency_key: "session-1".to_string(),
+            sni: "example.com".to_string(),
+            certificate_der: vec![1, 2, 3],
+            private_key_der: vec![9, 8, 7, 6, 5, 4, 3, 2],
+            fingerprint: "fp-a".to_string(),
+            ttl_secs: 30,
+        };
+        let debug = format!("{route:?}");
+        // The derived-Debug rendering of the key bytes must never appear;
+        // only the length is shown.
+        assert!(
+            !debug.contains(&format!("{:?}", route.private_key_der)),
+            "got: {debug}"
+        );
+        assert!(debug.contains("private_key_der_len"), "got: {debug}");
     }
 }

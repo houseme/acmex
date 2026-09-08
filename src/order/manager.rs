@@ -41,8 +41,9 @@ impl<'a> OrderManager<'a> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
         // Build JWS header
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": &self.account_id,
             "nonce": nonce,
             "url": &directory.new_order,
@@ -52,7 +53,7 @@ impl<'a> OrderManager<'a> {
         let payload = json!(request);
 
         // Sign the request
-        let jws = self.account_manager.get_signer().sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         // Send request
         let response = self
@@ -111,15 +112,16 @@ impl<'a> OrderManager<'a> {
     pub async fn get_order(&self, order_url: &str) -> Result<Order> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": &self.account_id,
             "nonce": nonce,
             "url": order_url,
         });
 
         let payload = json!({});
-        let jws = self.account_manager.get_signer().sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         let response = self
             .http_client
@@ -158,15 +160,16 @@ impl<'a> OrderManager<'a> {
     pub async fn get_authorization(&self, auth_url: &str) -> Result<Authorization> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": &self.account_id,
             "nonce": nonce,
             "url": auth_url,
         });
 
         let payload = json!({});
-        let jws = self.account_manager.get_signer().sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         let response = self
             .http_client
@@ -208,8 +211,9 @@ impl<'a> OrderManager<'a> {
     pub async fn respond_to_challenge(&self, challenge_url: &str) -> Result<Challenge> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": &self.account_id,
             "nonce": nonce,
             "url": challenge_url,
@@ -217,7 +221,7 @@ impl<'a> OrderManager<'a> {
 
         // Empty payload triggers validation
         let payload = json!({});
-        let jws = self.account_manager.get_signer().sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         let response = self
             .http_client
@@ -294,8 +298,9 @@ impl<'a> OrderManager<'a> {
     pub async fn finalize_order(&self, finalize_url: &str, csr_der: &[u8]) -> Result<Order> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": &self.account_id,
             "nonce": nonce,
             "url": finalize_url,
@@ -308,7 +313,7 @@ impl<'a> OrderManager<'a> {
             "csr": csr_b64
         });
 
-        let jws = self.account_manager.get_signer().sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         let response = self
             .http_client
@@ -355,15 +360,16 @@ impl<'a> OrderManager<'a> {
     pub async fn download_certificate(&self, certificate_url: &str) -> Result<String> {
         let nonce = self.nonce_manager.get_nonce().await?;
 
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": &self.account_id,
             "nonce": nonce,
             "url": certificate_url,
         });
 
         let payload = json!({});
-        let jws = self.account_manager.get_signer().sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         let response = self
             .http_client

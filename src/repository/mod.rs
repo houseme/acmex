@@ -13,9 +13,10 @@
 //!   consumed at-least-once.
 //!
 //! Three backends are provided: [`memory::MemoryRepository`] (reference
-//! implementation), [`file::FileRepository`] (atomic JSON files), and, behind
-//! the `redis` feature, [`redis::RedisRepository`] (atomic Lua-backed CAS,
-//! leases and outbox over Redis). The trait surface is frozen for v0.9.0.
+//! implementation), [`file::FileRepository`] (atomic JSON files) and — behind
+//! the `redis` feature — [`redis::RedisRepository`] (shared Redis server with
+//! Lua-script atomic CAS/leases/outbox). The trait surface is frozen for
+//! v0.9.0.
 //!
 //! Business code never concatenates storage keys (`cert:<domains>`) — it
 //! talks to aggregates by typed IDs.
@@ -45,7 +46,7 @@ use crate::domain::{
 use crate::error::{AcmeError, Result};
 
 pub use clock::{Clock, FakeClock, SystemClock};
-pub use file::FileRepository;
+pub use file::{FSYNC_DROP_FLUSHES, FSYNC_SWEEPER_SHUTDOWNS, FileRepository, FsyncMode};
 pub use memory::MemoryRepository;
 pub use migration::{
     LegacyBundleMigrator, MigrationMode, MigrationOutcome, MigrationPlanEntry, MigrationReport,
@@ -459,12 +460,12 @@ pub struct RepositorySet {
 }
 
 impl RepositorySet {
-    /// Opens a Redis-backed aggregate repository set.
+    /// Opens a Redis-backed repository set at `url`
+    /// (e.g. `redis://127.0.0.1:6379/0`; credentials in the URL are
+    /// redacted in `Debug` output). Requires the `redis` feature.
     #[cfg(feature = "redis")]
-    pub async fn redis(redis_url: &str) -> Result<Self> {
-        RedisRepository::new(redis_url)
-            .await
-            .map(RedisRepository::into_set)
+    pub async fn redis(url: &str) -> Result<Self> {
+        Ok(redis::RedisRepository::connect(url).await?.into_set())
     }
 
     /// Returns a repository set that records failed repository calls in
@@ -951,7 +952,10 @@ pub(crate) const ENVELOPE_REVISION_FIELD: &str = "revision";
 
 pub(crate) struct Envelope {
     pub id: String,
-    pub value: Value,
+    /// Shared handle to the immutable stored envelope. Envelopes are never
+    /// mutated in place (CAS installs a new value), so backends can hand out
+    /// `Arc` clones instead of deep-copying the JSON tree.
+    pub value: Arc<Value>,
 }
 
 pub(crate) fn envelope_revision(value: &Value) -> Result<Revision> {
@@ -968,7 +972,7 @@ pub(crate) fn corrupt(detail: impl std::fmt::Display) -> AcmeError {
 /// Internal per-aggregate store both backends implement.
 #[async_trait]
 pub(crate) trait EntityStore: Send + Sync {
-    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Value>>;
+    async fn env_get(&self, aggregate: &str, id: &str) -> Result<Option<Arc<Value>>>;
     async fn env_create(
         &self,
         aggregate: &str,
@@ -1079,7 +1083,10 @@ pub(crate) fn decode_versioned<T: serde::de::DeserializeOwned>(
         .ok_or("missing updated_at")?;
     let data = value.get("data").ok_or("missing data")?;
     Ok(Versioned {
-        value: serde_json::from_value(data.clone()).map_err(|e| e.to_string())?,
+        // Deserialize straight from the borrowed `Value` — `&Value`
+        // implements `Deserializer`, so no deep clone of the subtree is
+        // needed (unlike `serde_json::from_value`, which consumes).
+        value: T::deserialize(data).map_err(|e| e.to_string())?,
         revision,
         schema_version,
         created_at: Timestamp::from_str(created_at).map_err(|e| e.to_string())?,

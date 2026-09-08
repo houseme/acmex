@@ -30,3 +30,49 @@ Each live sink run records the resource kind, permissions used, stage and
 activate behavior, health signal, rollback path, cleanup result, and known
 unsupported operations. Tokens and kubeconfigs are references only and must not
 be copied into artifacts.
+
+### 2026-09-07 — notifications-smtp (email delivery, local SMTP relay)
+
+* **Environment**: `axllent/mailpit` container on `127.0.0.1:1025` (SMTP) /
+  `127.0.0.1:1825` (REST API), SMTP AUTH PLAIN enabled via an auth file with
+  throwaway credentials (password passed to AcmeX only through an `env:`
+  SecretRef; never recorded here). Run executed on the main line
+  (c167f38) where `src/notifications/email.rs` lives.
+* **Command**: `ACMEX_LIVE_SMTP_HOST=… ACMEX_LIVE_SMTP_PORT=… … cargo test
+  --test smtp_live -- --ignored --nocapture` (`tests/smtp_live.rs`,
+  `#[ignore]`-gated, SKIPs without the variables).
+* **Scenario**: real SMTP transaction (AUTH PLAIN → MAIL FROM → RCPT TO →
+  DATA) through the production email client, then the mailpit REST API
+  observed exactly one message with matching From/To/Subject
+  (`id="107f0ysF6VMGNw8fu6Ty8s"`); store cleaned via
+  `DELETE /api/v1/messages` with `total == 0` asserted afterwards.
+* **Result**: PASS (`test result: ok. 1 passed`). This upgrades the email
+  path from fake-SMTP contract evidence to a live relay round-trip,
+  including authenticated delivery. Evidence log under
+  `/tmp/acmex-mainline-staging` (untracked); the test itself is repeatable
+  against any local relay.
+
+### 2026-09-07 — sink-http-agent (reference remote agent, real subprocess)
+
+* **Environment**: the new reference agent `acmex agent serve` (server side
+  of the `HttpAgentSink` protocol, in `src/delivery/agent_server.rs`) run as
+  a real subprocess spawned by the test via `CARGO_BIN_EXE_acmex` on a
+  random 127.0.0.1 port; bearer token passed through an `env:` SecretRef
+  (bare-string refs are rejected and redacted in Debug output).
+* **Command**: `cargo test --test agent_live` (self-contained, not
+  `#[ignore]`-gated: it starts and stops its own agent process).
+* **Scenario**: full stage/activate/health/rollback/cleanup contract over
+  real HTTP with token auth — stage (201, active untouched), activate
+  (204), health `Healthy`, staged-but-not-active reports unhealthy
+  ("route exists but is not active"), rollback deactivates, cleanup is
+  idempotent (404 → `AlreadyClean`); plus `kill -9` of the agent process
+  mid-lifetime with the sink observing `DeploymentHealth::Unknown` (PR
+  #208 semantics) instead of a transport error; concurrent activation
+  keeps exactly one active version (16-way, unit-tested).
+* **Result**: PASS (`test result: ok. 3 passed`), together with the 7
+  in-process unit tests (`delivery::agent_server`) and the pre-existing
+  fake-agent contract suite (`tests/http_agent_sink_test.rs`, 4 passed).
+  This replaces the last "remote agent has only fake evidence" limitation
+  with a reproducible real-process run; a production agent with persistent
+  state can substitute the reference binary without wire changes.
+

@@ -194,10 +194,222 @@ impl DnsProvider for Route53DnsProvider {
         }
     }
 
-    /// Verifies the record propagation. Route53 changes are asynchronous,
-    /// so this currently returns true to allow the ACME server to perform the final check.
-    async fn verify_record(&self, _domain: &str, _value: &str) -> Result<bool> {
-        tracing::debug!("Route53 record verification skipped (handled by ACME server)");
-        Ok(true)
+    /// Verifies record propagation by querying the hosted zone: the TXT
+    /// record must exist and carry the expected value. Route53 only lists
+    /// applied changes, so a listed, matching record is effectively INSYNC.
+    async fn verify_record(&self, domain: &str, value: &str) -> Result<bool> {
+        tracing::debug!("Verifying Route53 TXT record for domain: {}", domain);
+        #[cfg(feature = "dns-route53")]
+        {
+            let name = if domain.ends_with('.') {
+                domain.to_string()
+            } else {
+                format!("{}.", domain)
+            };
+
+            let response = self
+                .client
+                .list_resource_record_sets()
+                .hosted_zone_id(&self.config.hosted_zone_id)
+                .start_record_name(&name)
+                .start_record_type(RrType::Txt)
+                .send()
+                .await
+                .map_err(|e| {
+                    tracing::error!("AWS SDK error during Route53 record verification: {}", e);
+                    AcmeError::transport(format!("Route53 verification error: {}", e))
+                })?;
+
+            // Records are returned in lexicographic order starting at the
+            // queried name; a missing record simply ends the matching run.
+            for record_set in response.resource_record_sets() {
+                if !names_match(record_set.name(), &name) || record_set.r#type() != &RrType::Txt {
+                    continue;
+                }
+                for record in record_set.resource_records() {
+                    if txt_value_matches(record.value(), value) {
+                        tracing::debug!("Route53 TXT record for {} verified", domain);
+                        return Ok(true);
+                    }
+                }
+            }
+            tracing::debug!(
+                "Route53 TXT record for {} not found or value mismatch",
+                domain
+            );
+            Ok(false)
+        }
+        #[cfg(not(feature = "dns-route53"))]
+        {
+            let _ = (domain, value, &self.config);
+            tracing::error!("Attempted to use Route53 without 'dns-route53' feature enabled");
+            Err(AcmeError::configuration(
+                "Route53 feature not enabled".to_string(),
+            ))
+        }
+    }
+}
+
+/// Case-insensitive DNS name comparison with trailing-dot normalization.
+#[cfg(feature = "dns-route53")]
+fn names_match(returned: &str, expected: &str) -> bool {
+    let normalize = |name: &str| name.trim_end_matches('.').to_ascii_lowercase();
+    normalize(returned) == normalize(expected)
+}
+
+/// Compares a Route53 TXT record value (quoted, possibly split into multiple
+/// character-string chunks) with the expected challenge value.
+#[cfg(feature = "dns-route53")]
+fn txt_value_matches(record_value: &str, expected: &str) -> bool {
+    let joined: String = record_value
+        .split('"')
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, chunk)| chunk)
+        .collect();
+    joined == expected
+}
+
+#[cfg(all(test, feature = "dns-route53"))]
+mod tests {
+    use super::*;
+    use aws_sdk_route53::config::{BehaviorVersion, Credentials, Region};
+
+    const RECORD_SETS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListResourceRecordSetsResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  <ResourceRecordSets>
+    <ResourceRecordSet>
+      <Name>_acme-challenge.example.com.</Name>
+      <Type>TXT</Type>
+      <TTL>300</TTL>
+      <ResourceRecords>
+        <ResourceRecord><Value>"challenge-token-value"</Value></ResourceRecord>
+      </ResourceRecords>
+    </ResourceRecordSet>
+    <ResourceRecordSet>
+      <Name>example.com.</Name>
+      <Type>NS</Type>
+      <TTL>172800</TTL>
+      <ResourceRecords>
+        <ResourceRecord><Value>ns-1.awsdns-00.net.</Value></ResourceRecord>
+      </ResourceRecords>
+    </ResourceRecordSet>
+    <ResourceRecordSet>
+      <Name>split.example.com.</Name>
+      <Type>TXT</Type>
+      <TTL>300</TTL>
+      <ResourceRecords>
+        <ResourceRecord><Value>"part1" "part2"</Value></ResourceRecord>
+      </ResourceRecords>
+    </ResourceRecordSet>
+  </ResourceRecordSets>
+  <IsTruncated>false</IsTruncated>
+  <MaxItems>100</MaxItems>
+</ListResourceRecordSetsResponse>"#;
+
+    const ERROR_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ErrorResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  <Error>
+    <Type>Sender</Type>
+    <Code>NoSuchHostedZone</Code>
+    <Message>The specified hosted zone does not exist.</Message>
+  </Error>
+  <RequestId>req-1</RequestId>
+</ErrorResponse>"#;
+
+    /// Builds the provider against a local fake AWS endpoint; the AWS
+    /// signature headers are irrelevant to the fake and use static
+    /// test-only credentials.
+    async fn provider_against(endpoint: &str) -> Route53DnsProvider {
+        let config = aws_sdk_route53::config::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .credentials_provider(Credentials::new(
+                "test-access-key",
+                "test-secret-key",
+                None,
+                None,
+                "route53-unit-test",
+            ))
+            .region(Region::new("us-east-1"))
+            .endpoint_url(endpoint)
+            .build();
+        Route53DnsProvider {
+            config: Route53Config {
+                hosted_zone_id: "Z1234567890".to_string(),
+            },
+            client: aws_sdk_route53::Client::from_conf(config),
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_record_matches_txt_value_against_the_zone() {
+        let mut server = mockito::Server::new_async().await;
+        let _list_mock = server
+            .mock("GET", "/2013-04-01/hostedzone/Z1234567890/rrset")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "text/xml")
+            .with_body(RECORD_SETS_XML)
+            .create_async()
+            .await;
+        let provider = provider_against(&server.url()).await;
+
+        // Exact value match on the queried name.
+        let verified = provider
+            .verify_record("_acme-challenge.example.com", "challenge-token-value")
+            .await
+            .unwrap();
+        assert!(verified, "matching TXT value must verify");
+
+        // A different value on the same name must not pass.
+        let mismatch = provider
+            .verify_record("_acme-challenge.example.com", "other-token")
+            .await
+            .unwrap();
+        assert!(!mismatch, "value mismatch must not verify");
+
+        // Split TXT character-string chunks are concatenated before compare.
+        let joined = provider
+            .verify_record("split.example.com", "part1part2")
+            .await
+            .unwrap();
+        assert!(joined, "split character strings must join for compare");
+
+        // A name absent from the response must not verify.
+        let absent = provider
+            .verify_record("missing.example.com", "challenge-token-value")
+            .await
+            .unwrap();
+        assert!(!absent, "absent names must not verify");
+    }
+
+    #[tokio::test]
+    async fn verify_record_classifies_api_failures_as_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let _error_mock = server
+            .mock("GET", "/2013-04-01/hostedzone/Z1234567890/rrset")
+            .match_query(mockito::Matcher::Any)
+            .with_status(403)
+            .with_header("content-type", "text/xml")
+            .with_body(ERROR_XML)
+            .create_async()
+            .await;
+        let provider = provider_against(&server.url()).await;
+
+        let outcome = provider
+            .verify_record("_acme-challenge.example.com", "challenge-token-value")
+            .await;
+        assert!(
+            outcome.is_err(),
+            "API failures must surface as classified errors, not Ok(false)"
+        );
+    }
+
+    #[test]
+    fn txt_value_comparison_concatenates_quoted_chunks() {
+        assert!(txt_value_matches("\"abc\"", "abc"));
+        assert!(txt_value_matches("\"ab\" \"cd\"", "abcd"));
+        assert!(!txt_value_matches("\"abc\"", "abcd"));
+        assert!(!txt_value_matches("\"abc\" \"de\"", "abcde f"));
     }
 }

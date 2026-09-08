@@ -70,6 +70,7 @@ impl HttpAgentSink {
         token: impl Into<String>,
     ) -> Self {
         let client = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();

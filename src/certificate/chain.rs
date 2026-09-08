@@ -300,6 +300,29 @@ fn verify_cert_signature(cert_der: &[u8], issuer_der: Option<&[u8]>) -> Result<b
             .map_err(|e| AcmeError::certificate(format!("Invalid issuer certificate: {}", e)))?;
         issuer_cert = Some(parsed);
     }
+    // `x509-parser`'s `verify_signature` covers RSA signatures only. ECDSA
+    // certificates (what Let's Encrypt and Pebble issue by default) verify
+    // through the crypto backend below.
+    let signature_oid = cert.signature_algorithm.algorithm.to_id_string();
+    if signature_oid.starts_with("1.2.840.10045.4.3.") {
+        // RFC 5280: the signature BIT STRING must have zero unused bits;
+        // anything else is a malformed encoding.
+        if cert.signature_value.unused_bits != 0 {
+            return Err(AcmeError::certificate(
+                "signature BIT STRING has unused bits",
+            ));
+        }
+        let issuer_public_key = issuer_cert
+            .as_ref()
+            .map(|issuer| issuer.public_key().subject_public_key.data.as_ref())
+            .unwrap_or_else(|| cert.public_key().subject_public_key.data.as_ref());
+        return verify_ecdsa_signature(
+            &signature_oid,
+            cert.tbs_certificate.as_ref(),
+            issuer_public_key,
+            cert.signature_value.as_ref(),
+        );
+    }
     let issuer_key = issuer_cert.as_ref().map(|issuer| issuer.public_key());
     match cert.verify_signature(issuer_key) {
         Ok(()) => Ok(true),
@@ -308,6 +331,64 @@ fn verify_cert_signature(cert_der: &[u8], issuer_der: Option<&[u8]>) -> Result<b
         Err(err) => Err(AcmeError::certificate(format!(
             "signature verification failed: {err}"
         ))),
+    }
+}
+
+/// Verifies an ECDSA-with-SHA{256,384,512} certificate signature over the
+/// raw TBS bytes using the issuer's uncompressed EC point.
+fn verify_ecdsa_signature(
+    signature_oid: &str,
+    tbs: &[u8],
+    public_key: &[u8],
+    signature_der: &[u8],
+) -> Result<bool> {
+    #[cfg(feature = "aws-lc-rs")]
+    let mismatch = || {
+        AcmeError::certificate(format!(
+            "ECDSA signature verification: signature algorithm {signature_oid} does not \
+             match the issuer key"
+        ))
+    };
+
+    #[cfg(feature = "aws-lc-rs")]
+    {
+        let algorithm: &aws_lc_rs::signature::EcdsaVerificationAlgorithm =
+            if signature_oid.ends_with(".3.2") {
+                &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1
+            } else if signature_oid.ends_with(".3.3") {
+                &aws_lc_rs::signature::ECDSA_P384_SHA384_ASN1
+            } else if signature_oid.ends_with(".3.4") {
+                &aws_lc_rs::signature::ECDSA_P521_SHA512_ASN1
+            } else {
+                return Err(mismatch());
+            };
+        let key = aws_lc_rs::signature::UnparsedPublicKey::new(algorithm, public_key);
+        Ok(key.verify(tbs, signature_der).is_ok())
+    }
+    #[cfg(all(feature = "ring-crypto", not(feature = "aws-lc-rs")))]
+    {
+        let algorithm: &ring::signature::EcdsaVerificationAlgorithm =
+            if signature_oid.ends_with(".3.2") {
+                &ring::signature::ECDSA_P256_SHA256_ASN1
+            } else if signature_oid.ends_with(".3.3") {
+                &ring::signature::ECDSA_P384_SHA384_ASN1
+            } else {
+                // ring 0.17 does not expose an ASN.1 P-521 verifier.
+                return Err(AcmeError::certificate(
+                    "ECDSA P-521 certificate signature verification is not supported by the \
+                     `ring-crypto` backend",
+                ));
+            };
+        let key = ring::signature::UnparsedPublicKey::new(algorithm, public_key);
+        return Ok(key.verify(tbs, signature_der).is_ok());
+    }
+    #[cfg(not(any(feature = "aws-lc-rs", feature = "ring-crypto")))]
+    {
+        let _ = (tbs, public_key, signature_der, signature_oid);
+        Err(AcmeError::certificate(
+            "ECDSA certificate signature verification requires the `aws-lc-rs` or \
+             `ring-crypto` feature",
+        ))
     }
 }
 

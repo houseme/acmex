@@ -15,13 +15,12 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 
 use tokio::sync::{Mutex, RwLock};
 
 use crate::account::KeyPair;
+use crate::crypto::keypair::KeyType;
 use crate::domain::error_codes;
 use crate::error::{AcmeError, Result};
 use crate::protocol::{Directory, Jwk, JwsSigner};
@@ -173,9 +172,16 @@ impl AcmeSession {
         *self.directory.write().await = None;
     }
 
-    /// The JWK for the account key (Ed25519).
-    fn jwk(&self) -> Jwk {
-        Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(self.auth.key_pair.public_key_bytes()))
+    /// The JWK for the account key, derived from the key itself (Ed25519,
+    /// ECDSA or RSA).
+    fn jwk(&self) -> Result<Jwk> {
+        Jwk::for_key_pair(&self.auth.key_pair.0)
+    }
+
+    /// The JWA algorithm the account key signs with (`EdDSA`, `ES256`,
+    /// `ES384`, `ES512` or `RS256`).
+    fn jwa_algorithm(&self) -> Result<&'static str> {
+        Ok(KeyType::for_key_pair(&self.auth.key_pair.0)?.jwa_algorithm())
     }
 
     async fn capture_nonce(&self, response: &AcmeResponse) {
@@ -219,16 +225,17 @@ impl AcmeSession {
         let mut bad_nonce_attempts = 0;
         loop {
             let nonce = self.next_nonce().await?;
+            let alg = self.jwa_algorithm()?;
             let header = match &self.auth.account_url {
                 Some(kid) => json!({
-                    "alg": "EdDSA",
+                    "alg": alg,
                     "kid": kid,
                     "nonce": nonce,
                     "url": endpoint,
                 }),
                 None => json!({
-                    "alg": "EdDSA",
-                    "jwk": self.jwk().to_value(),
+                    "alg": alg,
+                    "jwk": self.jwk()?.to_value(),
                     "nonce": nonce,
                     "url": endpoint,
                 }),

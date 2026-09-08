@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use acmex::challenge::{
-    ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge, dns01_validation_value,
+    ChallengePresenter, CleanupOutcome, Observation, PrepareChallenge, dns_account01_record_name,
+    dns_account01_validation_value, dns01_validation_value,
 };
 use acmex::dns::factory::{DefaultDnsProviderFactory, DnsProviderFactory};
 use acmex::dns::presenter::Dns01Presenter;
@@ -100,6 +101,33 @@ fn dns01_validation_value_uses_rfc8555_digest() {
     assert_eq!(
         dns01_validation_value("token.thumbprint"),
         "61rBZ_4knHblO0MNoxFsXZ_eTFUHum0B6IVRbhvUn5I"
+    );
+}
+
+#[test]
+fn dns_account01_validation_value_matches_draft_and_record_name_binds_account() {
+    // draft-ietf-acme-dns-account-01 §3: the TXT value is the DNS-01 digest
+    // of the key authorization; the ACCOUNT BINDING lives in the record
+    // name (base32(SHA256(account URL))[..10] after _acme-challenge_).
+    let key_authorization = "token-x.some-thumbprint";
+    assert_eq!(
+        dns_account01_validation_value(key_authorization),
+        dns01_validation_value(key_authorization)
+    );
+    let account_url = "https://acme.example/acct/1";
+    let record = dns_account01_record_name(account_url, "example.com");
+    assert!(record.starts_with("_acme-challenge_"), "record: {record}");
+    assert!(record.ends_with(".example.com"), "record: {record}");
+    let label = record
+        .trim_start_matches("_acme-challenge_")
+        .split('.')
+        .next()
+        .unwrap();
+    assert_eq!(label.len(), 16, "10 bytes -> 16 base32 chars: {record}");
+    // A different account must produce a different record name.
+    assert_ne!(
+        record,
+        dns_account01_record_name("https://acme.example/acct/2", "example.com")
     );
 }
 
@@ -221,6 +249,9 @@ async fn dns01_presenter_end_to_end_with_fakes() {
         .prepare(PrepareChallenge {
             session,
             key_authorization: "token.abc".to_string(),
+            account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -245,6 +276,111 @@ async fn dns01_presenter_end_to_end_with_fakes() {
     ));
 
     // cleanup: exact value removed
+    assert!(matches!(
+        presenter.cleanup(&lease).await.unwrap(),
+        CleanupOutcome::Cleaned
+    ));
+    assert!(matches!(
+        presenter.cleanup(&lease).await.unwrap(),
+        CleanupOutcome::AlreadyAbsent
+    ));
+}
+
+#[tokio::test]
+async fn dns_account01_presenter_end_to_end_with_fakes() {
+    // dns-account-01 (draft-ietf-acme-dns-account-01) uses the SAME record
+    // name and observe/cleanup paths as dns-01; only the TXT value formula
+    // differs (account URL instead of token.thumbprint).
+    let mut zones = FakeZoneResolver::new();
+    zones.zone(
+        "example.com",
+        &[("ns1.example.com", "192.0.2.53".parse().unwrap())],
+    );
+
+    let observer = FakePropagationObserver::all_matched();
+    let router = ProviderRouterBuilder::new(Box::new(EnvFileSecretResolver))
+        .provider(DnsProviderSpec {
+            id: "cf-prod".to_string(),
+            provider_type: "fake".to_string(),
+            credential: Some(SecretRef::Env {
+                name: "CF_TOKEN".to_string(),
+            }),
+            zones: vec!["example.com".to_string()],
+            zone_suffixes: vec![],
+            endpoint: None,
+            timeout_secs: 30,
+            extra: Default::default(),
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let presenter = Dns01Presenter::new(Arc::new(router), Arc::new(zones), Arc::new(observer));
+    // One registration covers both DNS challenge kinds.
+    let kinds = ChallengePresenter::supported_kinds(&presenter);
+    assert!(kinds.contains(&acmex::types::ChallengeType::Dns01));
+    assert!(kinds.contains(&acmex::types::ChallengeType::DnsAccount01));
+
+    let session = acmex::challenge::ChallengeSession {
+        id: "chs_dnsacct".to_string(),
+        operation_id: OperationId::generate(),
+        authorization_url: "https://acme.example/authz/a".to_string(),
+        challenge_url: "https://acme.example/authz/a/challenge".to_string(),
+        identifier: Identifier::try_dns("example.com").unwrap(),
+        challenge_type: acmex::types::ChallengeType::DnsAccount01,
+        token_hash: "h".to_string(),
+        state: acmex::challenge::ChallengeSessionState::Selected,
+        lease_id: None,
+        deadline: jiff::Timestamp::now()
+            .checked_add(jiff::Span::new().minutes(30))
+            .unwrap(),
+        last_propagation_check_at: None,
+        last_propagation_status: None,
+        last_ca_poll_at: None,
+        last_ca_status: None,
+        last_error: None,
+    };
+
+    // The TXT value follows the DNS-01 digest of the key authorization; the
+    // record name carries the account-URL binding.
+    let expected_txt = dns_account01_validation_value("token-x.thumbprint-part");
+    let lease = presenter
+        .prepare(PrepareChallenge {
+            session,
+            key_authorization: "token-x.thumbprint-part".to_string(),
+            account_url: "https://acme.example/acct/1".to_string(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.challenge_type,
+        acmex::types::ChallengeType::DnsAccount01
+    );
+    match &lease.locator {
+        acmex::domain::ChallengeLeaseLocator::Dns {
+            zone,
+            record_name,
+            value_hash,
+            ..
+        } => {
+            assert_eq!(zone, "example.com");
+            // The record name carries the account-URL binding.
+            assert_eq!(
+                record_name,
+                &dns_account01_record_name("https://acme.example/acct/1", "example.com")
+            );
+            assert_eq!(*value_hash, txt_value_hash(&expected_txt));
+        }
+        other => panic!("dns locator expected, got {other:?}"),
+    }
+
+    // Observation and cleanup are the DNS-01 machinery, unchanged.
+    assert!(matches!(
+        presenter.observe(&lease).await.unwrap(),
+        Observation::Propagated
+    ));
     assert!(matches!(
         presenter.cleanup(&lease).await.unwrap(),
         CleanupOutcome::Cleaned
@@ -316,6 +452,9 @@ async fn presenter_routes_delegated_zone_to_owner() {
         .prepare(PrepareChallenge {
             session,
             key_authorization: "v".to_string(),
+            account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();
@@ -389,6 +528,9 @@ async fn partial_propagation_fails_quorum_then_succeeds() {
         .prepare(PrepareChallenge {
             session,
             key_authorization: "v".to_string(),
+            account_url: String::new(),
+            issuer_domain_names: Vec::new(),
+            accounturi: None,
         })
         .await
         .unwrap();

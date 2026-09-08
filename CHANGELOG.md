@@ -8,15 +8,159 @@ must call out any unverified external evidence.
 
 ### Added
 
+- Reference remote delivery agent: `acmex agent serve` serves the server side
+  of the `HttpAgentSink` protocol (token auth via `env:`/`file:` SecretRef
+  only, constant-time comparison, atomic single-slot activation, graceful
+  shutdown). `tests/agent_live.rs` drives the real subprocess through the
+  full stage/activate/health/rollback/cleanup contract including
+  `kill -9` -> `DeploymentHealth::Unknown`, closing the T20 remote-agent
+  evidence gap.
+- `FileSecretStore` writes are now durable: secret files are fsynced before
+  their atomic rename (and the directory after, on unix), with permissions
+  `0600` from the first byte. Previously secret writes never fsynced, so a
+  crash could orphan an ACME account by losing its freshly written key.
+  Secrets always fsync immediately, independent of `FsyncMode`.
+- `[repository.file] fsync` / `fsync_interval_ms` configuration selects the
+  repository durability mode at runtime (default `always`, unchanged
+  behavior); invalid values fail configuration validation at startup.
+  `acmex init` templates document the options.
+- File repository durability modes: `FileRepository::with_mode` accepts
+  `FsyncMode::Always` (default, unchanged per-write fsync) or
+  `FsyncMode::Interval` (opt-in group commit like Redis AOF `everysec`:
+  writes visible immediately, fsync by a background sweeper at most one
+  window later, final flush on drop). Always-mode write paths also drop
+  redundant per-write syscalls and route CAS/lease/outbox reads through the
+  stamp-validated parse cache (stamps now include the unix inode, keeping
+  cross-process rename detection exact).
+
 - Release engineering baseline for the v0.9.0/v0.10.0 closeout: release notes,
   migration guides, release decision record, and a semver compatibility gate.
 - CLI `order list` and `order show` now query durable `/api/v1/operations`
   instead of returning placeholders.
+- Durable outbox consumer is now wired into every production runtime
+  (`serve`, `daemon`, the embedded API server) behind an `[outbox]` config
+  section; `[notifications.webhooks]` entries are mapped onto the outbound
+  delivery with an optional outbox event-type filter (`events`).
+- Redis aggregate repository (behind the existing `redis` feature): all nine
+  aggregates with Lua-script atomic CAS, cross-process leases with fencing
+  tokens, and outbox retry/dead-letter semantics. Selectable via
+  `repository.backend = "redis"` with `[repository.redis] url`.
+- Kubernetes Secret and Vault KV v2 certificate sinks, registered from
+  `[delivery.kubernetes]` / `[delivery.vault]` settings; credentials are
+  SecretRef-only and tokens are resolved per request.
+- Local multi-route TLS-ALPN-01 edge listener (SNI routing, RFC 8737 ALPN
+  enforcement) assembled into the production worker from
+  `[challenge.tls_alpn].listen_addr`; the previous single-authorization
+  limitation and the rustls critical-extension rejection of validation
+  certificates are fixed.
+- Explicitly confirmed key destruction (`KeyProvider::destroy_confirmed`);
+  the conservative `destroy` remains as the safe default.
+- `[[example]] intent_issuance` demonstrates the durable workflow offline,
+  and `renewal_controller` replaces the deprecated scheduler example.
+- Account keys support ES256/ES384/ES512 and RS256: every JWS path (account
+  registration, lookup, contact updates, deactivation, key rollover, EAB
+  inner JWS, order and revocation calls) now derives its algorithm and JWK
+  from the actual key. New keys default to Ed25519 unchanged; opt in via
+  `[ca] account_key_type`. This also fixes a latent bug where the generated
+  account key was P-256 but was signed and labeled as Ed25519, which every
+  real CA would have rejected.
+- AWS KMS key provider behind the new `kms-aws` feature (`[key]
+  backend = "kms-aws"`): managed keys are created as KMS-held asymmetric
+  keys and CSRs are signed remotely via the KMS Sign API — private key
+  material never leaves the service and `export` is always `None`.
+- DNS challenge types for the new CA draft landscape: `dns-account-01`
+  (TXT value reuses the DNS-01 digest; the record name is derived from the
+  ACME account URL, so multiple accounts never clobber each other's
+  validation records) and
+  `dns-persist-01` (persistent `_validation-persist` records binding the
+  account URI, opt-in via validation policy, cleanup preserves the record).
+  Multi-challenge preparation (`prepare_all_supported`) provisions every
+  offered challenge type the engine supports — required by CAs that
+  validate all offered challenges (recent Pebble does).
+- DNS challenge types for the new CA draft landscape: `dns-account-01`
+  (challenge type, account-URL-bound record name; see the dns-account-01
+  feature entry above) and `dns-persist-01`.
+- External CSR issuance end to end: intents created with
+  `key.mode = "external-csr"` now require and use a caller-supplied CSR
+  (`external_csr` on intent creation or issue), validated for signature and
+  exact identifier match. AcmeX never generates, imports, or persists a
+  private key on this path; declaring external CSR previously fell back
+  silently to a managed key.
+- SMTP email delivery: `[[notifications.email]]` now actually delivers
+  outbox events (implicit TLS, STARTTLS or explicit plaintext) with
+  per-channel error aggregation alongside webhooks.
+- Performance: repository reads avoid deep JSON copies (`Arc<Value>`
+  envelopes with borrowed deserialization), the file repository caches
+  parsed entities behind stat validation, the legacy Redis storage uses
+  `SCAN` plus a reused connection manager, and the release profile enables
+  thin LTO. 5 000-intent scans drop from ~21 ms to ~3 ms (memory) and from
+  ~108 ms to ~46 ms warm (file) in release builds.
+
+### Changed
+
+- The validation pipeline's account JWK is now a shared, refreshable handle
+  (`AccountJwkHandle`, `ca_backend::backend`) instead of a startup snapshot.
+  After an RFC 8555 §7.3.5 account key rollover, `AcmeCaBackend` (in-process
+  `roll_account_key`) and `EnsureAccountStep` (per-issuance re-sync via the
+  new default-implemented `CaBackend::current_account_jwk`) publish the new
+  key's JWK through it, so challenge key authorizations (`token.thumbprint`)
+  keep matching the CA's stored account public key. Previously every
+  issuance after a rollover computed key authorizations from the stale
+  thumbprint and was rejected by the CA (review P3-6). Breaking for 0.x
+  consumers assembling steps directly: `ChallengeStepDeps.account_jwk` and
+  `WorkflowWorkerComponents.account_jwk` changed type from `Jwk` to
+  `AccountJwkHandle` (wrap the JWK with `AccountJwkHandle::new`, and attach
+  the same handle to an `AcmeCaBackend` via `attach_jwk_handle`); persisted
+  EnsureAccount step outputs gain an optional `account_jwk` field that old
+  records omit via `#[serde(default)]`.
+- The legacy account API now serves real account records: create passes
+  contacts into the ACME registration, and read/update/deactivate round-trip
+  to the CA and persist `AccountRecord`s instead of returning hardcoded
+  values.
+- Deployment health `Unknown` (sink unreachable) no longer triggers
+  rollback — only verified `Unhealthy` does; sink `activate` verifies the
+  staging fingerprint before promotion, and in-flight deployments recover
+  automatically after a crash instead of stalling forever.
+
+### Removed
+
+- The no-op `metrics` and `cli` Cargo features. Neither gated any code —
+  `prometheus` and `clap` are unconditional dependencies — so enabling them
+  produced builds identical to the defaults. Users passing these flags can
+  simply drop them. Recorded as a minor-version change per 0.x semantics.
+- The never-consumed `[renewal.hooks]` configuration (`RenewalHooks`);
+  existing configs with that section still parse and the section is now
+  ignored.
 
 ### Fixed
 
+- `cargo check --no-default-features` (and therefore the feature-matrix
+  release gate) failed to compile: the `not(any(aws-lc-rs, ring-crypto))`
+  fallback of ECDSA chain verification referenced `mismatch`, a helper that
+  only exists under the `aws-lc-rs` cfg.
+- The terminal `VALIDATION_CHALLENGE_INCOMPATIBLE` error now carries the CA's
+  challenge problem summary, our challenge type/URL, and every offered
+  challenge's status; previously the CA's failure reason was stored only in
+  the challenge session record and never surfaced in the operation error.
+
+- **JWS bodies now use the RFC 8555 §6.2 flattened JSON serialization.** The
+  signer previously emitted the compact `a.b.c` serialization as the POST
+  body, which real ACME servers reject — this is the fix that makes ACME
+  issuance against a live CA possible end to end (proven by the now-green
+  Pebble L4 gate).
+- Certificate chain verification supports ECDSA (P-256/384/521) signatures
+  via aws-lc-rs or ring, in addition to RSA; Pebble and Let's Encrypt issue
+  ECDSA chains by default.
+- Challenge acknowledgement tolerates challenges the CA already validated
+  (proactive validation), and unknown challenge types advertised by a CA no
+  longer break authorization parsing.
 - Issuance spine test fixtures now include the optional verification report
   field introduced by the v0.10 certificate verification model.
+- Deployment rollback failures now retry with backoff before becoming
+  terminal, and cleanup failures retry in place; neither silently reports
+  success.
+- Route53 `verify_record` queries the hosted zone (quoted-string and
+  split-char TXT values handled) instead of always reporting verified.
 
 ## 0.10.0 - pending external evidence
 

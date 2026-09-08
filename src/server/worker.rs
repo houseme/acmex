@@ -55,8 +55,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-
+use crate::ca_backend::backend::AccountJwkHandle;
 use crate::ca_backend::{AcmeCaBackend, InstrumentedAcmeTransport, ReqwestAcmeTransport};
 use crate::challenge::{
     AcknowledgeChallengesStep, ChallengePresenter, ChallengeStepDeps, CleanupChallengesStep,
@@ -95,10 +94,17 @@ pub struct WorkflowWorkerSettings {
     pub terms_agreed: bool,
     /// External Account Binding used when the CA requires EAB.
     pub external_account_binding: Option<crate::ca_backend::ExternalAccountBindingRef>,
+    /// Challenge types the worker may plan for. Empty (default) = every
+    /// challenge compatible with the identifier.
+    pub allowed_challenges: crate::domain::ChallengeSet,
     /// Directory holding the account key and managed certificate keys.
     pub secret_store_dir: std::path::PathBuf,
     /// HTTP-01 listen address (None disables the local HTTP-01 presenter).
     pub http01_listen: Option<String>,
+    /// TLS-ALPN-01 listen address (None falls back to
+    /// `[challenge.tls_alpn].listen_addr`; missing from both disables the
+    /// local TLS-ALPN-01 presenter).
+    pub tls_alpn_listen: Option<String>,
 }
 
 impl Default for WorkflowWorkerSettings {
@@ -112,8 +118,10 @@ impl Default for WorkflowWorkerSettings {
             skip_certificate_trust_check: false,
             terms_agreed: true,
             external_account_binding: None,
+            allowed_challenges: crate::domain::ChallengeSet::all(),
             secret_store_dir: std::path::PathBuf::from(".acmex/secrets"),
             http01_listen: None,
+            tls_alpn_listen: None,
         }
     }
 }
@@ -136,8 +144,12 @@ pub fn default_secret_store_dir(config: &Config) -> std::path::PathBuf {
 pub struct WorkflowWorkerComponents {
     /// The CA backend every ACME step talks to.
     pub backend: Arc<dyn crate::ca_backend::CaBackend>,
-    /// The account key's JWK (key authorizations).
-    pub account_jwk: Jwk,
+    /// The account key's JWK handle (key authorizations). Shared with the
+    /// pipeline: attach the same handle to an `AcmeCaBackend` via
+    /// [`AcmeCaBackend::attach_jwk_handle`] so an account key rollover
+    /// refreshes it; otherwise `EnsureAccountStep` still re-syncs it from
+    /// the backend on every issuance.
+    pub account_jwk: AccountJwkHandle,
     /// Presenters by challenge type.
     pub presenters: PresenterRegistry,
     /// Managed key and CSR source.
@@ -166,7 +178,7 @@ pub fn register_executors(
         backend: backend.clone(),
         presenters,
         account_jwk,
-        allowed_challenges: Default::default(),
+        allowed_challenges: settings.allowed_challenges.clone(),
         propagation_timeout: settings.propagation_timeout,
         poll_interval: settings.challenge_poll_interval,
     });
@@ -227,17 +239,24 @@ pub fn register_executors(
 }
 
 /// Loads the persistent ACME account key (or creates it on first run).
+///
+/// `key_type` only governs *newly generated* keys: an already-stored PEM key
+/// carries its own type and is loaded unchanged, so existing deployments
+/// keep their account identity across upgrades.
 async fn load_or_create_account_key(
     store: &FileSecretStore,
     ca_label: &str,
+    key_type: crate::crypto::keypair::KeyType,
 ) -> crate::error::Result<crate::account::KeyPair> {
     let key_id = format!("account_key_{ca_label}");
     if let Some(pem) = store.get(&key_id).await? {
         return crate::account::KeyPair::from_pem(&String::from_utf8_lossy(&pem))
             .map_err(|err| crate::error::AcmeError::crypto(format!("stored account key: {err}")));
     }
-    let key_pair = crate::account::KeyPair::generate()
+    let generated = crate::crypto::KeyPairGenerator::new(key_type)
+        .generate()
         .map_err(|err| crate::error::AcmeError::crypto(format!("generate account key: {err}")))?;
+    let key_pair = crate::account::KeyPair(generated);
     store
         .put(&key_id, key_pair.serialize_pem().as_bytes())
         .await?;
@@ -362,6 +381,67 @@ async fn build_http_presenter(listen: Option<&str>) -> Option<Arc<dyn ChallengeP
     }
 }
 
+/// Builds the local multi-route TLS-ALPN-01 presenter when an address is
+/// configured. Bind failures are warnings, matching the HTTP-01 policy:
+/// TLS-ALPN-01 intents then fail with an explicit "no presenter" error
+/// instead of binding silently.
+async fn build_tls_alpn_presenter(listen: Option<&str>) -> Option<Arc<dyn ChallengePresenter>> {
+    let listen = listen?;
+    match listen.parse::<std::net::SocketAddr>() {
+        Ok(addr) => match crate::challenge::tls_alpn01::LocalTlsListener::bind(addr).await {
+            Ok(listener) => Some(Arc::new(
+                crate::challenge::tls_alpn01::TlsAlpn01Presenter::with_edge(Arc::new(listener)),
+            )),
+            Err(err) => {
+                tracing::warn!(error = %err, listen, "TLS-ALPN-01 local listener unavailable");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(listen, error = %err, "invalid tls_alpn.listen_addr");
+            None
+        }
+    }
+}
+
+/// Assembles the presenter registry from configuration: DNS-01 from
+/// `[challenge.dns01]`, HTTP-01 from `settings.http01_listen` and
+/// TLS-ALPN-01 from `settings.tls_alpn_listen`, which falls back to
+/// `[challenge.tls_alpn].listen_addr`. Every missing presenter is only a
+/// warning: the matching intents then fail with an explicit error at
+/// prepare time instead of being silently simulated.
+async fn build_presenters(
+    config: &Config,
+    settings: &mut WorkflowWorkerSettings,
+) -> PresenterRegistry {
+    if settings.tls_alpn_listen.is_none() {
+        settings.tls_alpn_listen = config
+            .challenge
+            .tls_alpn
+            .as_ref()
+            .map(|tls| tls.listen_addr.clone());
+    }
+    let mut presenters = PresenterRegistry::new();
+    if let Some(dns) = build_dns_presenter(config).await {
+        presenters.register(dns);
+    } else {
+        tracing::warn!("no DNS providers configured; DNS-01 challenges will fail explicitly");
+    }
+    match build_http_presenter(settings.http01_listen.as_deref()).await {
+        Some(http) => presenters.register(http),
+        None => tracing::warn!(
+            "no HTTP-01 listener configured; HTTP-01 challenges will fail explicitly"
+        ),
+    }
+    match build_tls_alpn_presenter(settings.tls_alpn_listen.as_deref()).await {
+        Some(tls) => presenters.register(tls),
+        None => tracing::warn!(
+            "no TLS-ALPN-01 listener configured; TLS-ALPN-01 challenges will fail explicitly"
+        ),
+    }
+    presenters
+}
+
 /// Builds the key-free RFC 9773 ARI provider used by renewal scanning.
 ///
 /// ARI lookups are unauthenticated GETs, so no account key is needed —
@@ -382,6 +462,133 @@ pub fn build_ari_provider(
     ))
 }
 
+/// Registers the remote sinks configured under `[delivery]`.
+///
+/// Like the rest of the assembly, a sink that cannot be constructed (for
+/// example an unreadable in-cluster service account outside a real cluster)
+/// is logged and skipped rather than fatal: operations targeting that kind
+/// fail explicitly at the deployment step instead.
+fn register_configured_sinks(
+    orchestrator: DeploymentOrchestrator,
+    config: &Config,
+) -> DeploymentOrchestrator {
+    let resolver: Arc<dyn crate::dns::spec::SecretResolver> =
+        Arc::new(crate::dns::spec::EnvFileSecretResolver);
+    let mut orchestrator = orchestrator;
+
+    if let Some(kubernetes) = &config.delivery.kubernetes {
+        let sink_config = crate::delivery::k8s_sink::KubernetesSecretConfig {
+            endpoint: kubernetes.endpoint.clone(),
+            namespace: kubernetes.namespace.clone(),
+            ca_path: kubernetes.ca_path.as_ref().map(std::path::PathBuf::from),
+            connect_timeout_secs: kubernetes.connect_timeout_secs,
+            request_timeout_secs: kubernetes.request_timeout_secs,
+        };
+        let auth = match &kubernetes.auth_token {
+            Some(reference) => crate::delivery::k8s_sink::KubernetesAuth::Resolved {
+                reference: reference.clone(),
+                resolver: resolver.clone(),
+            },
+            None => crate::delivery::k8s_sink::KubernetesAuth::ServiceAccount,
+        };
+        match crate::delivery::k8s_sink::KubernetesSecretSink::new(sink_config, auth) {
+            Ok(sink) => {
+                orchestrator = orchestrator.register_sink(
+                    crate::domain::DeliveryTargetKind::KubernetesSecret,
+                    Arc::new(sink),
+                );
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                "kubernetes sink assembly failed; kubernetes_secret targets will fail explicitly"
+            ),
+        }
+    }
+
+    if let Some(vault) = &config.delivery.vault {
+        let sink_config = crate::delivery::vault_sink::VaultKvConfig {
+            endpoint: vault.endpoint.clone(),
+            mount: vault.mount.clone(),
+            namespace: vault.namespace.clone(),
+            connect_timeout_secs: vault.connect_timeout_secs,
+            request_timeout_secs: vault.request_timeout_secs,
+        };
+        let sink = crate::delivery::vault_sink::VaultKvSink::new(
+            sink_config,
+            crate::delivery::vault_sink::VaultAuth::Resolved {
+                reference: vault.auth_token.clone(),
+                resolver: resolver.clone(),
+            },
+        );
+        match sink {
+            Ok(sink) => {
+                orchestrator = orchestrator
+                    .register_sink(crate::domain::DeliveryTargetKind::VaultKv, Arc::new(sink));
+            }
+            Err(err) => tracing::warn!(
+                error = %err,
+                "vault sink assembly failed; vault_kv targets will fail explicitly"
+            ),
+        }
+    }
+
+    orchestrator
+}
+
+/// Assembles the key provider configured under `[key]`.
+///
+/// The default (`backend = "software"`) keeps keys in the local file secret
+/// store. `backend = "kms-aws"` (with the `kms-aws` feature compiled in)
+/// routes managed-key generation and CSR signing through AWS KMS so private
+/// key material never reaches the disk — because that is a security
+/// commitment, an explicit `kms-aws` configuration that cannot be assembled
+/// (bad region, credentials not ready, ...) fails startup instead of
+/// silently downgrading to local keys.
+async fn build_key_provider(
+    config: &Config,
+    secret_store_dir: &std::path::Path,
+) -> crate::error::Result<Arc<dyn crate::key::KeyProvider>> {
+    let backend = config
+        .key
+        .as_ref()
+        .map(|key| key.backend.as_str())
+        .unwrap_or("software");
+    if backend != "kms-aws" {
+        return Ok(Arc::new(SoftwareKeyProvider::new(FileSecretStore::new(
+            secret_store_dir.to_path_buf(),
+        ))));
+    }
+    let kms = config
+        .key
+        .as_ref()
+        .and_then(|key| key.kms.as_ref())
+        .ok_or_else(|| {
+            crate::error::AcmeError::configuration(
+                "key.kms settings are required when key.backend = \"kms-aws\"",
+            )
+        })?;
+    #[cfg(feature = "kms-aws")]
+    {
+        let provider_config = crate::key::kms::KmsKeyProviderConfig {
+            region: kms.region.clone(),
+            endpoint_url: kms.endpoint_url.clone(),
+            key_deletion_window_days: kms
+                .key_deletion_window_days
+                .unwrap_or(crate::key::kms::DEFAULT_KEY_DELETION_WINDOW_DAYS),
+            ..Default::default()
+        };
+        let provider = crate::key::kms::KmsKeyProvider::new(provider_config).await?;
+        Ok(Arc::new(provider))
+    }
+    #[cfg(not(feature = "kms-aws"))]
+    {
+        let _ = kms;
+        Err(crate::error::AcmeError::configuration(
+            "key backend `kms-aws` requires the `kms-aws` feature",
+        ))
+    }
+}
+
 /// Assembles a fully equipped [`WorkflowEngine`] from configuration.
 ///
 /// This is the shared assembly for the embedded server worker, the CLI
@@ -391,8 +598,10 @@ pub fn build_ari_provider(
 ///    (`.acmex/secrets` by default — restarts reuse the same account);
 /// 2. wraps the HTTP transport with request/duration/badNonce metrics;
 /// 3. builds the presenters that are actually configured (DNS-01 from
-///    `[challenge.dns01]`, HTTP-01 from `[challenge.http01].listen_addr`);
-/// 4. registers the durable File sink for `[delivery] file targets;
+///    `[challenge.dns01]`, HTTP-01 from `[challenge.http01].listen_addr`,
+///    TLS-ALPN-01 from `[challenge.tls_alpn].listen_addr`);
+/// 4. registers the durable File sink plus the configured remote sinks
+///    (`[delivery.kubernetes]`, `[delivery.vault]`);
 /// 5. registers every production step executor via [`register_executors`].
 ///
 /// The returned engine advances operations when `run_once`/`run_step` is
@@ -414,42 +623,47 @@ pub async fn build_engine_from_config(
 
     let ca_label = super::api::sanitize_ca_label(&config.acme.ca);
     let secret_store = FileSecretStore::new(settings.secret_store_dir.clone());
-    let key_pair = Arc::new(load_or_create_account_key(&secret_store, &ca_label).await?);
-    let account_jwk = Jwk::new_ed25519(
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key_pair.public_key_bytes()),
-    );
+    let account_key_type = config.ca.resolve_account_key_type()?;
+    let key_pair =
+        Arc::new(load_or_create_account_key(&secret_store, &ca_label, account_key_type).await?);
+    // Key authorizations read the thumbprint through this handle; the
+    // backend refreshes it whenever an in-process account key rollover
+    // completes (RFC 8555 §7.3.5), and EnsureAccountStep re-syncs it from
+    // the backend before every issuance.
+    let account_jwk = AccountJwkHandle::new(Jwk::for_key_pair(&key_pair.0)?);
 
     let transport = InstrumentedAcmeTransport::wrap(
         ca_label.clone(),
         Arc::new(ReqwestAcmeTransport::new()),
         metrics.clone(),
     );
-    let backend: Arc<dyn crate::ca_backend::CaBackend> = Arc::new(AcmeCaBackend::new(
+    let mut acme_backend = AcmeCaBackend::new(
         ca_label,
         config.acme.directory.clone(),
         transport,
         key_pair,
         repositories.clone(),
-    ));
-
-    let key_provider: Arc<dyn crate::key::KeyProvider> = Arc::new(SoftwareKeyProvider::new(
-        FileSecretStore::new(settings.secret_store_dir.clone()),
-    ));
-
-    let mut presenters = PresenterRegistry::new();
-    if let Some(dns) = build_dns_presenter(config).await {
-        presenters.register(dns);
+    );
+    // Declare the identifier types this deployment accepts (default
+    // DNS-only). The pre-order capability gate uses this to reject
+    // unsupported intents at plan time without creating an ACME order.
+    let identifier_types = if config.acme.identifier_types.is_empty() {
+        vec!["dns".to_string()]
     } else {
-        tracing::warn!("no DNS providers configured; DNS-01 challenges will fail explicitly");
-    }
-    match build_http_presenter(settings.http01_listen.as_deref()).await {
-        Some(http) => presenters.register(http),
-        None => tracing::warn!(
-            "no HTTP-01 listener configured; HTTP-01 challenges will fail explicitly"
-        ),
-    }
-    // TLS-ALPN-01 has no local multi-route listener yet (KNOWN_LIMITATIONS);
-    // intents pinned to tls-alpn-01 fail explicitly at prepare time.
+        config.acme.identifier_types.clone()
+    };
+    acme_backend = acme_backend.with_identifier_types(identifier_types);
+    let acme_backend = Arc::new(acme_backend);
+    acme_backend.attach_jwk_handle(account_jwk.clone());
+    let backend: Arc<dyn crate::ca_backend::CaBackend> = acme_backend;
+
+    // An explicit `kms-aws` backend that cannot be assembled fails startup:
+    // silently issuing with local keys would defeat the point of the
+    // setting. The software default is constructed directly.
+    let key_provider: Arc<dyn crate::key::KeyProvider> =
+        build_key_provider(config, &settings.secret_store_dir).await?;
+
+    let presenters = build_presenters(config, &mut settings).await;
 
     let mut orchestrator =
         DeploymentOrchestrator::new(repositories.clone()).with_metrics(metrics.clone());
@@ -457,6 +671,7 @@ pub async fn build_engine_from_config(
         crate::domain::DeliveryTargetKind::File,
         Arc::new(FileCertificateSink::new()),
     );
+    orchestrator = register_configured_sinks(orchestrator, config);
 
     let mut engine =
         WorkflowEngine::new("server-worker", repositories.clone()).with_config(EngineConfig {
@@ -526,4 +741,53 @@ pub async fn spawn_from_config(
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ChallengeType;
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn tls_alpn_presenter_is_absent_without_configuration() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings::default();
+        let registry = build_presenters(&config, &mut settings).await;
+
+        assert!(!registry.kinds().contains(&ChallengeType::TlsAlpn01));
+        assert!(settings.tls_alpn_listen.is_none());
+    }
+
+    #[tokio::test]
+    async fn tls_alpn_presenter_registers_from_config_and_settings() {
+        // `[challenge.tls_alpn]` alone enables the local listener (ephemeral
+        // port 0 keeps the test hermetic).
+        let config =
+            Config::from_str("[challenge.tls_alpn]\nlisten_addr = \"127.0.0.1:0\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings::default();
+        let registry = build_presenters(&config, &mut settings).await;
+        assert!(registry.kinds().contains(&ChallengeType::TlsAlpn01));
+        assert_eq!(settings.tls_alpn_listen.as_deref(), Some("127.0.0.1:0"));
+
+        // An explicit setting wins even without a config section.
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings {
+            tls_alpn_listen: Some("127.0.0.1:0".to_string()),
+            ..Default::default()
+        };
+        let registry = build_presenters(&config, &mut settings).await;
+        assert!(registry.kinds().contains(&ChallengeType::TlsAlpn01));
+    }
+
+    #[tokio::test]
+    async fn invalid_tls_alpn_listen_degrades_to_warning() {
+        let config = Config::from_str("[acme]\nca = \"letsencrypt\"\n").unwrap();
+        let mut settings = WorkflowWorkerSettings {
+            tls_alpn_listen: Some("not-a-socket-addr".to_string()),
+            ..Default::default()
+        };
+        let registry = build_presenters(&config, &mut settings).await;
+        assert!(!registry.kinds().contains(&ChallengeType::TlsAlpn01));
+    }
 }
