@@ -535,14 +535,17 @@ impl OutboxDelivery for WebhookManager {
         let Some(first) = aggregated.next() else {
             return Ok(());
         };
-        let joined = format!(
-            "{first}; {}",
-            aggregated
-                .map(|err| err.to_string())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-        Err(AcmeError::Transport(joined))
+        // A single failure is returned verbatim: re-wrapping its Display in
+        // another Transport would double the prefix and drop the original
+        // classification. Only genuinely multi-channel failures are joined.
+        match aggregated.next() {
+            None => Err(first),
+            Some(second) => {
+                let mut rendered = vec![first.to_string(), second.to_string()];
+                rendered.extend(aggregated.map(|err| err.to_string()));
+                Err(AcmeError::Transport(rendered.join("; ")))
+            }
+        }
     }
 }
 
