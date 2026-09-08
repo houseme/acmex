@@ -24,6 +24,7 @@ T04/T09 的 ARI 实现（`DirectoryAriProvider`、`replaces` 下发）与 T15 �
 在**受控测试资产**（自有域名、隔离 IP、staging 环境）上完成以下证据，全部可复现、留档：
 
 1. **LE staging 冒烟（主路径）**：
+   - 非变更 `directory` smoke：获取 staging directory，记录 `newNonce`/`newAccount`/`newOrder`、ARI `renewalInfo` 与 profiles 广告状态，作为脚本和网络入口可用性证据；
    - HTTP-01 与 DNS-01（DNS-01 依赖 T20 live zone；未就绪则显式降级）各完成一次：intent → order → challenge → finalize → 验收报告（T15）→ File sink 部署 → 激活；
    - 续签一次：验证 ARI 窗口获取（或显式记录 CA 未通告时的 fallback）、`replaces` 提交被接受、旧版本 superseded。
 2. **profiles**：对支持 profile 的 CA（LE 的 profile 头或 ZeroSSL/Google 等价物）验证 profile 选择生效：证书有效期/算法与 profile 声明一致；`short_lived` profile 若可用则纳入（对应 160 小时证书的续签节奏观察）。
@@ -66,6 +67,7 @@ T04/T09 的 ARI 实现（`DirectoryAriProvider`、`replaces` 下发）与 T15 �
 ## 6. 验证方法
 
 ```bash
+RUN_LE_STAGING=1 ACMEX_LE_STAGING_SCENARIOS=directory scripts/run_le_staging.sh
 RUN_LE_STAGING=1 scripts/run_le_staging.sh   # 具备测试资产的环境
 # 无环境：脚本 exit 77；默认 cargo test 集不受影响
 cargo fmt --all --check && cargo check --all-features
@@ -75,6 +77,7 @@ cargo fmt --all --check && cargo check --all-features
 
 ## 7. 验收标准
 
+- [x] LE staging `directory` 非变更 smoke 通过并归档：2026-09-07 `target/le-staging/20260907T103107Z/`，确认 `newNonce`/`newAccount`/`newOrder`、ARI `renewalInfo` 支持与 profiles 广告状态；该项不是签发 release pass。
 - [ ] LE staging HTTP-01（及 DNS-01 或显式降级记录）全流程留档：签发、验收报告、部署、激活。
 - [ ] 续签证据：ARI 窗口与 `replaces` 行为（或 CA 未通告时的 fallback 记录）、旧版本 superseded。
 - [ ] IPv4/IPv6 × HTTP-01/TLS-ALPN-01 证据完成，或失败行为差异被完整记录（RELEASE_CHECKLIST 对应行有结论）。

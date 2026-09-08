@@ -31,8 +31,10 @@ Unchecked items block the v0.9.0 release.
 - [ ] At least one live DNS provider zone completed.
 - [x] Redis repository failover scope documented.
 - [x] Kubernetes/Vault/agent sink scope documented. (Kubernetes and Vault
-      scopes documented 2026-09-06/07; remote HTTP agent live run against the
-      reference agent completed 2026-09-07)
+      scopes documented 2026-09-06/07; remote HTTP agent covered by the
+      reference agent child-process live run completed 2026-09-07 —
+      `tests/agent_live.rs`; a deployed external agent can be exercised with
+      the ignored `tests/http_agent_sink_live.rs` contract)
 
 Any unchecked E2E or external row is not a release pass and must be called out in
 release notes.

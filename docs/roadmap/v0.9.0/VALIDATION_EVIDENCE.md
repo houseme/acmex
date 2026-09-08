@@ -85,6 +85,105 @@ recurrence is directly diagnosable.
 - `scripts/run_performance_baseline.sh`: PASS (numbers in the log)
 - `cargo check --no-default-features`: PASS after fix (below)
 
+## Reference HTTP Agent Gate
+
+- `cargo test -q --test agent_live`: PASS (2026-09-07). This starts the real
+  `acmex agent serve` binary as a child process and drives
+  `HttpAgentSink` through stage, activate, health, rollback, cleanup,
+  unreachable-agent, and token-redaction paths.
+- `cargo test -q delivery::agent_server`: PASS (2026-09-07). This covers the
+  in-memory reference server's authenticated wire contract, rollback to the
+  previous active route, and concurrent activation invariant.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=reference-http-agent \
+  scripts/run_live_infra.sh`: PASS (2026-09-07,
+  `target/live-infra/20260907T093626Z/`). The T20 entrypoint now records the
+  reference child-process agent artifact plus secret scan. This is executable
+  evidence for the reference child-process agent, not a substitute for a
+  separately deployed external agent host.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=reference-http-agent \
+  scripts/run_live_infra.sh`: PASS (2026-09-07,
+  `target/live-infra/20260907T101411Z/`). Re-run after wiring the Redis and
+  external-agent entries confirmed the script still archives the reference
+  agent contract and secret scan together. A sandbox-only attempt immediately
+  before this failed at local ephemeral-port bind time; the elevated rerun is
+  the valid evidence.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=reference-http-agent \
+  scripts/run_live_infra.sh`: PASS (2026-09-07,
+  `target/live-infra/20260907T104452Z/`). Re-run after hardening scenario
+  routing confirmed the reference agent path still executes.
+
+## Redis Repository Contract Gate
+
+- `ACMEX_TEST_REDIS_URL=redis://127.0.0.1:6389/15 cargo test -q --features \
+  redis --test repository_redis_contract -- --ignored --nocapture`: PASS
+  (2026-09-07, local temporary Redis 8.10.1, 6/6 contract bodies).
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=redis \
+  ACMEX_LIVE_REDIS_URL=redis://127.0.0.1:6389/15 scripts/run_live_infra.sh`:
+  PASS (2026-09-07, `target/live-infra/20260907T101444Z/`). This confirms the
+  T20 entrypoint now runs the Redis repository contract and archives
+  `redis-repository-contract.log` instead of relying on scope text alone.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=redis \
+  ACMEX_LIVE_REDIS_URL=redis://127.0.0.1:6389/15 scripts/run_live_infra.sh`:
+  PASS (2026-09-07, `target/live-infra/20260907T104523Z/`). Re-run after
+  hardening scenario routing confirmed the Redis path still executes and
+  archives `redis-repository-contract.log`.
+- The Redis aggregate repository now uses the same `RepositorySet` trait
+  surface as memory/file. Entity create/CAS and lease operations are Redis-side
+  atomic, outbox ordering uses an incrementing sequence plus sorted index, and
+  tests use a unique `acmex:test:<pid>:<n>` prefix per case to avoid stale-key
+  contamination.
+- This closes the Redis repository contract implementation gap; Redis failover
+  and managed durability mode evidence remain T20 external infrastructure
+  scope.
+
+## External HTTP Agent Contract Gate
+
+- `cargo test -q --test http_agent_sink_live -- --list`: PASS (2026-09-07).
+  The ignored external-agent contract compiles and is discoverable without
+  contacting infrastructure.
+- `cargo test -q --test http_agent_sink_live -- --ignored --nocapture`: PASS
+  as an explicit skip (2026-09-07) because
+  `ACMEX_LIVE_HTTP_AGENT_URL`/`ACMEX_LIVE_HTTP_AGENT_TOKEN_REF` were not set.
+  This is not live evidence; it only verifies the missing-environment path is
+  controlled and non-secret-bearing.
+- The executable contract covers stage, inactive health before activation,
+  activation, second-version staging without replacing the active route,
+  rollback to the previous active route, cleanup, and repeated cleanup
+  idempotency against a separately deployed HTTP agent.
+
+## Live Infrastructure Scenario Routing Gate
+
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=sink-kubernetes \
+  ACMEX_LIVE_INFRA_ARTIFACT_DIR=/private/tmp/acmex-live-infra-missing-k8s \
+  ACMEX_LIVE_KUBECONFIG=/private/tmp/nonexistent-kubeconfig \
+  ACMEX_LIVE_K8S_NAMESPACE=default scripts/run_live_infra.sh`: EXPECTED FAIL
+  (2026-09-07). The script now refuses to mark Kubernetes sink evidence green
+  without a non-empty `sink-kubernetes-scope.md` artifact because this
+  repository has no Kubernetes sink runner wired.
+- `RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=made-up \
+  ACMEX_LIVE_INFRA_ARTIFACT_DIR=/private/tmp/acmex-live-infra-unknown \
+  scripts/run_live_infra.sh`: EXPECTED FAIL (2026-09-07). Unknown scenario
+  names now fail in preflight instead of being silently ignored.
+- `sink-vault` and `dual-process-fencing` follow the same no-false-green rule:
+  until first-class executable runners are added, a selected scenario must
+  supply the corresponding non-empty archived evidence file or the script exits
+  failed.
+
+## Let's Encrypt Staging Directory Gate
+
+- `RUN_LE_STAGING=1 ACMEX_LE_STAGING_SCENARIOS=directory \
+  scripts/run_le_staging.sh`: PASS (2026-09-07,
+  `target/le-staging/20260907T103107Z/`). The run fetched the public staging
+  directory, confirmed `newNonce`, `newAccount` and `newOrder`, recorded ARI
+  `renewalInfo` support, observed no advertised profiles, and wrote a
+  non-secret preflight manifest.
+- A non-elevated attempt immediately before this failed at DNS lookup because
+  the sandbox could not resolve `acme-staging-v02.api.letsencrypt.org`; the
+  elevated rerun is the valid evidence.
+- This is a non-mutating T19 smoke only. It is not LE issuance evidence and
+  does not satisfy the release checklist row for Let's Encrypt staging smoke,
+  ARI `replaces`, profile behavior, IP identifiers or EAB CA registration.
+
 ## Fixed During This Pass
 
 - `src/certificate/chain.rs`: the `not(any(aws-lc-rs, ring-crypto))` fallback
@@ -171,3 +270,5 @@ health-failure rollback).
 Local-gate reruns in this pass: `cargo test --lib` 398 passed / 0 failed;
 `git diff --check` clean; `rustfmt --edition 2024` clean on the touched
 files.
+- Redis failover / managed persistence mode evidence — requires an operator
+  controlled Redis failover setup beyond the local single-node contract above.

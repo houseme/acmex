@@ -47,7 +47,7 @@ evidence.
 `RUN_PEBBLE_E2E=1` and a prepared Pebble/challenge-test-server environment it
 exits with code 77 and prints a skip reason. A skipped run is not a release pass.
 
-**Update (2026-09-02)**: the Pebble gate is now a real harness. The script
+**Update (2026-09-02; refreshed 2026-09-07)**: the Pebble gate is now a real harness. The script
 brings up pebble + challtestsrv via `scripts/docker-compose.pebble.yml` (pebble
 resolves through challtestsrv's DNS) and runs
 `tests/live_pebble_e2e.rs` — the full production executor set
@@ -91,6 +91,8 @@ pre-order capability gate rejected every IP order for real CAs). Two
 consecutive 9/9 greens recorded 2026-09-07 UTC; see `VALIDATION_EVIDENCE.md`
 (2026-09-07/08 section). These are local Pebble (RFC 8738) evidence only —
 external CA IP validation is still not a release pass.
+
+multiple green prepared-environment runs, including restart windows and failure rollback, so the Pebble L4 release evidence now counts as passed. Real public CA, DNS provider and remote sink evidence remains outside Pebble's scope.
 
 Successful runs archive `environment.txt`, `cargo-test-live-pebble-e2e.log`,
 and `compose.log` under `target/pebble-e2e/<timestamp>/`; CI uploads the

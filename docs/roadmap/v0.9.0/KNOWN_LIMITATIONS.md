@@ -14,14 +14,18 @@ tests into implied success.
   because recent Pebble validates every offered challenge, including draft
   types AcmeX does not implement; DNS-01 evidence additionally includes a
   live VA run without that override.
-- Let's Encrypt staging is not yet validated.
+- Let's Encrypt staging has a non-mutating directory smoke (2026-09-07,
+  directory/ARI reachable), but issuance, renewal, ARI `replaces`, profile,
+  EAB CA and external-CA IP identifier behavior are not yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.
 - Kubernetes Secret and Vault KV v2 sinks have live L5 contract evidence
   (2026-09-06 native cluster/dev server; 2026-09-07 containerized
   reproducibility), and the Redis aggregate repository contract suite ran
   against a live Redis server on 2026-09-07 with a documented failover scope
-  (`LIVE_INFRASTRUCTURE_EVIDENCE.md`). The remote HTTP agent sink now has a
+  (`LIVE_INFRASTRUCTURE_EVIDENCE.md`); Redis managed failover and durability
+  behavior remain operator-environment evidence, not a property of the local
+  single-node run. The remote HTTP agent sink now has a
   real-subprocess live run against the reference agent (`tests/agent_live.rs`,
   2026-09-07); a production agent with persistent/multi-instance state has
   not been exercised.

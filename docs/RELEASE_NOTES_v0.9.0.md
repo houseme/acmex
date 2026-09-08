@@ -12,7 +12,8 @@ plane: intent, lineage, version, operation, workflow step, challenge lease,
 repository, renewal and deployment are represented as explicit domain objects.
 
 The code for this line has been merged to `main`, but the version is not a
-release pass. The required E2E and external evidence rows remain unchecked.
+release pass until the remaining external CA, DNS and remote-agent evidence is
+attached.
 
 ## User-Visible Changes
 
@@ -37,15 +38,20 @@ release pass. The required E2E and external evidence rows remain unchecked.
 - Keep real DNS, EAB, webhook and sink credentials behind SecretRef values such
   as `env:NAME` or `file:path`.
 
+## Recorded Release Evidence
+
+- Pebble HTTP-01, DNS-01 and TLS-ALPN-01 now have green L4 evidence, including
+  renewal, revocation, restart recovery with real T04/T05/T10 executors, File
+  sink activation and required failure rollback.
+- Redis repository single-node contract, reference HTTP agent child-process
+  contract, Kubernetes/Vault scope evidence and dual-process fencing evidence
+  are recorded under the roadmap validation artifacts.
+
 ## Not Yet Release-Validated
 
-- Pebble HTTP-01, DNS-01 and TLS-ALPN-01 evidence has not been executed green.
-- Restart recovery with real T04/T05/T10 executors has not been executed green.
-- File sink stage/activate/health/rollback and required failure rollback need
-  attached release artifacts.
 - IPv4/IPv6 external CA behavior, Let's Encrypt staging, live DNS providers,
-  Redis failover scope and Kubernetes/Vault/agent sink scope are not yet
-  validated as release evidence.
+  external remote HTTP agent live execution and Redis managed failover behavior
+  are not yet validated as release evidence.
 
 ## Validation Required Before Tagging
 

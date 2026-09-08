@@ -8,7 +8,7 @@ provider has live external validation.
 | `default` | feature set | `cargo test` and `cargo check` | not required |
 | `aws-lc-rs` | crypto backend | default build | not required |
 | `ring-crypto` | crypto backend | `cargo check --all-features` | not required |
-| `redis` | repository/storage backend | `cargo check --all-features` | not yet validated as live Redis E2E |
+| `redis` | repository/storage backend | `cargo check --all-features`; `ACMEX_TEST_REDIS_URL=... cargo test --features redis --test repository_redis_contract -- --ignored`; live contract `cargo test --features redis --test repository_redis_live -- --ignored` | local Redis repository contract and live contract passed 2026-09-07 (dual-engine reproducibility); HA/failover mode not yet validated |
 | `kms-aws` | key provider backend | `cargo test --features kms-aws --test kms_key_provider_contract` | contract-tested against a mock KMS endpoint; live AWS KMS/IAM not yet validated |
 | `google-ca` | CA integration | `cargo check --all-features` | not yet validated against Google staging |
 | `zerossl-ca` | CA integration | `cargo check --all-features` | not yet validated against ZeroSSL staging |
