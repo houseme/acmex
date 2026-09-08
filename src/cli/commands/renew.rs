@@ -21,7 +21,12 @@ pub async fn handle_renew(domains: Vec<String>, force: bool, storage_path: Strin
     let config = crate::config::Config {
         repository: RepositorySettings {
             backend: "file".to_string(),
-            file: Some(FileRepositoryConfig { path: storage_path }),
+            file: Some(FileRepositoryConfig {
+                path: storage_path,
+                // Durability defaults (`always`) keep the CLI behavior
+                // unchanged; a config file would carry explicit overrides.
+                ..FileRepositoryConfig::default()
+            }),
             ..RepositorySettings::default()
         },
         ..crate::config::Config::default()

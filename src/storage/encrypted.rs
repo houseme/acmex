@@ -59,7 +59,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
-            use rand::RngCore;
+            use rand::Rng;
             use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
             let unbound = UnboundKey::new(&AES_256_GCM, &self.key)
@@ -67,7 +67,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
             let key = LessSafeKey::new(unbound);
 
             let mut nonce_bytes = [0u8; 12];
-            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            rand::rng().fill_bytes(&mut nonce_bytes);
             let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
             let mut in_out = plaintext.to_vec();
@@ -120,6 +120,7 @@ impl<B: StorageBackend> EncryptedStorage<B> {
 
         #[cfg(all(not(feature = "aws-lc-rs"), feature = "ring-crypto"))]
         {
+            use rand::Rng;
             use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
             let (nonce_bytes, data) = ciphertext.split_at(12);

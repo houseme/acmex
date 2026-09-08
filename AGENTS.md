@@ -1,25 +1,50 @@
-# AcmeX Agent Guide (v0.7.0)
-
-This guide provides a comprehensive overview of the AcmeX project architecture, patterns, and development standards for AI agents and contributors.
+# AcmeX Agent Guide (v0.10.0 line)
 
 ## 🏗 Architecture Overview
 
-AcmeX is designed as a modular, enterprise-grade ACME v2 (RFC 8555) client and server ecosystem.
+AcmeX is a modular ACME v2 (RFC 8555) client and **certificate lifecycle
+control plane**: durable workflows turn `CertificateIntent`s into issued,
+verified, deployed and ARI-renewed certificates.
 
-### 1. Layered Design
-- **Application Layer (`src/cli/`, `src/server/`)**: Entry points for CLI users and REST API consumers.
-- **Orchestration Layer (`src/orchestrator/`)**: High-level workflow management (Provisioning, Validation, Renewal). Uses the `Orchestrator` trait for state-machine-like execution.
-- **Scheduling Layer (`src/scheduler/`)**: Manages task execution, priorities, and concurrency limits using semaphores.
-- **Protocol Layer (`src/protocol/`)**: Low-level ACME implementation (JWS, Nonce management, Directory, Objects).
-- **Storage Tier (`src/storage/`)**: Pluggable backends (File, Redis, Memory, Encrypted) with migration support.
-- **Certificate Tier (`src/certificate/`)**: Chain verification, CSR generation, and real-time OCSP status checking.
+### 1. Two API Generations (both live)
+- **New control plane (preferred)**: `src/domain/` (strong-typed model,
+  zero infra deps) → `src/application/` (CQRS service: intents, operations)
+  → `src/workflow/` (17-step durable engine: crash-safe, compensating,
+  lease-fenced) → `src/ca_backend/` (ACME session: EAB, ARI, key rollover,
+  ES256/RS256/EdDSA) + `src/challenge/` (presenter ports: dns-01,
+  dns-account-01, http-01, tls-alpn-01) + `src/key/` (software + AWS KMS
+  providers, external CSR) + `src/delivery/` (file, k8s secret, vault kv,
+  http agent sinks).
+- **Legacy client facade (frozen, sunset 2027-03-31)**: `src/client.rs`
+  (`AcmeClient`), `src/protocol/` (JWS/JWK/nonce primitives shared by both
+  paths), `src/orchestrator/`, `src/scheduler/`, `src/storage/`. Legacy
+  `/api` routes shrink only; new capability goes to `/api/v1`.
 
-### 2. Core Components
-- **`AcmeClient`**: The primary interface for interacting with ACME servers. It is `Clone`-friendly and thread-safe.
-- **`NoncePool`**: Optimized nonce management with pre-fetching and caching to minimize round-trips.
-- **`Orchestrator` Trait**: Defines `execute()`, `status()`, and `cancel()` for long-running tasks.
-- **`AppState`**: Shared state in the Axum server, containing the task tracker, metrics, and client instances.
+### 2. Persistence & Messaging
+- **`src/repository/`**: 9 aggregates over memory/file/redis backends with
+  atomic CAS, fencing-token leases, and a transactional **outbox**. Traits
+  are frozen; EntityStore is `pub(crate)`.
+- **`src/notifications/`**: webhook + SMTP email delivery driven by the
+  durable outbox consumer (HMAC-signed, replay-window checked).
 
+### 3. Entrypoints
+- **`src/cli/`**: `init` / `obtain --wait` / `daemon` (renewal controller +
+  outbox consumer) / `serve` (REST + worker) / account & order & cert tools.
+- **`src/server/`**: Axum REST (`/api/v1` + legacy `/api`), workflow worker
+  assembly (`server/worker.rs` — the shared engine assembly for CLI and
+  library consumers), API-key auth, health/metrics endpoints.
+
+## 💎 Critical Design Patterns
+
+### 1. Durable Operations (202 Accepted + Resume)
+1. **Request**: `POST /api/v1/certificate-intents` (mandatory
+   `Idempotency-Key`), then `:issue` returns `202 Accepted` + `Location`
+   pointing at the operation.
+2. **Drive**: workflow workers lease operations and advance the 17-step
+   spine; every step persists before/after its external side effects
+   (crash = resume, never re-order).
+3. **Poll**: `GET /api/v1/operations/{id}`; terminal states are stable
+   enums with classified errors (`retryable` vs `terminal`).
 ## 💎 Critical Design Patterns
 
 ### 1. Asynchronous Task Execution (Post-Task-Polling)
@@ -63,7 +88,20 @@ AcmeX uses extensive feature flags to keep the binary lean:
 - **Safety**: Use `zeroize` for sensitive data in memory.
 - **Testing**: Write unit tests for logic and integration tests (in `tests/`) for ACME flows using mock servers.
 
-## 🔗 Reference Documentation
-- `docs/ARCHITECTURE.md`: Detailed system design.
-- `docs/V0.7.0_PLANNING.md`: Current roadmap and feature status.
-- `docs/OBSERVABILITY.md`: Metrics and logging configuration.
+## 🔗 Reference Documentation (current facts only)
+- `docs/PROJECT_ANALYSIS_AND_PLAN_ZH.md`: full capability matrix and gap list.
+- `docs/roadmap/v0.10.0/README.md`: the active task/verification roadmap.
+- `docs/roadmap/v0.9.0/`: implementation audit, FEATURE_MATRIX,
+  KNOWN_LIMITATIONS (external-evidence debts).
+- `docs/DOCUMENTATION_INDEX.md`: what is current vs historical archive.
+
+## ✍️ Non-Negotiables (project red lines)
+- No simulated success: never sleep-and-return-ok, never hardcode responses
+  ("Nothing pretends to succeed").
+- Secrets never appear in Debug/log/error output; credentials travel as
+  SecretRefs (`env:`/`file:`/`vault:`).
+- New public fields must be `#[serde(default)]` (persisted records must
+  deserialize across upgrades).
+- Time via `jiff`; errors classified (retryable vs terminal); CAS loops for
+  every state transition; locks never held across `.await`.
+- A skipped external test is not a pass (exit 77 convention).

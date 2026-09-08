@@ -82,6 +82,13 @@ aws-sdk-route53 = { version = "1.121.0", optional = true, default-features = fal
   "rt-tokio",
 ] }
 
+# AWS KMS Key Provider Support
+aws-sdk-kms = { version = "1.117.0", optional = true, default-features = false, features = [
+  "behavior-version-latest",
+  "default-https-client",
+  "rt-tokio",
+] }
+
 # Storage Backends
 redis = { version = "1.6.0", features = ["tokio-comp", "connection-manager", "aio"], optional = true }
 
@@ -95,6 +102,7 @@ zerossl-ca = []
 
 dns-cloudflare = []
 dns-route53 = ["dep:aws-config", "dep:aws-sdk-route53"]
+kms-aws = ["dep:aws-config", "dep:aws-sdk-kms"]
 dns-digitalocean = []
 dns-linode = []
 dns-azure = []
@@ -105,10 +113,16 @@ dns-tencent = []
 dns-huawei = []
 dns-cloudns = []
 
-metrics = []
-cli = []
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[[example]]
+name = "dns_01_challenge"
+required-features = ["dns-cloudflare"]
 
 [dev-dependencies]
 mockito = "1.7.2"
+hickory-resolver = { version = "0.26.1", features = ["serde"] }
 hex = "0.4.3"
 tower = { version = "0.5.3", features = ["util"] }

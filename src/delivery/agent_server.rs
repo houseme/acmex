@@ -184,9 +184,6 @@ struct StagedVersion {
     /// pointer, matching the fake-agent contract.
     #[allow(dead_code)]
     leaf_sha256: String,
-    /// Active version observed when this version was first staged. Rollback of
-    /// this version restores the pointer to this value when possible.
-    previous_active_ref: Option<String>,
     #[allow(dead_code)] // recorded for operator introspection of the reference agent
     lineage_id: Option<String>,
     #[allow(dead_code)] // recorded for operator introspection of the reference agent
@@ -369,7 +366,12 @@ async fn require_bearer_token(
     if authorized {
         next.run(request).await
     } else {
-        agent_error(StatusCode::UNAUTHORIZED, "unauthorized")
+        let mut response = agent_error(StatusCode::UNAUTHORIZED, "unauthorized");
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            header::HeaderValue::from_static("Bearer"),
+        );
+        response
     }
 }
 
@@ -408,18 +410,21 @@ async fn stage_handler(
     let response = {
         let mut shared = state.inner.lock().expect("agent state lock poisoned");
         let previous_active = shared.active.clone();
-        shared.resource_version += 1;
         // Idempotent per version: the first stage wins, re-staging the same
-        // version keeps the original fingerprint and never changes active.
-        shared
-            .staged
-            .entry(version_id.clone())
-            .or_insert_with(|| StagedVersion {
-                leaf_sha256: leaf_sha256.clone(),
-                previous_active_ref: previous_active.clone(),
-                lineage_id: payload.lineage_id.clone(),
-                target_id: payload.target_id.clone(),
-            });
+        // version keeps the original fingerprint, never changes active —
+        // and is a no-op, so the resource version does not advance either.
+        let newly_staged = !shared.staged.contains_key(&version_id);
+        if newly_staged {
+            shared.resource_version += 1;
+            shared.staged.insert(
+                version_id.clone(),
+                StagedVersion {
+                    leaf_sha256,
+                    lineage_id: payload.lineage_id.clone(),
+                    target_id: payload.target_id.clone(),
+                },
+            );
+        }
         AgentStageResponse {
             staged_ref: format!("agent://{version_id}"),
             previous_active_ref: previous_active,
@@ -482,12 +487,11 @@ async fn rollback_handler(
     Path(version_id): Path<String>,
 ) -> Response {
     let mut shared = state.inner.lock().expect("agent state lock poisoned");
-    let Some(staged) = shared.staged.get(&version_id) else {
+    if !shared.staged.contains_key(&version_id) {
         return agent_error(StatusCode::NOT_FOUND, "version not staged");
-    };
-    let previous_active_ref = staged.previous_active_ref.clone();
+    }
     if shared.active.as_deref() == Some(version_id.as_str()) {
-        shared.active = previous_active_ref.filter(|previous| shared.staged.contains_key(previous));
+        shared.active = None;
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -703,35 +707,24 @@ mod tests {
         assert_eq!(health["healthy"], false);
         assert_eq!(health["detail"], "route exists but is not active");
 
+        // Stage v2, then activate v1: exactly one active.
+        authed(&client, Method::POST, format!("{base}/stages"))
+            .json(&serde_json::json!({"version_id": "v2", "leaf_sha256": "bb22"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
         let activated = authed(&client, Method::POST, format!("{base}/stages/v1/activate"))
             .send()
             .await
             .unwrap();
         assert_eq!(activated.status(), StatusCode::NO_CONTENT);
         assert_eq!(state.active_version().as_deref(), Some("v1"));
-
-        // Stage v2 after v1 is active: previous_active_ref records v1, but
-        // staging alone still leaves exactly one active pointer.
-        let staged_v2 = authed(&client, Method::POST, format!("{base}/stages"))
-            .json(&serde_json::json!({"version_id": "v2", "leaf_sha256": "bb22"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(staged_v2.status(), StatusCode::CREATED);
-        let staged_v2_body: serde_json::Value = staged_v2.json().await.unwrap();
-        assert_eq!(staged_v2_body["previous_active_ref"], "v1");
-        assert_eq!(state.active_version().as_deref(), Some("v1"));
         assert_eq!(state.staged_versions().len(), 2);
 
-        let activated_v2 = authed(&client, Method::POST, format!("{base}/stages/v2/activate"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(activated_v2.status(), StatusCode::NO_CONTENT);
-        assert_eq!(state.active_version().as_deref(), Some("v2"));
-
-        // The newly activated v2 is healthy; v1 is staged but inactive.
-        for (version, expected) in [("v1", false), ("v2", true)] {
+        // The staged-but-unactivated v2 is unhealthy; v1 stays healthy.
+        for (version, expected) in [("v1", true), ("v2", false)] {
             let health: serde_json::Value = authed(
                 &client,
                 Method::GET,
@@ -755,13 +748,13 @@ mod tests {
             .unwrap();
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
 
-        // Rollback of v2 restores the previous active v1.
-        let rolled = authed(&client, Method::POST, format!("{base}/stages/v2/rollback"))
+        // Rollback deactivates; health for the unknown version is 404.
+        let rolled = authed(&client, Method::POST, format!("{base}/stages/v1/rollback"))
             .send()
             .await
             .unwrap();
         assert_eq!(rolled.status(), StatusCode::NO_CONTENT);
-        assert_eq!(state.active_version().as_deref(), Some("v1"));
+        assert_eq!(state.active_version(), None);
 
         // Cleanup: 204 once, then 404 forever (idempotent AlreadyClean).
         let cleaned = authed(&client, Method::DELETE, format!("{base}/stages/v1"))

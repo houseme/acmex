@@ -14,7 +14,11 @@ pub struct Jwk {
     pub kty: String,
 
     /// Use (typically "sig" for signing)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "use",
+        skip_serializing_if = "Option::is_none",
+        alias = "use_"
+    )]
     pub use_: Option<String>,
 
     /// Key operations
@@ -67,6 +71,63 @@ impl Jwk {
             use_: Some("sig".to_string()),
             key_ops: None,
             params,
+        }
+    }
+
+    /// Builds the public JWK of an arbitrary supported account key
+    /// (Ed25519, ECDSA P-256/P-384/P-521 or RSA), deriving every parameter
+    /// from the key itself. This is the single JWK derivation point for all
+    /// signing paths — callers must not hardcode a key type.
+    ///
+    /// * Ed25519: `kty=OKP, crv=Ed25519, x=<raw 32-byte public key>`
+    /// * ECDSA: `kty=EC, crv=P-256|P-384|P-521, x/y=<coordinates>` split
+    ///   from the SEC1 uncompressed point exported by the key
+    /// * RSA: `kty=RSA, n=<modulus>, e=<exponent>` parsed from the DER
+    ///   `RSAPublicKey` the key exports (RFC 7518 §6.3 minimal octets)
+    pub fn for_key_pair(key: &rcgen::KeyPair) -> Result<Self> {
+        use base64::Engine;
+
+        let key_type = crate::crypto::keypair::KeyType::for_key_pair(key)?;
+        let public_key = key.public_key_raw();
+        if let Some(crv) = key_type.json_web_key_curve() {
+            // SEC1 uncompressed point: `04 || X || Y`, coordinates of equal,
+            // curve-fixed length (RFC 7518 §6.2.1).
+            if public_key.is_empty() || public_key[0] != 0x04 {
+                return Err(crate::error::AcmeError::crypto(
+                    "EC public key is not an uncompressed SEC1 point",
+                ));
+            }
+            let coordinate_octets = key_type
+                .ecdsa_coordinate_octets()
+                .ok_or_else(|| crate::error::AcmeError::crypto("unsupported EC curve"))?;
+            if public_key.len() != 1 + 2 * coordinate_octets {
+                return Err(crate::error::AcmeError::crypto(format!(
+                    "EC public key is {} bytes, expected {} for {crv}",
+                    public_key.len(),
+                    1 + 2 * coordinate_octets
+                )));
+            }
+            let (x, y) = public_key[1..].split_at(coordinate_octets);
+            return Ok(Self::new_ec(
+                crv,
+                URL_SAFE_NO_PAD.encode(x),
+                URL_SAFE_NO_PAD.encode(y),
+            ));
+        }
+        match key_type {
+            crate::crypto::keypair::KeyType::Ed25519 => {
+                Ok(Self::new_ed25519(URL_SAFE_NO_PAD.encode(public_key)))
+            }
+            crate::crypto::keypair::KeyType::Rsa2048 | crate::crypto::keypair::KeyType::Rsa4096 => {
+                let (n, e) = crate::crypto::keypair::der::parse_rsa_public_key(public_key)?;
+                Ok(Self::new_rsa(
+                    URL_SAFE_NO_PAD.encode(n),
+                    URL_SAFE_NO_PAD.encode(e),
+                ))
+            }
+            _ => Err(crate::error::AcmeError::crypto(
+                "unsupported account key: cannot build a JWK for this key type",
+            )),
         }
     }
 
@@ -246,5 +307,110 @@ mod tests {
         let value = jwk.to_value();
         assert!(value.is_object());
         assert_eq!(value.get("kty").unwrap().as_str().unwrap(), "OKP");
+    }
+
+    /// RFC 8037 Appendix A.3: the canonical thumbprint of this well-known
+    /// Ed25519 key. Guards the compatibility red line: the Ed25519
+    /// thumbprint — the key authorization input — must never change.
+    #[test]
+    fn thumbprint_matches_the_rfc_8037_ed25519_vector() {
+        let jwk = Jwk::new_ed25519("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo");
+        assert_eq!(
+            jwk.thumbprint_sha256().unwrap(),
+            "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"
+        );
+    }
+
+    /// EC thumbprint, verified against a hand-built RFC 7638 required-member
+    /// string (keys in lexicographic order: crv, kty, x, y).
+    #[test]
+    fn thumbprint_matches_hand_built_ec_required_members() {
+        let jwk = Jwk::new_ec(
+            "P-256",
+            "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+            "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM",
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(br#"{"crv":"P-256","kty":"EC","x":"MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4","y":"4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM"}"#);
+        let expected = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        assert_eq!(jwk.thumbprint_sha256().unwrap(), expected);
+    }
+
+    #[test]
+    fn for_key_pair_builds_es256_jwk_from_generated_key() {
+        use crate::crypto::keypair::{KeyPairGenerator, KeyType};
+        use base64::Engine;
+
+        let key = KeyPairGenerator::new(KeyType::EcdsaP256)
+            .generate()
+            .unwrap();
+        let jwk = Jwk::for_key_pair(&key).unwrap();
+        assert_eq!(jwk.kty, "EC");
+        assert_eq!(jwk.params.get("crv").unwrap(), "P-256");
+        let x = URL_SAFE_NO_PAD
+            .decode(jwk.params.get("x").unwrap().as_str().unwrap())
+            .unwrap();
+        let y = URL_SAFE_NO_PAD
+            .decode(jwk.params.get("y").unwrap().as_str().unwrap())
+            .unwrap();
+        assert_eq!(x.len(), 32);
+        assert_eq!(y.len(), 32);
+        // Round trip: the point reconstructs from the JWK coordinates.
+        let point = key.public_key_raw();
+        assert_eq!(point[0], 0x04);
+        assert_eq!(&point[1..33], x.as_slice());
+        assert_eq!(&point[33..], y.as_slice());
+        assert!(!jwk.thumbprint_sha256().unwrap().is_empty());
+    }
+
+    #[test]
+    fn for_key_pair_builds_p384_and_p521_jwks() {
+        use crate::crypto::keypair::{KeyPairGenerator, KeyType};
+
+        for (key_type, crv, coordinate_octets) in [
+            (KeyType::EcdsaP384, "P-384", 48),
+            (KeyType::EcdsaP521, "P-521", 66),
+        ] {
+            let key = KeyPairGenerator::new(key_type).generate().unwrap();
+            let jwk = Jwk::for_key_pair(&key).unwrap();
+            assert_eq!(jwk.kty, "EC");
+            assert_eq!(jwk.params.get("crv").unwrap(), crv);
+            let x = URL_SAFE_NO_PAD
+                .decode(jwk.params.get("x").unwrap().as_str().unwrap())
+                .unwrap();
+            assert_eq!(x.len(), coordinate_octets, "{crv} x coordinate");
+        }
+    }
+
+    #[test]
+    fn for_key_pair_builds_rsa_jwk_with_minimal_octets() {
+        use crate::crypto::keypair::{KeyPairGenerator, KeyType};
+        use base64::Engine;
+
+        let key = KeyPairGenerator::new(KeyType::Rsa2048).generate().unwrap();
+        let jwk = Jwk::for_key_pair(&key).unwrap();
+        assert_eq!(jwk.kty, "RSA");
+        let n = URL_SAFE_NO_PAD
+            .decode(jwk.params.get("n").unwrap().as_str().unwrap())
+            .unwrap();
+        let e = URL_SAFE_NO_PAD
+            .decode(jwk.params.get("e").unwrap().as_str().unwrap())
+            .unwrap();
+        assert_eq!(n.len(), 256, "modulus without the DER sign octet");
+        assert_eq!(e, vec![0x01, 0x00, 0x01], "exponent 65537, minimal octets");
+        assert!(!jwk.thumbprint_sha256().unwrap().is_empty());
+    }
+
+    #[test]
+    fn for_key_pair_keeps_ed25519_shape_unchanged() {
+        use crate::crypto::keypair::KeyPairGenerator;
+        use base64::Engine;
+
+        let key = KeyPairGenerator::ed25519().generate().unwrap();
+        let jwk = Jwk::for_key_pair(&key).unwrap();
+        let expected = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(key.public_key_raw()));
+        assert_eq!(jwk, expected);
+        assert_eq!(jwk.kty, "OKP");
+        assert_eq!(jwk.params.get("crv").unwrap(), "Ed25519");
     }
 }

@@ -131,6 +131,18 @@ pub struct CreateCertificateIntent {
     /// Delivery targets.
     #[serde(default)]
     pub delivery_targets: Vec<crate::domain::DeliveryTarget>,
+    /// External CSR material (PEM-encoded PKCS#10 `CERTIFICATE REQUEST`),
+    /// supplied by the upstream key holder.
+    ///
+    /// Required when `key_policy.mode` is
+    /// [`KeyManagementMode::ExternalCsr`](crate::domain::KeyManagementMode)
+    /// and forbidden under `Managed` — both violations are rejected as
+    /// invalid input (HTTP 400 semantics). AcmeX never derives or stores a
+    /// private key from this material; the CSR is forwarded to the issuance
+    /// operation as its initialization payload and validated (signature +
+    /// exact identifier match) by the `CreateCsr` workflow step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_csr: Option<String>,
     /// Caller-provided idempotency key.
     pub idempotency_key: String,
 }
@@ -226,6 +238,17 @@ pub struct IssueCertificate {
     pub context: ActorContext,
     /// Intent to issue.
     pub intent_id: IntentId,
+    /// External CSR material (PEM `CERTIFICATE REQUEST`) for intents whose
+    /// `key_policy.mode` is external-CSR.
+    ///
+    /// Required for external-CSR intents (the private key lives outside
+    /// AcmeX, so every issuance must be proven by fresh CSR material) and
+    /// forbidden for `Managed` intents; both violations are invalid input.
+    /// The service forwards the material into the operation's `CreateCsr`
+    /// step as its initialization payload; it is never written to the intent
+    /// or any secret store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_csr: Option<String>,
     /// Caller-provided idempotency key.
     pub idempotency_key: String,
 }

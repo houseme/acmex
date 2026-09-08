@@ -182,6 +182,23 @@ pub enum ChallengeType {
     Dns01,
     /// Validation via a specific TLS extension.
     TlsAlpn01,
+    /// Validation via a DNS TXT record bound to the ACME account URL
+    /// (draft-ietf-acme-dns-account-01). The TXT value matches DNS-01
+    /// (`base64url(SHA256(key authorization))`), but the record lives at
+    /// `_acme-challenge_<base32(SHA256(account URL))[..10]>.<domain>` so
+    /// multiple accounts validating the same domain never clobber each
+    /// other's records.
+    DnsAccount01,
+    /// Validation via a *persistent* DNS TXT record
+    /// (draft-ietf-acme-dns-persist-01). The record lives at
+    /// `_validation-persist.<domain>` (never `_acme-challenge`) and its value
+    /// is `<issuer-domain-name>;accounturi=<account-url>[;persistUntil=<ts>]`.
+    /// It is designed to survive across issuances so the CA can skip
+    /// re-validating a domain it has already seen — which is why cleanup
+    /// never deletes it (see the dns-persist presenter documentation). The
+    /// challenge object carries no `token`; instead it advertises
+    /// `issuer-domain-names` and `accounturi`.
+    DnsPersist01,
 }
 
 impl ChallengeType {
@@ -191,6 +208,8 @@ impl ChallengeType {
             ChallengeType::Http01 => "http-01",
             ChallengeType::Dns01 => "dns-01",
             ChallengeType::TlsAlpn01 => "tls-alpn-01",
+            ChallengeType::DnsAccount01 => "dns-account-01",
+            ChallengeType::DnsPersist01 => "dns-persist-01",
         }
     }
 }
@@ -216,6 +235,8 @@ impl std::str::FromStr for ChallengeType {
             "http-01" => Ok(ChallengeType::Http01),
             "dns-01" => Ok(ChallengeType::Dns01),
             "tls-alpn-01" => Ok(ChallengeType::TlsAlpn01),
+            "dns-account-01" => Ok(ChallengeType::DnsAccount01),
+            "dns-persist-01" => Ok(ChallengeType::DnsPersist01),
             _ => Err(format!("Unknown challenge type: {}", s)),
         }
     }
@@ -355,6 +376,36 @@ mod tests {
     fn test_challenge_type() {
         assert_eq!(ChallengeType::Http01.as_str(), "http-01");
         assert_eq!("dns-01".parse::<ChallengeType>(), Ok(ChallengeType::Dns01));
+    }
+
+    #[test]
+    fn test_dns_account_01_challenge_type() {
+        assert_eq!(ChallengeType::DnsAccount01.as_str(), "dns-account-01");
+        assert_eq!(
+            "dns-account-01".parse::<ChallengeType>(),
+            Ok(ChallengeType::DnsAccount01)
+        );
+        assert_eq!(ChallengeType::DnsAccount01.to_string(), "dns-account-01");
+        // Wire round trip via serde.
+        let json = serde_json::to_string(&ChallengeType::DnsAccount01).unwrap();
+        assert_eq!(json, "\"dns-account-01\"");
+        let back: ChallengeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ChallengeType::DnsAccount01);
+    }
+
+    #[test]
+    fn test_dns_persist_01_challenge_type() {
+        assert_eq!(ChallengeType::DnsPersist01.as_str(), "dns-persist-01");
+        assert_eq!(
+            "dns-persist-01".parse::<ChallengeType>(),
+            Ok(ChallengeType::DnsPersist01)
+        );
+        assert_eq!(ChallengeType::DnsPersist01.to_string(), "dns-persist-01");
+        // Wire round trip via serde.
+        let json = serde_json::to_string(&ChallengeType::DnsPersist01).unwrap();
+        assert_eq!(json, "\"dns-persist-01\"");
+        let back: ChallengeType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ChallengeType::DnsPersist01);
     }
 
     #[test]

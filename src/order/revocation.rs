@@ -51,14 +51,15 @@ impl<'a> CertificateRevocation<'a> {
             payload["reason"] = json!(reason.as_u8());
         }
 
+        let signer = self.account_manager.get_signer();
         let header = json!({
-            "alg": "EdDSA",
+            "alg": signer.jwa_algorithm()?,
             "kid": self.account_id,
             "nonce": nonce,
             "url": revoke_url,
         });
 
-        let jws = self.account_manager.signer.sign(&header, &payload)?;
+        let jws = signer.sign(&header, &payload)?;
 
         let response = self
             .account_manager

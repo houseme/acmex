@@ -105,6 +105,13 @@ namespace = "default"
 
 [repository.file]
 path = ".acmex/repository"
+# Durability policy for repository writes. "always" (default) fsyncs every
+# write before it becomes visible — crash-safe per write. "interval" is an
+# explicit opt-in group commit (Redis AOF `everysec` style): faster, but a
+# crash may lose up to one interval of acknowledged writes. Account-key
+# secrets under .acmex/secrets are always fsynced immediately regardless.
+# fsync = "always"
+# fsync_interval_ms = 100
 
 # Legacy `cert:*` bundles are imported by switching this to "dry-run" or
 # "execute" once (see docs/roadmap/v0.9.0/T02_REPOSITORY_AND_MIGRATION.md).

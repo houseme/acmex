@@ -27,12 +27,39 @@ impl ChallengeSet {
         Self(items.into_iter().collect())
     }
 
-    /// All challenge types this crate understands.
+    /// The challenge types AcmeX plans **by default**.
+    ///
+    /// This is deliberately *not* "everything the crate understands":
+    /// [`ChallengeType::DnsPersist01`] publishes a DNS record that is
+    /// designed to outlive the issuance (cleanup never deletes it), so it is
+    /// excluded here and only planned when the caller's validation policy
+    /// explicitly allows it. Use [`ChallengeSet::understood`] for the
+    /// all-inclusive capacity view.
     pub fn all() -> Self {
         Self::new([
             ChallengeType::Http01,
             ChallengeType::Dns01,
             ChallengeType::TlsAlpn01,
+            ChallengeType::DnsAccount01,
+        ])
+    }
+
+    /// Every challenge type this crate understands, including the opt-in
+    /// persistent [`ChallengeType::DnsPersist01`].
+    ///
+    /// This is a *capacity* set ("what a deployment may offer or plan when
+    /// something explicitly asks for it"), used for the application
+    /// service's offered-challenges default and the compatibility matrix.
+    /// It is never used as the empty-policy planning expansion — that is
+    /// [`ChallengeSet::all`], so persistent validation records are never a
+    /// default side effect.
+    pub fn understood() -> Self {
+        Self::new([
+            ChallengeType::Http01,
+            ChallengeType::Dns01,
+            ChallengeType::TlsAlpn01,
+            ChallengeType::DnsAccount01,
+            ChallengeType::DnsPersist01,
         ])
     }
 
@@ -63,7 +90,8 @@ impl ChallengeSet {
         self.0.insert(item);
     }
 
-    /// Parses from wire strings (`http-01`, `dns-01`, `tls-alpn-01`).
+    /// Parses from wire strings (`http-01`, `dns-01`, `tls-alpn-01`,
+    /// `dns-account-01`, `dns-persist-01`).
     pub fn parse<I, S>(items: I) -> Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -133,6 +161,19 @@ pub struct ValidationPolicy {
     /// Propagation observation settings.
     #[serde(default)]
     pub propagation: PropagationPolicy,
+    /// Prepare **every** CA-offered challenge that the policy allows and a
+    /// registered presenter can serve, instead of only the single
+    /// preference-selected one (`prepare-all-supported` mode).
+    ///
+    /// Off by default. This exists for CAs that validate *all* offered
+    /// challenges in parallel (Pebble does, and the upcoming ACME
+    /// profiles world encourages it): satisfying only the acked challenge
+    /// is not enough there — every offered challenge AcmeX can support must
+    /// be resolvable, or the authorization is invalidated out from under
+    /// the flow. All prepared sessions are acknowledged in plan-preference
+    /// order. Single-prepare behavior is the strict subset of this mode.
+    #[serde(default)]
+    pub prepare_all_supported: bool,
 }
 
 /// DNS propagation observation policy.
@@ -243,6 +284,41 @@ impl Default for KeyPolicy {
     }
 }
 
+impl KeyPolicy {
+    /// Validates the key-policy invariants that hold regardless of where the
+    /// policy is embedded (intent creation, renewal, imports).
+    ///
+    /// * external-CSR keys are never exportable (AcmeX does not hold them, so
+    ///   there is nothing to export);
+    /// * external-CSR intents cannot request per-renewal key rotation: AcmeX
+    ///   never holds the private key, so a fresh key always means a fresh
+    ///   intent with fresh CSR material.
+    ///
+    /// The `algorithm` field is informational under
+    /// [`KeyManagementMode::ExternalCsr`]: the real key is whatever the
+    /// supplied CSR carries, so it is never enforced against managed
+    /// generation.
+    pub fn validate(&self) -> Result<()> {
+        if self.mode != KeyManagementMode::ExternalCsr {
+            return Ok(());
+        }
+        if self.exportable {
+            return Err(AcmeError::InvalidInput(
+                "external-CSR keys are never exportable".to_string(),
+            ));
+        }
+        if self.rotation == KeyRotationPolicy::RotateEachRenewal {
+            return Err(AcmeError::InvalidInput(
+                "external-CSR intents cannot rotate keys per renewal; AcmeX never holds \
+                 the private key, so key rotation requires a new intent with fresh CSR \
+                 material"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Supported certificate key algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,6 +327,8 @@ pub enum KeyAlgorithm {
     EcP256,
     /// ECDSA P-384.
     EcP384,
+    /// ECDSA P-521.
+    EcP521,
     /// RSA 2048.
     Rsa2048,
     /// RSA 4096.
@@ -389,15 +467,34 @@ pub enum DeliveryRequirement {
 
 /// Challenge types compatible with an identifier, per the target matrix:
 ///
-/// | Identifier | HTTP-01 | DNS-01 | TLS-ALPN-01 |
-/// |---|---:|---:|---:|
-/// | DNS | ✓ | ✓ | ✓ |
-/// | Wildcard DNS | ✗ | ✓ | ✗ |
-/// | IPv4 / IPv6 | ✓ | ✗ | ✓ |
+/// | Identifier | HTTP-01 | DNS-01 | TLS-ALPN-01 | DNS-ACCOUNT-01 | DNS-PERSIST-01 |
+/// |---|---:|---:|---:|---:|---:|
+/// | DNS | ✓ | ✓ | ✓ | ✓ | ✓ |
+/// | Wildcard DNS | ✗ | ✓ | ✗ | ✓ | ✓ |
+/// | IPv4 / IPv6 | ✓ | ✗ | ✓ | ✗ | ✗ |
+///
+/// DNS-ACCOUNT-01 (draft-ietf-acme-dns-account-01) is a DNS-01 sibling: the
+/// TXT record name is identical (`_acme-challenge.<domain>`, base name for
+/// wildcards), so anywhere DNS-01 applies it applies too.
+///
+/// DNS-PERSIST-01 (draft-ietf-acme-dns-persist-01) is also DNS-bound —
+/// `_validation-persist.<domain>`, base name for wildcards — with the same
+/// applicability as DNS-01. Compatibility here does *not* mean "planned by
+/// default": the empty-policy expansion in [`validate_order_policy`] uses
+/// [`ChallengeSet::all`], which excludes the persistent type, so it is only
+/// ever planned when the validation policy explicitly allows it.
 pub fn compatible_challenges(identifier: &Identifier) -> ChallengeSet {
     match identifier.kind() {
-        IdentifierKind::Dns => ChallengeSet::all(),
-        IdentifierKind::WildcardDns => ChallengeSet::new([ChallengeType::Dns01]),
+        IdentifierKind::Dns => {
+            let mut compatible = ChallengeSet::all();
+            compatible.insert(ChallengeType::DnsPersist01);
+            compatible
+        }
+        IdentifierKind::WildcardDns => ChallengeSet::new([
+            ChallengeType::Dns01,
+            ChallengeType::DnsAccount01,
+            ChallengeType::DnsPersist01,
+        ]),
         IdentifierKind::Ipv4 | IdentifierKind::Ipv6 => {
             ChallengeSet::new([ChallengeType::Http01, ChallengeType::TlsAlpn01])
         }
@@ -410,7 +507,9 @@ pub struct ValidationPlanItem {
     /// The identifier being validated.
     pub identifier: Identifier,
     /// Challenge types still acceptable for this identifier, in preference
-    /// order (DNS-01 < HTTP-01 < TLS-ALPN-01 when all are allowed).
+    /// order (DNS-01 < DNS-ACCOUNT-01 < DNS-PERSIST-01 < HTTP-01 <
+    /// TLS-ALPN-01 when all are allowed; DNS-PERSIST-01 only appears with an
+    /// explicit policy opt-in).
     pub allowed: Vec<ChallengeType>,
     /// Why other compatible types were excluded, for diagnostics.
     pub exclusions: Vec<ChallengeExclusion>,
@@ -457,11 +556,21 @@ impl ValidationPlan {
 }
 
 /// Preference order used when multiple challenge types are viable.
-fn challenge_preference() -> [ChallengeType; 3] {
-    // DNS-01 covers wildcards and needs no inbound ports; HTTP-01 is the most
-    // widely deployed; TLS-ALPN-01 last as it requires port 443 control.
+fn challenge_preference() -> [ChallengeType; 5] {
+    // DNS-01 covers wildcards and needs no inbound ports; DNS-ACCOUNT-01
+    // (draft-ietf-acme-dns-account-01) sits right behind it as the
+    // thumbprint-free sibling — only chosen when the CA offers it and DNS-01
+    // is unavailable, so existing DNS-01 flows are unaffected; HTTP-01 is the
+    // most widely deployed; TLS-ALPN-01 last as it requires port 443 control.
+    //
+    // DNS-PERSIST-01 ranks directly after the other DNS challenges: it is
+    // only ever reachable with an explicit policy opt-in, and a caller who
+    // opted in wants the persistent-authorization benefit (fewer
+    // re-validations across renewals) over the ephemeral alternatives.
     [
         ChallengeType::Dns01,
+        ChallengeType::DnsAccount01,
+        ChallengeType::DnsPersist01,
         ChallengeType::Http01,
         ChallengeType::TlsAlpn01,
     ]
@@ -473,6 +582,11 @@ fn challenge_preference() -> [ChallengeType; 3] {
 ///
 /// Returns a policy error naming the offending identifier otherwise; this
 /// check must run *before* any ACME order is created.
+///
+/// Key-management mode is deliberately out of scope here: challenge
+/// compatibility is independent of how the private key is held. External-CSR
+/// key policies are validated by [`KeyPolicy::validate`], which intent
+/// creation must run alongside this function.
 pub fn validate_order_policy(
     identifiers: &[Identifier],
     offered: &ChallengeSet,
@@ -689,17 +803,186 @@ mod tests {
         assert!(compatible_challenges(&plain).contains(ChallengeType::Http01));
         assert!(compatible_challenges(&plain).contains(ChallengeType::Dns01));
         assert!(compatible_challenges(&plain).contains(ChallengeType::TlsAlpn01));
+        assert!(compatible_challenges(&plain).contains(ChallengeType::DnsAccount01));
+        // dns-persist-01 is DNS-bound like dns-account-01.
+        assert!(compatible_challenges(&plain).contains(ChallengeType::DnsPersist01));
 
         let wild = dns("*.example.com");
         assert!(!compatible_challenges(&wild).contains(ChallengeType::Http01));
         assert!(compatible_challenges(&wild).contains(ChallengeType::Dns01));
         assert!(!compatible_challenges(&wild).contains(ChallengeType::TlsAlpn01));
+        // dns-account-01 shares DNS-01's applicability, including wildcards.
+        assert!(compatible_challenges(&wild).contains(ChallengeType::DnsAccount01));
+        // dns-persist-01 likewise, on the base name.
+        assert!(compatible_challenges(&wild).contains(ChallengeType::DnsPersist01));
 
         for id in [ip("192.0.2.1"), ip("2001:db8::1")] {
             assert!(compatible_challenges(&id).contains(ChallengeType::Http01));
             assert!(!compatible_challenges(&id).contains(ChallengeType::Dns01));
             assert!(compatible_challenges(&id).contains(ChallengeType::TlsAlpn01));
+            // DNS-bound challenges never validate IP identifiers.
+            assert!(!compatible_challenges(&id).contains(ChallengeType::DnsAccount01));
+            assert!(!compatible_challenges(&id).contains(ChallengeType::DnsPersist01));
         }
+    }
+
+    #[test]
+    fn default_sets_exclude_dns_persist_01() {
+        // The default planning set never publishes persistent records.
+        assert!(!ChallengeSet::all().contains(ChallengeType::DnsPersist01));
+        // The capacity view (what a deployment may offer when asked) does.
+        assert!(ChallengeSet::understood().contains(ChallengeType::DnsPersist01));
+        // understood() is a strict superset of all().
+        for kind in ChallengeSet::all().iter() {
+            assert!(ChallengeSet::understood().contains(kind));
+        }
+    }
+
+    #[test]
+    fn dns_persist_01_is_opt_in_only() {
+        // An unrestricted (empty) policy against a CA that offers everything
+        // understood must NOT plan dns-persist-01: the persistent TXT record
+        // is a zone side effect that outlives the operation.
+        let plan = validate_order_policy(
+            &[dns("example.com"), dns("*.example.com")],
+            &ChallengeSet::understood(),
+            &ValidationPolicy::default(),
+        )
+        .unwrap();
+        for item in &plan.items {
+            assert!(
+                !item.allowed.contains(&ChallengeType::DnsPersist01),
+                "dns-persist-01 must be opt-in, got {:?}",
+                item.allowed
+            );
+            assert!(
+                item.exclusions
+                    .iter()
+                    .any(|e| e.challenge == ChallengeType::DnsPersist01
+                        && e.reason == ExclusionReason::DisallowedByPolicy),
+                "the exclusion must be recorded as a policy decision"
+            );
+        }
+
+        // An explicit opt-in plans it — for plain and wildcard names alike —
+        // behind DNS-01/DNS-ACCOUNT-01 in preference order.
+        let policy = ValidationPolicy {
+            allowed_challenges: ChallengeSet::understood(),
+            ..ValidationPolicy::default()
+        };
+        let plan = validate_order_policy(
+            &[dns("example.com"), dns("*.example.com")],
+            &ChallengeSet::understood(),
+            &policy,
+        )
+        .unwrap();
+        // Plain DNS: every DNS challenge plus the HTTP/TLS pair.
+        assert_eq!(
+            plan.items[0].allowed,
+            vec![
+                ChallengeType::Dns01,
+                ChallengeType::DnsAccount01,
+                ChallengeType::DnsPersist01,
+                ChallengeType::Http01,
+                ChallengeType::TlsAlpn01,
+            ]
+        );
+        // Wildcards: the DNS family only, persist right behind its siblings.
+        assert_eq!(
+            plan.items[1].allowed,
+            vec![
+                ChallengeType::Dns01,
+                ChallengeType::DnsAccount01,
+                ChallengeType::DnsPersist01,
+            ]
+        );
+    }
+
+    #[test]
+    fn dns_persist_01_only_policy_needs_it_offered() {
+        let policy = ValidationPolicy {
+            allowed_challenges: ChallengeSet::new([ChallengeType::DnsPersist01]),
+            ..ValidationPolicy::default()
+        };
+        // A DNS-01-only CA cannot satisfy a dns-persist-01-only policy.
+        assert!(
+            validate_order_policy(
+                &[dns("example.com")],
+                &ChallengeSet::new([ChallengeType::Dns01]),
+                &policy,
+            )
+            .is_err()
+        );
+        // When offered, it is selected even for wildcards.
+        let plan = validate_order_policy(
+            &[dns("*.example.com")],
+            &ChallengeSet::new([ChallengeType::DnsPersist01]),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(plan.items[0].allowed, vec![ChallengeType::DnsPersist01]);
+    }
+
+    #[test]
+    fn dns_account_01_is_planned_when_offered_and_filtered_when_not() {
+        // Offered by the CA: allowed for plain DNS names and wildcards,
+        // ordered behind DNS-01 so existing flows keep their choice.
+        let offered = ChallengeSet::new([ChallengeType::Dns01, ChallengeType::DnsAccount01]);
+        let plan = validate_order_policy(
+            &[dns("example.com"), dns("*.example.com")],
+            &offered,
+            &ValidationPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.items[0].allowed,
+            vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        );
+        assert_eq!(
+            plan.items[1].allowed,
+            vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        );
+
+        // Not offered: excluded as NotOfferedByCa, plan falls back to DNS-01.
+        let plan = validate_order_policy(
+            &[dns("example.com")],
+            &ChallengeSet::new([ChallengeType::Dns01]),
+            &ValidationPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(plan.items[0].allowed, vec![ChallengeType::Dns01]);
+        assert!(
+            plan.items[0]
+                .exclusions
+                .iter()
+                .any(|e| e.challenge == ChallengeType::DnsAccount01
+                    && e.reason == ExclusionReason::NotOfferedByCa)
+        );
+    }
+
+    #[test]
+    fn dns_account_01_only_policy_needs_it_offered() {
+        let policy = ValidationPolicy {
+            allowed_challenges: ChallengeSet::new([ChallengeType::DnsAccount01]),
+            ..ValidationPolicy::default()
+        };
+        // A DNS-01-only CA cannot satisfy a dns-account-01-only policy.
+        assert!(
+            validate_order_policy(
+                &[dns("example.com")],
+                &ChallengeSet::new([ChallengeType::Dns01]),
+                &policy,
+            )
+            .is_err()
+        );
+        // When offered, it is selected even for wildcards.
+        let plan = validate_order_policy(
+            &[dns("*.example.com")],
+            &ChallengeSet::new([ChallengeType::DnsAccount01]),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(plan.items[0].allowed, vec![ChallengeType::DnsAccount01]);
     }
 
     #[test]
@@ -757,7 +1040,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.items.len(), 2);
-        assert_eq!(plan.items[0].allowed, vec![ChallengeType::Dns01]);
+        assert_eq!(
+            plan.items[0].allowed,
+            vec![ChallengeType::Dns01, ChallengeType::DnsAccount01]
+        );
         assert_eq!(
             plan.items[1].allowed,
             vec![ChallengeType::Http01, ChallengeType::TlsAlpn01]
@@ -785,6 +1071,12 @@ mod tests {
         assert!(set.contains(ChallengeType::Http01));
         assert!(!set.contains(ChallengeType::TlsAlpn01));
         assert!(ChallengeSet::parse(["bogus"]).is_err());
+
+        let set = ChallengeSet::parse(["dns-account-01"]).unwrap();
+        assert!(set.contains(ChallengeType::DnsAccount01));
+
+        let set = ChallengeSet::parse(["dns-persist-01"]).unwrap();
+        assert!(set.contains(ChallengeType::DnsPersist01));
     }
 
     #[test]
@@ -794,6 +1086,7 @@ mod tests {
             dns_provider: Some("cloudflare-prod".to_string()),
             edge_agent: None,
             propagation: PropagationPolicy::default(),
+            prepare_all_supported: false,
         };
         let json = serde_json::to_string(&intent_policy).unwrap();
         let back: ValidationPolicy = serde_json::from_str(&json).unwrap();
@@ -802,6 +1095,24 @@ mod tests {
         let renewal = RenewalPolicy::default();
         let back: RenewalPolicy = serde_json::from_str(&renewal_json()).unwrap();
         assert_eq!(renewal, back);
+    }
+
+    #[test]
+    fn prepare_all_supported_defaults_to_off_and_roundtrips() {
+        // Omitted in JSON → false (single-prepare behavior preserved).
+        let without_flag: ValidationPolicy =
+            serde_json::from_str(r#"{"allowed_challenges":[]}"#).unwrap();
+        assert!(!without_flag.prepare_all_supported);
+
+        // Explicitly set → survives a round trip.
+        let with_flag = ValidationPolicy {
+            prepare_all_supported: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&with_flag).unwrap();
+        assert!(json.contains("prepare_all_supported"), "{json}");
+        let back: ValidationPolicy = serde_json::from_str(&json).unwrap();
+        assert!(back.prepare_all_supported);
     }
 
     fn renewal_json() -> String {
@@ -822,5 +1133,101 @@ mod tests {
         assert_eq!(key.algorithm, KeyAlgorithm::EcP256);
         assert_eq!(key.mode, KeyManagementMode::Managed);
         assert!(!key.exportable);
+    }
+
+    /// Wire names are a persistence contract: recorded keys, lineages and
+    /// intents serialize the algorithm verbatim, so a rename would silently
+    /// break deserialization of existing storage. `EcP521` is a pure
+    /// addition — every pre-existing name keeps its exact spelling.
+    #[test]
+    fn key_algorithm_wire_names_are_stable() {
+        for (algorithm, wire) in [
+            (KeyAlgorithm::EcP256, "ec_p256"),
+            (KeyAlgorithm::EcP384, "ec_p384"),
+            (KeyAlgorithm::EcP521, "ec_p521"),
+            (KeyAlgorithm::Rsa2048, "rsa2048"),
+            (KeyAlgorithm::Rsa4096, "rsa4096"),
+            (KeyAlgorithm::Ed25519, "ed25519"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(algorithm).unwrap(),
+                serde_json::Value::String(wire.to_string()),
+                "serialization of {algorithm:?} drifted"
+            );
+            let parsed: KeyAlgorithm = serde_json::from_str(&format!("\"{wire}\"")).unwrap();
+            assert_eq!(parsed, algorithm, "deserialization of {wire}");
+        }
+    }
+
+    /// A record written before the `EcP521` variant existed (no `ec_p521`
+    /// string anywhere) must keep deserializing unchanged.
+    #[test]
+    fn key_algorithm_without_ecp521_roundtrips_unchanged() {
+        for (wire, expected) in [
+            ("ec_p256", KeyAlgorithm::EcP256),
+            ("ec_p384", KeyAlgorithm::EcP384),
+            ("rsa2048", KeyAlgorithm::Rsa2048),
+            ("rsa4096", KeyAlgorithm::Rsa4096),
+            ("ed25519", KeyAlgorithm::Ed25519),
+        ] {
+            let json = format!("{{\"algorithm\":\"{wire}\",\"mode\":\"managed\"}}");
+            let policy: KeyPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                policy.algorithm, expected,
+                "legacy record with {wire} must deserialize unchanged"
+            );
+        }
+        let json = serde_json::to_string(&KeyPolicy {
+            algorithm: KeyAlgorithm::EcP521,
+            ..KeyPolicy::default()
+        })
+        .unwrap();
+        let policy: KeyPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(policy.algorithm, KeyAlgorithm::EcP521);
+    }
+
+    #[test]
+    fn external_csr_key_policy_rejects_export() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::ExternalCsr,
+            exportable: true,
+            ..KeyPolicy::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(err.to_string().contains("never exportable"), "{err}");
+    }
+
+    #[test]
+    fn external_csr_key_policy_rejects_per_renewal_rotation() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::ExternalCsr,
+            rotation: KeyRotationPolicy::RotateEachRenewal,
+            ..KeyPolicy::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("cannot rotate keys per renewal"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn external_csr_key_policy_accepts_defaults() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::ExternalCsr,
+            ..KeyPolicy::default()
+        };
+        policy.validate().unwrap();
+    }
+
+    #[test]
+    fn managed_key_policy_is_unaffected_by_external_csr_rules() {
+        let policy = KeyPolicy {
+            mode: KeyManagementMode::Managed,
+            exportable: true,
+            rotation: KeyRotationPolicy::RotateEachRenewal,
+            ..KeyPolicy::default()
+        };
+        policy.validate().unwrap();
     }
 }

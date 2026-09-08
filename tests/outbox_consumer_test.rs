@@ -198,6 +198,47 @@ async fn outbox_consumer_tracks_pending_backlog_per_event_type() {
     );
 }
 
+/// A dead-lettered event must leave the pending gauge. The gauge is set
+/// once per pass from the batch's remaining counts (never inc/dec per
+/// event), so terminal failure paths — like retried failures that come
+/// back around each pass — cannot make it drift upward.
+#[tokio::test]
+async fn outbox_consumer_gauge_falls_back_after_dead_letter() {
+    let set = MemoryRepository::new().into_set();
+    set.outbox
+        .append(
+            "operation.finished",
+            serde_json::json!({"operation_id": "op_1"}),
+            None,
+        )
+        .await
+        .unwrap();
+    let delivery = Arc::new(CountingDelivery {
+        calls: AtomicUsize::new(0),
+        fail_first: usize::MAX, // every attempt fails
+    });
+    let consumer_config = OutboxConsumerConfig {
+        max_attempts: 1, // first failure dead-letters immediately
+        ..config("consumer-a")
+    };
+    let metrics = Arc::new(acmex::metrics::MetricsRegistry::new());
+    let consumer =
+        OutboxConsumer::new(set.clone(), delivery, consumer_config).with_metrics(metrics.clone());
+
+    let report = consumer.run_once().await.unwrap();
+    assert_eq!(report.dead_lettered, 1);
+
+    let text = metrics.gather_text();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with(r#"acmex_outbox_pending{event_type="operation.finished""#))
+        .unwrap();
+    assert!(
+        line.ends_with(" 0"),
+        "dead-lettered event must no longer count as pending: {line}"
+    );
+}
+
 struct TempDir {
     path: std::path::PathBuf,
 }
@@ -314,6 +355,7 @@ async fn signed_webhook_delivery_verifies_consumer_side() {
         }),
         timeout_secs: 5,
         max_retries: 1,
+        event_type_filter: Vec::new(),
     }]);
 
     let event = OutboxEvent {

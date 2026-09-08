@@ -331,7 +331,7 @@ pub enum AgentCommands {
 #[derive(Parser)]
 pub struct AgentServeArgs {
     /// Listen address
-    #[arg(long, default_value = "127.0.0.1:9460")]
+    #[arg(long, default_value = crate::delivery::agent_server::DEFAULT_AGENT_LISTEN_ADDR)]
     pub listen: String,
 
     /// Deployment-agent bearer token as a SecretRef (`env:NAME` or

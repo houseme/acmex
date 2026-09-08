@@ -105,6 +105,7 @@ impl HttpClient {
     pub fn new(config: HttpClientConfig) -> Result<Self> {
         tracing::debug!("Initializing HttpClient with timeout: {:?}", config.timeout);
         let client = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
             .timeout(config.timeout)
             .pool_max_idle_per_host(config.pool_size)
             .redirect(if config.follow_redirects {

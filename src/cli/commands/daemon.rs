@@ -9,9 +9,12 @@
 //! 2. a **renewal controller scan** runs every `check_interval` seconds:
 //!    each lineage is evaluated (ARI window first, lifetime-fraction
 //!    fallback second) and due renewals become durable operations the
-//!    worker then executes.
+//!    worker then executes;
+//! 3. the **durable outbox consumer** (`notifications::OutboxConsumer`)
+//!    drains operation/deployment/audit events to the configured outbound
+//!    notification endpoints (webhooks and SMTP email).
 //!
-//! Both loops stop on SIGINT/SIGTERM. Legacy arguments (`--domains`,
+//! All loops stop on SIGINT/SIGTERM. Legacy arguments (`--domains`,
 //! `--renew-before-days`) are accepted for compatibility but superseded by
 //! the repository-backed scan, which covers every lineage — the daemon
 //! prints a notice when they are used.
@@ -25,6 +28,7 @@ use tracing::{error, info, warn};
 use crate::application::ApplicationServiceBuilder;
 use crate::config::Config;
 use crate::metrics::MetricsRegistry;
+use crate::notifications::{OutboxConsumer, OutboxConsumerConfig, WebhookManager};
 use crate::renewal::{ControllerRenewalScheduler, RenewalController, RenewalControllerConfig};
 use crate::scheduler::RenewalScheduler;
 use crate::server::worker::{self, WorkflowWorkerSettings};
@@ -62,7 +66,7 @@ pub async fn handle_daemon(
     let _ = storage_path;
     if let Some(email) = &notify_email {
         println!(
-            "ℹ️  notifications for {email} follow the configured webhooks ([notifications.webhook])"
+            "ℹ️  notifications for {email} follow the configured webhooks and email endpoints ([notifications.webhooks] / [notifications.email])"
         );
     }
 
@@ -126,13 +130,48 @@ pub async fn handle_daemon(
     });
     println!("✓ renewal controller scanning every {check_interval_secs}s");
 
+    // 3. Durable outbox consumer: drains operation/deployment/audit events
+    //    to the outbound endpoints from `[notifications.webhooks]` and
+    //    `[notifications.email]` so they do not accumulate without bound.
+    //    Without configured endpoints the manager delivers as a cheap
+    //    no-op drain.
+    let outbox_handle = if config.outbox.enabled {
+        let outbox_interval = Duration::from_secs(config.outbox.interval_secs.max(1));
+        let webhook_manager = WebhookManager::from_config(&config)?;
+        // Defense in depth: `Config::validate` already rejects
+        // `outbox.batch_size = 0`, but a consumer wired with a zero batch
+        // would scan without ever claiming an event, so clamp here too —
+        // same guard as the interval above.
+        let mut consumer_config = OutboxConsumerConfig::from(&config.outbox);
+        consumer_config.batch_size = consumer_config.batch_size.max(1);
+        let consumer_batch_size = consumer_config.batch_size;
+        let consumer = OutboxConsumer::new(
+            repositories.clone(),
+            Arc::new(webhook_manager),
+            consumer_config,
+        )
+        .with_metrics(metrics.clone());
+        let handle = tokio::spawn(async move {
+            consumer.run_forever(outbox_interval).await;
+        });
+        println!(
+            "✓ outbox consumer running (interval {}s, batch {})",
+            outbox_interval.as_secs(),
+            consumer_batch_size
+        );
+        Some(handle)
+    } else {
+        info!("outbox consumer disabled by configuration");
+        None
+    };
+
     // One scan immediately so a freshly started daemon reports due renewals
     // without waiting a full interval.
     if let Err(err) = scheduler.run_once().await {
         warn!(error = %err, "initial renewal scan failed");
     }
 
-    // 3. Wait for shutdown.
+    // 4. Wait for shutdown.
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
     let mut sigint = signal::unix::signal(signal::unix::SignalKind::interrupt())?;
     tokio::select! {
@@ -142,8 +181,14 @@ pub async fn handle_daemon(
 
     worker_handle.abort();
     scan_handle.abort();
+    if let Some(outbox_handle) = &outbox_handle {
+        outbox_handle.abort();
+    }
     let _ = worker_handle.await;
     let _ = scan_handle.await;
+    if let Some(outbox_handle) = outbox_handle {
+        let _ = outbox_handle.await;
+    }
     println!("✅ Daemon stopped");
     Ok(())
 }

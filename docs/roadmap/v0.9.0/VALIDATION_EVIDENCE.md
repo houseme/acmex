@@ -200,8 +200,75 @@ recurrence is directly diagnosable.
 
 - Let's Encrypt staging (T19) — requires external test assets.
 - Live DNS provider zones (T19/T20) — requires real zone credentials.
-- External remote HTTP agent sink live run — requires a deployed independent
-  agent host and token reference.
+- Remote HTTP agent sink live run — requires a deployed independent agent.
+- IPv4/IPv6 identifiers against an external CA — requires staging assets.
+
+---
+
+# 2026-09-07/08 IP Evidence (RFC 8738, local Pebble)
+
+Adds the three RFC 8738 IP-identifier scenarios to the Pebble gate
+(`tests/live_pebble_e2e.rs`): IPv4 HTTP-01, IPv4 TLS-ALPN-01 and IPv6
+HTTP-01. Local evidence only — external CA validation is still pending (see
+`RELEASE_CHECKLIST.md`).
+
+## Environment
+
+Captured 2026-09-07 (UTC 17:53Z / 17:54Z) in the v0.10.0 worktree at git
+sha `d389d9ebf50e7a6b7c650ee73cb7b2a2a8dac134`, Docker 29.4.0 (OrbStack),
+compose `scripts/docker-compose.pebble.yml` project `acmex-pebble-e2e`
+image `ghcr.io/letsencrypt/pebble:latest` +
+`ghcr.io/letsencrypt/pebble-challtestsrv:latest`, `PEBBLE_VA_NOSLEEP=1`,
+`PEBBLE_WFE_NONCEREJECT=0`. The local host already hosted a coexisting
+pebble stack on the default subnet/ports, so this run used the compose
+overrides (canonical defaults unchanged): subnet `10.30.51.0/24`,
+directory `https://127.0.0.1:24000/dir`, challtestsrv admin
+`http://127.0.0.1:8055`, IPv4 identifier `10.30.51.3` (challtestsrv static
+address), IPv4 host-routable TLS-ALPN identifier `0.250.250.254`, IPv6
+identifier `fd3a:9d6d:1c4e::3` (challtestsrv static IPv6,
+`enable_ipv6` ULA subnet). Artifacts record the full environment in
+`environment.txt`.
+
+Production gap fixed for this pass: `AcmeCaBackend::capabilities()`
+hardcoded an empty identifier-type list, so the pre-order capability gate
+(`CreateOrResumeOrder`) rejected every IP-identifier order against real
+CAs — the ACME directory has no field advertising identifier types.
+`AcmeCaBackend::with_identifier_types(vec!["dns", "ip"])` now declares the
+capability (unit-tested); the E2E backend assembly uses it for Pebble.
+
+## Test Result
+
+Two consecutive green runs, 9 scenarios (6 existing + 3 new IP scenarios),
+including full strict verification and File-sink deployment/activation for
+each IP certificate:
+
+```text
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.13s
+```
+
+```text
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.91s
+```
+
+Per-scenario (both runs): `pebble_full_issuance_ip_http01`
+(IPv4 `10.30.51.3`), `pebble_full_issuance_ip_tlsalpn01` (IPv4
+`0.250.250.254`, served by the production `LocalTlsListener` because
+challtestsrv cannot mint iPAddress-SAN validation certificates; Pebble
+validated the `in-addr.arpa` SNI + single-iPAddress-SAN certificate per
+RFC 8737/8738), `pebble_full_issuance_ip_http01_v6` (IPv6
+`fd3a:9d6d:1c4e::3`, VA dialled the static IPv6 directly), plus the six
+existing domain scenarios (HTTP-01, DNS-01, TLS-ALPN-01, DNS-01
+renewal+revocation lifecycle, three-window restart resume, File-sink
+health-failure rollback).
+
+## Artifacts
+
+- `target/pebble-e2e/20260907T175323Z/` (run 1: `environment.txt`,
+  `cargo-test-live-pebble-e2e.log`, `compose.log`)
+- `target/pebble-e2e/20260907T175400Z/` (run 2: same structure)
+
+Local-gate reruns in this pass: `cargo test --lib` 398 passed / 0 failed;
+`git diff --check` clean; `rustfmt --edition 2024` clean on the touched
+files.
 - Redis failover / managed persistence mode evidence — requires an operator
   controlled Redis failover setup beyond the local single-node contract above.
-- IPv4/IPv6 identifiers against an external CA — requires staging assets.

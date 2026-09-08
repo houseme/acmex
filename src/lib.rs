@@ -70,6 +70,7 @@
 //!             key_policy: Default::default(),
 //!             renewal_policy: Default::default(),
 //!             delivery_targets: Vec::new(),
+//!             external_csr: None,
 //!             idempotency_key: "my-intent-1".to_string(),
 //!         })
 //!         .await?;
@@ -79,6 +80,7 @@
 //!         .issue(IssueCertificate {
 //!             context: ActorContext::default(),
 //!             intent_id: intent.id.clone(),
+//!             external_csr: None,
 //!             idempotency_key: format!("issue-{}", intent.id),
 //!         })
 //!         .await?;
@@ -180,6 +182,8 @@ pub use config::{
     AcmeSettings, ChallengeSettings, Config, FileRepositoryConfig, MigrationSettings,
     RenewalSettings, RepositorySettings, StorageSettings,
 };
+pub use delivery::k8s_sink::{KubernetesAuth, KubernetesSecretConfig, KubernetesSecretSink};
+pub use delivery::vault_sink::{VaultAuth, VaultKvConfig, VaultKvSink};
 pub use delivery::{
     CertificateMaterial, CertificateMaterialBuilder, CertificateMaterialRef, CertificateSink,
     CleanupOutcome, DeploymentActivationOutcome, DeploymentGate, DeploymentHealth,

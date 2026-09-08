@@ -6,9 +6,25 @@
 # never be committed or archived verbatim.
 set -euo pipefail
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "FAIL: ripgrep (rg) is required for scripts/secret_scan.sh" >&2
-  exit 1
+# Prefer ripgrep; fall back to plain grep -rE so the gate also runs on
+# runners without rg (same exit semantics: 0 = match found, 1 = none).
+if command -v rg >/dev/null 2>&1; then
+  scan() {
+    rg -n --hidden --no-heading --glob '!.git/**' --glob '!target/**' \
+      --regexp "$1" "${scan_paths[@]}"
+  }
+  scan_evidence() {
+    rg -n --hidden --no-heading --regexp "$1" "target/pebble-e2e"
+  }
+else
+  echo "note: ripgrep not found; falling back to grep" >&2
+  scan() {
+    grep -rnE --exclude-dir=.git --exclude-dir=target \
+      --regexp "$1" "${scan_paths[@]}"
+  }
+  scan_evidence() {
+    grep -rnE --regexp "$1" "target/pebble-e2e" 2>/dev/null
+  }
 fi
 
 scan_paths=(
@@ -33,12 +49,10 @@ patterns=(
 
 hits=0
 for pattern in "${patterns[@]}"; do
-  if rg -n --hidden --no-heading --glob '!.git/**' --glob '!target/**' \
-    --regexp "$pattern" "${scan_paths[@]}"; then
+  if scan "$pattern"; then
     hits=1
   fi
-  if [[ -d "target/pebble-e2e" ]] &&
-    rg -n --hidden --no-heading --regexp "$pattern" "target/pebble-e2e"; then
+  if [[ -d "target/pebble-e2e" ]] && scan_evidence "$pattern"; then
     hits=1
   fi
 done

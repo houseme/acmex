@@ -109,17 +109,16 @@ fn decode_jws_post(
         "expected exactly one POST to {url_fragment}"
     );
     let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3);
+    let (protected, payload_b64, _signature_b64) = jws_segments(&jws);
     let header = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[0])
+            .decode(protected)
             .unwrap(),
     )
     .unwrap();
     let payload = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[1])
+            .decode(payload_b64)
             .unwrap(),
     )
     .unwrap();
@@ -255,15 +254,14 @@ async fn order_request_serializes_profile_and_replaces() {
         .filter(|r| r.url.contains("new-order") && r.method == AcmeMethod::Post)
         .collect();
     assert_eq!(posts.len(), 1);
-    // The newOrder POST body is a JWS; the payload (middle segment) carries
-    // the profile, replaces and identifiers claims.
+    // The newOrder POST body is a JWS; the payload carries the profile,
+    // replaces and identifiers claims.
     let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3);
+    let (_protected, payload_b64, _signature_b64) = jws_segments(&jws);
     use base64::Engine;
     let payload: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[1])
+            .decode(payload_b64)
             .unwrap(),
     )
     .unwrap();
@@ -317,14 +315,13 @@ async fn post_as_get_uses_canonical_empty_payload() {
         .collect();
     assert_eq!(posts.len(), 1);
     let jws = String::from_utf8(posts[0].body.clone().unwrap()).unwrap();
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3);
-    assert_eq!(segments[1], "", "POST-as-GET payload must be empty");
+    let (protected, payload_b64, _signature) = jws_segments(&jws);
+    assert_eq!(payload_b64, "", "POST-as-GET payload must be empty");
     // Protected header carries the account kid and target url.
     use base64::Engine;
     let header: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(segments[0])
+            .decode(&protected)
             .unwrap(),
     )
     .unwrap();
@@ -637,7 +634,8 @@ async fn concurrent_requests_never_share_a_nonce() {
             continue;
         }
         let body = String::from_utf8(request.body.clone().unwrap()).unwrap();
-        let header = body.split('.').next().unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let header = envelope["protected"].as_str().unwrap();
         let decoded: serde_json::Value = serde_json::from_slice(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(header)
@@ -670,7 +668,15 @@ async fn eab_registration_binds_external_account_with_hs256() {
                 Some("https://acme.example/acct/88".to_string()),
             ),
     );
-    let backend = backend(transport.clone());
+    // A true Ed25519 account key: the EAB payload must carry the unchanged
+    // OKP/Ed25519 JWK (the compatibility baseline for other key types).
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        ed25519_key(),
+        MemoryRepository::new().into_set(),
+    );
     let account = eab_account_ref(SecretRef::File {
         path: key_file.clone(),
     });
@@ -817,15 +823,25 @@ fn jws_posts_to(transport: &FakeAcmeTransport, url_fragment: &str) -> Vec<String
         .collect()
 }
 
-/// Splits a compact JWS into (protected header, payload, signature b64).
+/// Splits a flattened JSON JWS into (protected header, payload, signature b64).
+fn jws_segments(jws: &str) -> (String, String, String) {
+    let object: serde_json::Value =
+        serde_json::from_str(jws).expect("JWS body is the flattened JSON envelope");
+    (
+        object["protected"].as_str().unwrap().to_string(),
+        object["payload"].as_str().unwrap().to_string(),
+        object["signature"].as_str().unwrap().to_string(),
+    )
+}
+
+/// Splits a flattened JSON JWS into (protected header, payload, signature b64).
 fn decode_jws(jws: &str) -> (serde_json::Value, serde_json::Value, String) {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let segments: Vec<&str> = jws.split('.').collect();
-    assert_eq!(segments.len(), 3, "compact JWS has three segments");
-    let header = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[0]).unwrap()).unwrap();
-    let payload = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(segments[1]).unwrap()).unwrap();
-    (header, payload, segments[2].to_string())
+    let (protected, payload, signature) = jws_segments(jws);
+    let header = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected).unwrap()).unwrap();
+    let payload = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    (header, payload, signature)
 }
 
 /// Re-signs a captured JWS with `key` and returns the compact serialization.
@@ -840,13 +856,360 @@ fn resign_jws(jws: &str, key: &KeyPair) -> String {
 
 /// Generates an Ed25519 account key — the algorithm the session's JWS
 /// headers claim (`alg: EdDSA`, Ed25519 JWK) and the only one whose
-/// signatures are deterministic (needed by `resign_jws`). The default
-/// `KeyPair::generate()` yields ECDSA P-256, whose signatures are randomized.
+/// signatures are deterministic (needed by `resign_jws`).
 fn ed25519_key() -> Arc<KeyPair> {
     let pem = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)
         .expect("generate Ed25519 key")
         .serialize_pem();
     Arc::new(KeyPair::from_pem(&pem).expect("parse Ed25519 PEM"))
+}
+
+/// Generates an account key of any supported rcgen algorithm.
+fn typed_key(algorithm: &'static rcgen::SignatureAlgorithm) -> Arc<KeyPair> {
+    let pem = rcgen::KeyPair::generate_for(algorithm)
+        .expect("generate key")
+        .serialize_pem();
+    Arc::new(KeyPair::from_pem(&pem).expect("parse PEM"))
+}
+
+// ---------------------------------------------------------------------------
+// ES256 / RS256 account keys
+// ---------------------------------------------------------------------------
+
+/// ES256 account registration: the protected header derives `alg: ES256` and
+/// the EC JWK (`kty: EC`, `crv: P-256`, fixed-width coordinates) from the
+/// actual key, and the signature is the raw 64-octet `R||S` encoding.
+#[tokio::test]
+async fn es256_account_registration_carries_ec_jwk_and_raw_signature() {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/91".to_string()),
+            ),
+    );
+    let key = typed_key(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        key.clone(),
+        MemoryRepository::new().into_set(),
+    );
+
+    let handle = backend.ensure_account(&account_ref()).await.unwrap();
+    assert_eq!(handle.account_url, "https://acme.example/acct/91");
+
+    let (_jws, header, payload, signature_b64) = {
+        let requests = transport.requests();
+        let post = requests
+            .iter()
+            .find(|r| r.url.contains("new-account") && r.method == AcmeMethod::Post)
+            .expect("newAccount POST");
+        let jws = String::from_utf8(post.body.clone().unwrap()).unwrap();
+        let (protected, payload_b64, signature_b64) = jws_segments(&jws);
+        let header: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(protected)
+                .unwrap(),
+        )
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        (jws, header, payload, signature_b64)
+    };
+
+    assert_eq!(header["alg"], "ES256");
+    assert_eq!(header["jwk"]["kty"], "EC");
+    assert_eq!(header["jwk"]["crv"], "P-256");
+    let x: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["x"].as_str().unwrap())
+        .unwrap();
+    let y: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["y"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(x.len(), 32);
+    assert_eq!(y.len(), 32);
+    // The JWK coordinates are the halves of the uncompressed point.
+    let point = key.public_key_bytes();
+    assert_eq!(point[0], 0x04);
+    assert_eq!(&point[1..33], x.as_slice());
+    assert_eq!(&point[33..], y.as_slice());
+    assert!(payload.get("onlyReturnExisting").is_none());
+
+    // Raw R||S: exactly 64 octets (never the DER ~70-72 octet encoding).
+    let signature = URL_SAFE_NO_PAD.decode(signature_b64).unwrap();
+    assert_eq!(signature.len(), 64, "ES256 JWS signatures are raw R||S");
+}
+
+/// RS256 account registration: `alg: RS256` and an RSA JWK whose `n`/`e`
+/// use minimal octets (`e` is always `AQAB` for CA-issued keys).
+#[tokio::test]
+async fn rs256_account_registration_carries_rsa_jwk() {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/92".to_string()),
+            ),
+    );
+    let key = typed_key(&rcgen::PKCS_RSA_SHA256);
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        key,
+        MemoryRepository::new().into_set(),
+    );
+
+    let handle = backend.ensure_account(&account_ref()).await.unwrap();
+    assert_eq!(handle.account_url, "https://acme.example/acct/92");
+
+    let (header, _) = decode_jws_post(&transport, "new-account");
+    assert_eq!(header["alg"], "RS256");
+    assert_eq!(header["jwk"]["kty"], "RSA");
+    let n: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["n"].as_str().unwrap())
+        .unwrap();
+    let e: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["e"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(n.len(), 256, "2048-bit modulus, no DER sign octet");
+    assert_eq!(e, vec![0x01, 0x00, 0x01], "exponent 65537 as AQAB");
+}
+
+/// ES512 (P-521) account registration: the protected header derives
+/// `alg: ES512` and an EC JWK with `crv: P-521` and 66-octet coordinates, and
+/// the persisted account record labels the key `EcP521` — P-521 keys used to
+/// be mislabeled `EcP384` while the enum had no P-521 variant.
+#[tokio::test]
+async fn es512_account_registration_carries_p521_jwk_and_ecp521_record() {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/94".to_string()),
+            ),
+    );
+    let key = typed_key(&rcgen::PKCS_ECDSA_P521_SHA512);
+    let repositories = MemoryRepository::new().into_set();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        key.clone(),
+        repositories.clone(),
+    );
+
+    let handle = backend.ensure_account(&account_ref()).await.unwrap();
+    assert_eq!(handle.account_url, "https://acme.example/acct/94");
+
+    let requests = transport.requests();
+    let post = requests
+        .iter()
+        .find(|r| r.url.contains("new-account") && r.method == AcmeMethod::Post)
+        .expect("newAccount POST");
+    let jws = String::from_utf8(post.body.clone().unwrap()).unwrap();
+    let (protected, _payload_b64, signature_b64) = jws_segments(&jws);
+    let header: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected).unwrap()).unwrap();
+
+    assert_eq!(header["alg"], "ES512");
+    assert_eq!(header["jwk"]["kty"], "EC");
+    assert_eq!(header["jwk"]["crv"], "P-521");
+    let x: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["x"].as_str().unwrap())
+        .unwrap();
+    let y: Vec<u8> = URL_SAFE_NO_PAD
+        .decode(header["jwk"]["y"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(x.len(), 66, "P-521 coordinates are 66 octets");
+    assert_eq!(y.len(), 66, "P-521 coordinates are 66 octets");
+    // The JWK coordinates are the halves of the uncompressed point.
+    let point = key.public_key_bytes();
+    assert_eq!(point[0], 0x04);
+    assert_eq!(&point[1..67], x.as_slice());
+    assert_eq!(&point[67..], y.as_slice());
+    // Raw R||S: exactly 132 octets (never the DER encoding).
+    let signature = URL_SAFE_NO_PAD.decode(signature_b64).unwrap();
+    assert_eq!(signature.len(), 132, "ES512 JWS signatures are raw R||S");
+
+    // The persisted record labels the account key EcP521 (not EcP384).
+    let record = repositories
+        .accounts
+        .get(&acmex::domain::AccountRecord::compute_id(
+            &acmex::domain::TenantId::default_tenant(),
+            "test-ca",
+        ))
+        .await
+        .unwrap()
+        .expect("persisted account record");
+    assert_eq!(
+        record.value.key_ref.algorithm,
+        acmex::domain::KeyAlgorithm::EcP521,
+        "P-521 account keys must persist as EcP521"
+    );
+    assert_eq!(record.value.key_ref.key_id.as_str(), handle.key_id);
+}
+
+/// Mixed-algorithm RFC 8555 §7.3.5 rollover: the outer JWS (old key) claims
+/// `alg: ES256` while the inner JWS (new key) claims `alg: EdDSA` with the
+/// OKP JWK — each side derives its algorithm from its own key. After the
+/// switch, follow-up requests sign with the new key.
+#[tokio::test]
+async fn es256_to_ed25519_key_rollover_derives_each_alg_from_its_own_key() {
+    use acmex::protocol::Jwk;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/93".to_string()),
+            ),
+    );
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+    transport.push(
+        ScriptedResponse::json("new-order", 201, serde_json::json!({"status": "pending"}))
+            .with_headers(
+                Some("order-nonce".to_string()),
+                None,
+                Some("https://acme.example/order/10".to_string()),
+            ),
+    );
+
+    let old_key = typed_key(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let new_key = ed25519_key();
+    let repositories = MemoryRepository::new().into_set();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        old_key.clone(),
+        repositories.clone(),
+    );
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+
+    // The registration JWS was signed by the ES256 key...
+    let (registration_header, _, registration_sig) = {
+        let posts = jws_posts_to(&transport, "new-account");
+        assert_eq!(posts.len(), 1);
+        let (header, payload, signature) = decode_jws(&posts[0]);
+        (header, payload, signature)
+    };
+    assert_eq!(registration_header["alg"], "ES256");
+    assert_eq!(URL_SAFE_NO_PAD.decode(&registration_sig).unwrap().len(), 64);
+
+    // ...and the rollover mixes ES256 (outer, old) with EdDSA (inner, new).
+    backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap();
+
+    let key_change_posts = jws_posts_to(&transport, "key-change");
+    assert_eq!(key_change_posts.len(), 1);
+    let (outer_header, outer_payload, outer_signature) = decode_jws(&key_change_posts[0]);
+    assert_eq!(outer_header["alg"], "ES256");
+    assert_eq!(outer_header["kid"], "https://acme.example/acct/93");
+    assert_eq!(
+        URL_SAFE_NO_PAD.decode(&outer_signature).unwrap().len(),
+        64,
+        "outer ES256 signature is raw R||S"
+    );
+
+    let old_jwk = Jwk::for_key_pair(&old_key.0).unwrap();
+    let new_jwk = Jwk::for_key_pair(&new_key.0).unwrap();
+    // RFC 8555 §7.3.5: the outer payload IS the inner JWS object (verified
+    // against Let's Encrypt staging — a JSON-string wrapping is rejected).
+    assert!(outer_payload.is_object());
+    let inner_protected = outer_payload["protected"].as_str().unwrap();
+    let inner_payload_b64 = outer_payload["payload"].as_str().unwrap();
+    let inner_signature = outer_payload["signature"].as_str().unwrap();
+    let inner_header = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_protected).unwrap(),
+    )
+    .unwrap();
+    let inner_payload = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_payload_b64).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inner_header["alg"], "EdDSA");
+    assert_eq!(inner_header["jwk"], new_jwk.to_value());
+    assert_eq!(inner_payload["oldKey"], old_jwk.to_value());
+    // The inner signature is the deterministic new key's (and only its):
+    // re-signing the inner protected.payload reproduces the inner signature.
+    let inner_envelope = serde_json::json!({
+        "protected": inner_protected,
+        "payload": inner_payload_b64,
+        "signature": inner_signature,
+    })
+    .to_string();
+    let resign_segments = jws_segments(&resign_jws(&inner_envelope, &new_key));
+    assert_eq!(resign_segments.2, inner_signature);
+
+    // Post-rollover requests sign with the new Ed25519 key.
+    backend
+        .create_order(
+            &account,
+            &OrderRequest::for_identifiers(vec![Identifier::try_dns("example.com").unwrap()]),
+        )
+        .await
+        .unwrap();
+    let new_order_posts = jws_posts_to(&transport, "new-order");
+    assert_eq!(new_order_posts.len(), 1);
+    let (order_header, _, order_signature) = decode_jws(&new_order_posts[0]);
+    assert_eq!(order_header["alg"], "EdDSA");
+    assert_eq!(
+        resign_jws(&new_order_posts[0], &new_key),
+        new_order_posts[0],
+        "post-rollover orders must be signed by the new key"
+    );
+    assert_ne!(
+        resign_jws(&new_order_posts[0], &old_key),
+        new_order_posts[0]
+    );
+    // (the old ES256 key cannot produce a deterministic 64-byte match; the
+    // exact string equality above already rules it out)
+    let _ = order_signature;
+
+    // Persistence records the NEW key.
+    let record = repositories
+        .accounts
+        .get("ten_default:test-ca")
+        .await
+        .unwrap()
+        .expect("account record persisted");
+    assert_eq!(
+        record.value.key_ref.key_id.to_string(),
+        acmex::ca_backend::account_key_id(&new_key.public_key_bytes())
+    );
 }
 
 #[tokio::test]
@@ -915,13 +1278,17 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     let new_jwk = Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(new_key.public_key_bytes()));
     let old_jwk_value =
         Jwk::new_ed25519(URL_SAFE_NO_PAD.encode(old_key.public_key_bytes())).to_value();
-    let inner = format!(
-        "{}.{}.{}",
-        outer_payload["protected"].as_str().unwrap(),
-        outer_payload["payload"].as_str().unwrap(),
-        outer_payload["signature"].as_str().unwrap()
-    );
-    let (inner_header, inner_payload, _) = decode_jws(&inner);
+    // RFC 8555 §7.3.5: the outer payload IS the inner JWS object.
+    let inner_protected2 = outer_payload["protected"].as_str().unwrap();
+    let inner_payload_b64 = outer_payload["payload"].as_str().unwrap();
+    let inner_header = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_protected2).unwrap(),
+    )
+    .unwrap();
+    let inner_payload = serde_json::from_slice::<serde_json::Value>(
+        &URL_SAFE_NO_PAD.decode(inner_payload_b64).unwrap(),
+    )
+    .unwrap();
     assert_eq!(inner_header["alg"], "EdDSA");
     assert_eq!(inner_header["jwk"], new_jwk.to_value());
     assert_eq!(inner_header["url"], "https://acme.example/key-change");
@@ -930,9 +1297,17 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
     assert!(inner_header.get("kid").is_none());
     assert_eq!(inner_payload["account"], "https://acme.example/acct/77");
     assert_eq!(inner_payload["oldKey"], old_jwk_value);
-    // The inner signature verifies against the NEW key (and only it).
-    assert_eq!(resign_jws(&inner, &new_key), inner);
-    assert_ne!(resign_jws(&inner, &old_key), inner);
+    // The inner signature verifies against the NEW key (and only it):
+    // deterministic Ed25519 re-signing over the inner protected.payload
+    // reproduces the captured inner signature byte for byte.
+    let inner_envelope = serde_json::json!({
+        "protected": inner_protected2,
+        "payload": inner_payload_b64,
+        "signature": outer_payload["signature"].as_str().unwrap(),
+    })
+    .to_string();
+    assert_eq!(resign_jws(&inner_envelope, &new_key), inner_envelope);
+    assert_ne!(resign_jws(&inner_envelope, &old_key), inner_envelope);
 
     // (c) A follow-up request is signed by the NEW key. The JWS header keeps
     // the unchanged account kid, so prove the signer via deterministic
@@ -973,6 +1348,67 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
         record.value.account_url.as_deref(),
         Some("https://acme.example/acct/77")
     );
+}
+
+/// Review P3-6 regression: a successful RFC 8555 §7.3.5 rollover publishes
+/// the NEW key's JWK through the attached pipeline handle, so key
+/// authorizations computed afterwards use the new thumbprint. The trait
+/// re-sync source (`current_account_jwk`) tracks the same key.
+#[tokio::test]
+async fn key_rollover_refreshes_the_attached_account_jwk_handle() {
+    use acmex::ca_backend::backend::AccountJwkHandle;
+    use acmex::protocol::Jwk;
+
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/96".to_string()),
+            ),
+    );
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+
+    let old_key = ed25519_key();
+    let new_key = ed25519_key();
+    let old_jwk = Jwk::for_key_pair(&old_key.0).unwrap();
+    let new_jwk = Jwk::for_key_pair(&new_key.0).unwrap();
+
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport,
+        old_key,
+        MemoryRepository::new().into_set(),
+    );
+    let handle = AccountJwkHandle::new(old_jwk.clone());
+    backend.attach_jwk_handle(handle.clone());
+    assert_eq!(handle.get(), old_jwk);
+    assert_eq!(
+        backend.current_account_jwk().await.unwrap(),
+        old_jwk,
+        "the re-sync source matches the pinned handle before the rollover"
+    );
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap();
+
+    // The handle now serves the NEW key's JWK: the thumbprint every key
+    // authorization is built from has moved with the signing key.
+    assert_eq!(handle.get(), new_jwk);
+    assert_ne!(
+        handle.thumbprint_sha256().unwrap(),
+        old_jwk.thumbprint_sha256().unwrap()
+    );
+    assert_eq!(backend.current_account_jwk().await.unwrap(), new_jwk);
 }
 
 #[tokio::test]
@@ -1016,6 +1452,13 @@ async fn key_rollover_failure_keeps_the_old_key_and_sessions_intact() {
         repositories.clone(),
     );
 
+    // The pipeline handle is attached: a failed rollover must leave it on
+    // the old key's JWK too (no partial switch, pipeline included).
+    let handle = acmex::ca_backend::backend::AccountJwkHandle::new(
+        acmex::protocol::Jwk::for_key_pair(&old_key.0).unwrap(),
+    );
+    backend.attach_jwk_handle(handle.clone());
+
     let account = backend.ensure_account(&account_ref()).await.unwrap();
     let err = backend
         .roll_account_key(&account, new_key.clone())
@@ -1024,6 +1467,11 @@ async fn key_rollover_failure_keeps_the_old_key_and_sessions_intact() {
     assert!(
         err.to_string().contains("ACME_HTTP_400"),
         "classified HTTP error expected, got: {err}"
+    );
+    assert_eq!(
+        handle.get(),
+        acmex::protocol::Jwk::for_key_pair(&old_key.0).unwrap(),
+        "the pipeline handle must keep the old key's JWK after a failed rollover"
     );
     assert_eq!(
         jws_posts_to(&transport, "key-change").len(),

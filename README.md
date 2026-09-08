@@ -52,7 +52,7 @@ Enable optional features as needed:
 ```toml
 [dependencies.acmex]
 version = "0.8.0"
-features = ["dns-cloudflare", "redis", "cli"]
+features = ["dns-cloudflare", "redis"]
 ```
 
 Available features:
@@ -62,7 +62,6 @@ Available features:
 - **DNS Providers**: `dns-cloudflare`, `dns-route53`, `dns-alibaba`, `dns-azure`, `dns-google`, `dns-huawei`,
   `dns-tencent`, etc.
 - **CAs**: `google-ca`, `zerossl-ca`
-- **Other**: `metrics`, `cli`
 
 ## 📖 Quick Start
 
@@ -126,7 +125,25 @@ acmex daemon --config acmex.toml --check-interval 3600
 
 # REST API + embedded workflow worker + metrics endpoint.
 acmex serve --config acmex.toml --addr 127.0.0.1:8080
+
+# Reference remote delivery agent: serves the server side of the
+# HttpAgentSink deployment protocol on its own host. Token comes from a
+# SecretRef (`env:VAR` or `file:/path`); bare strings are rejected.
+acmex agent serve --listen 127.0.0.1:9460 --token-ref env:AGENT_TOKEN
 ```
+
+Repository durability is configurable in `acmex.toml`:
+
+```toml
+[repository.file]
+path = ".acmex/repository"
+fsync = "always"        # default: crash-safe per write
+# fsync = "interval"    # opt-in group commit (like Redis AOF everysec)
+# fsync_interval_ms = 100
+```
+
+Account-key secrets under `.acmex/secrets` are always fsynced immediately,
+regardless of the mode.
 
 Optional OpenTelemetry tracing: set `OTEL_EXPORTER_OTLP_ENDPOINT` before
 starting any command; exporter failures degrade to plain logs.
@@ -178,9 +195,11 @@ cargo test
 
 Explore the `examples/` directory for more usage patterns:
 
-- [Basic Issuance](examples/basic_issuance.rs)
-- [DNS-01 Challenge](examples/dns_01_challenge.rs)
-- [API Server Custom](examples/api_server_custom.rs)
+- [Intent-Based Issuance](examples/intent_issuance.rs) — v0.9+ durable workflow: `CertificateIntent` → application service → in-process workflow engine → deployed certificate (runs offline)
+- [Renewal Controller](examples/renewal_controller.rs) — ARI-first renewal decisions, jitter and shadow mode (runs offline)
+- [Basic Issuance](examples/basic_issuance.rs) — legacy `AcmeClient` style
+- [DNS-01 Challenge](examples/dns_01_challenge.rs) — legacy style; requires `--features dns-cloudflare`
+- [API Server Custom](examples/api_server_custom.rs) — legacy style embedded REST API
 
 ## 📄 Documentation
 
