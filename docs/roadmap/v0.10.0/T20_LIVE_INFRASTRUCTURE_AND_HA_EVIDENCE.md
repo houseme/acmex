@@ -4,6 +4,7 @@
 **前置依赖**：无硬代码依赖（T10/T11/T02 代码已合并）；建议在 T18 后执行（演练带完整观测信号）
 **主要后继**：T21（发布）
 **建议改动范围**：`tests/`（`#[ignore]` 契约与演练测试）、`scripts/run_live_infra.sh`（新增）、`src/repository/`（Redis live 契约缺口）、`src/delivery/`（如暴露配置缺口）、docs（failover 范围文档）
+**资产准备手册**：[T19/T20 外部验证资产准备手册](./EXTERNAL_VALIDATION_ASSET_RUNBOOK.md)
 
 ---
 
