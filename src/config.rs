@@ -98,6 +98,15 @@ pub struct AcmeSettings {
     #[serde(default)]
     pub external_account_binding: Option<ExternalAccountBinding>,
 
+    /// Identifier types this CA deployment accepts, e.g. `["dns", "ip"]`.
+    /// Drives the pre-order capability gate: an intent whose identifiers the
+    /// deployment does not declare fails at plan time without creating an
+    /// ACME order. Defaults to `["dns"]` (empty or unset); add `"ip"` for
+    /// CAs with RFC 8738 support. Unknown values fail configuration
+    /// validation.
+    #[serde(default)]
+    pub identifier_types: Vec<String>,
+
     /// PEM files containing trusted roots for issued-certificate acceptance.
     #[serde(default)]
     pub trust_anchor_pem_files: Vec<String>,
@@ -284,6 +293,71 @@ fn default_repository_backend() -> String {
 pub struct FileRepositoryConfig {
     /// Root directory for all repository aggregates.
     pub path: String,
+
+    /// Durability policy for repository writes: `"always"` (the default,
+    /// and the behavior of every earlier release) fsyncs every write before
+    /// its atomic rename, so an acknowledged write survives an abrupt
+    /// crash; `"interval"` defers the fsync to a background sweeper at most
+    /// [`Self::fsync_interval_ms`] after the write, trading a bounded
+    /// durability window for throughput on write-heavy workloads.
+    ///
+    /// This setting never applies to the `secrets/` directory (ACME account
+    /// keys): secret writes always fsync immediately and unconditionally,
+    /// because a lost account key permanently orphans the ACME account on
+    /// the CA side.
+    #[serde(default = "default_repository_fsync")]
+    pub fsync: String,
+
+    /// Sweeper interval in milliseconds for `fsync = "interval"`; ignored
+    /// for `fsync = "always"`. Must be at least 1.
+    #[serde(default = "default_repository_fsync_interval_ms")]
+    pub fsync_interval_ms: u64,
+}
+
+impl Default for FileRepositoryConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            fsync: default_repository_fsync(),
+            fsync_interval_ms: default_repository_fsync_interval_ms(),
+        }
+    }
+}
+
+fn default_repository_fsync() -> String {
+    "always".to_string()
+}
+
+fn default_repository_fsync_interval_ms() -> u64 {
+    100
+}
+
+impl FileRepositoryConfig {
+    /// Resolves the configured durability policy into the repository
+    /// [`crate::repository::FsyncMode`].
+    ///
+    /// Unknown `fsync` values (the set is closed: `always` | `interval`)
+    /// and `fsync_interval_ms = 0` under `fsync = "interval"` are
+    /// configuration errors: repository assembly fails at startup instead
+    /// of silently degrading durability.
+    pub fn fsync_mode(&self) -> Result<crate::repository::FsyncMode> {
+        match self.fsync.as_str() {
+            "always" => Ok(crate::repository::FsyncMode::Always),
+            "interval" => {
+                if self.fsync_interval_ms == 0 {
+                    return Err(AcmeError::configuration(
+                        "repository.file.fsync_interval_ms must be at least 1 when fsync = \"interval\"",
+                    ));
+                }
+                Ok(crate::repository::FsyncMode::Interval(
+                    Duration::from_millis(self.fsync_interval_ms),
+                ))
+            }
+            other => Err(AcmeError::configuration(format!(
+                "repository.file.fsync `{other}` is not supported; expected \"always\" or \"interval\""
+            ))),
+        }
+    }
 }
 
 /// Redis repository configuration.
@@ -1173,6 +1247,7 @@ impl Default for AcmeSettings {
             contact: Vec::new(),
             tos_agreed: true,
             external_account_binding: None,
+            identifier_types: Vec::new(),
             trust_anchor_pem_files: Vec::new(),
             skip_certificate_trust_check: false,
             directory: String::new(),
@@ -1378,6 +1453,15 @@ impl Config {
             ));
         }
 
+        for identifier_type in &self.acme.identifier_types {
+            if !matches!(identifier_type.as_str(), "dns" | "ip") {
+                return Err(AcmeError::configuration(format!(
+                    "acme.identifier_types contains unknown value `{identifier_type}`; \
+                     supported values are \"dns\" and \"ip\""
+                )));
+            }
+        }
+
         match self.storage.backend.as_str() {
             "file" => {
                 if let Some(ref file_config) = self.storage.file
@@ -1405,6 +1489,13 @@ impl Config {
             return Err(AcmeError::configuration(
                 "repository.redis.url cannot be empty",
             ));
+        }
+
+        if let Some(ref file) = self.repository.file {
+            // Unknown fsync modes and zero sweep intervals are
+            // configuration errors, caught at validation time instead of
+            // repository assembly.
+            file.fsync_mode()?;
         }
 
         if let Some(ref vault) = self.delivery.vault {
@@ -2146,5 +2237,120 @@ poll_interval_secs = 3
             err.contains("ed25519"),
             "error must list the accepted values: {err}"
         );
+    }
+
+    // -- [repository.file] fsync durability settings ---------------------------
+
+    /// Absent `fsync` keys default to `always` — byte-identical to the
+    /// pre-config behavior, where `FileRepository::new` hard-wired
+    /// `FsyncMode::Always`.
+    #[test]
+    fn repository_file_fsync_defaults_to_always() {
+        let config = Config::from_str(
+            "[repository]\nbackend = \"file\"\n\n[repository.file]\npath = \"/tmp/acmex-repo\"\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let file = config.repository.file.as_ref().unwrap();
+        assert_eq!(file.fsync, "always");
+        assert_eq!(file.fsync_interval_ms, 100);
+        assert_eq!(
+            file.fsync_mode().unwrap(),
+            crate::repository::FsyncMode::Always
+        );
+    }
+
+    /// An explicit `interval` configuration resolves to the deferred
+    /// durability mode with the configured sweep window.
+    #[test]
+    fn repository_file_fsync_explicit_interval_parses() {
+        let config = Config::from_str(
+            "[repository]\nbackend = \"file\"\n\n[repository.file]\npath = \"/tmp/acmex-repo\"\nfsync = \"interval\"\nfsync_interval_ms = 250\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let file = config.repository.file.as_ref().unwrap();
+        assert_eq!(
+            file.fsync_mode().unwrap(),
+            crate::repository::FsyncMode::Interval(Duration::from_millis(250))
+        );
+    }
+
+    /// `fsync` is a closed set: unknown values are rejected with the
+    /// accepted spellings listed.
+    #[test]
+    fn repository_file_fsync_rejects_unknown_values() {
+        let err =
+            Config::from_str("[repository.file]\npath = \"/tmp/acmex-repo\"\nfsync = \"never\"\n")
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("repository.file.fsync"),
+            "error must name the setting: {err}"
+        );
+        assert!(
+            err.contains("always") && err.contains("interval"),
+            "error must list the accepted values: {err}"
+        );
+    }
+
+    /// A zero sweep interval would busy-loop the fsync sweeper; reject it.
+    #[test]
+    fn repository_file_fsync_rejects_zero_interval() {
+        let err = Config::from_str(
+            "[repository.file]\npath = \"/tmp/acmex-repo\"\nfsync = \"interval\"\nfsync_interval_ms = 0\n",
+        )
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("fsync_interval_ms must be at least 1"),
+            "got: {err}"
+        );
+    }
+
+    /// The resolved mode really drives the file repository assembly (the
+    /// exact call `ApplicationServiceBuilder::from_config` makes): an
+    /// `interval` config produces a store whose `fsync_mode()` reports
+    /// `Interval`; the default produces `Always`.
+    #[tokio::test]
+    async fn repository_file_fsync_mode_drives_file_repository_assembly() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        for (case, (fsync_line, expected)) in [
+            (String::new(), crate::repository::FsyncMode::Always),
+            (
+                "\nfsync = \"interval\"\nfsync_interval_ms = 250\n".to_string(),
+                crate::repository::FsyncMode::Interval(Duration::from_millis(250)),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir =
+                std::env::temp_dir().join(format!("acmex-config-fsync-assembly-{unique}-{case}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            let toml = format!(
+                "[repository]\nbackend = \"file\"\n\n[repository.file]\npath = \"{}\"{fsync_line}",
+                dir.display()
+            );
+            let config = Config::from_str(&toml).unwrap();
+            config.validate().unwrap();
+            let file = config.repository.file.as_ref().unwrap();
+            let repository = crate::repository::FileRepository::with_mode(
+                &file.path,
+                file.fsync_mode().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(repository.store().fsync_mode(), expected, "for {toml}");
+            drop(repository);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

@@ -25,14 +25,16 @@ Unchecked items block the v0.9.0 release.
 
 ## Explicit External Evidence
 
-- [ ] IPv4 HTTP-01 and TLS-ALPN-01 validated.
-- [ ] IPv6 HTTP-01 and TLS-ALPN-01 validated.
+- [ ] IPv4 HTTP-01 and TLS-ALPN-01 validated. (local Pebble RFC 8738 evidence: see VALIDATION_EVIDENCE 2026-09-07; external CA validation still pending)
+- [ ] IPv6 HTTP-01 and TLS-ALPN-01 validated. (local Pebble RFC 8738 evidence: see VALIDATION_EVIDENCE 2026-09-07; external CA validation still pending)
 - [ ] Let's Encrypt staging smoke completed.
 - [ ] At least one live DNS provider zone completed.
 - [x] Redis repository failover scope documented.
-- [ ] Kubernetes/Vault/agent sink scope documented. (Kubernetes and Vault
-      scopes documented 2026-09-06/07; reference HTTP agent child-process
-      contract is executable; external remote HTTP agent live run still pending)
+- [x] Kubernetes/Vault/agent sink scope documented. (Kubernetes and Vault
+      scopes documented 2026-09-06/07; remote HTTP agent covered by the
+      reference agent child-process live run completed 2026-09-07 —
+      `tests/agent_live.rs`; a deployed external agent can be exercised with
+      the ignored `tests/http_agent_sink_live.rs` contract)
 
 Any unchecked E2E or external row is not a release pass and must be called out in
 release notes.

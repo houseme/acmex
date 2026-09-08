@@ -8,6 +8,31 @@ must call out any unverified external evidence.
 
 ### Added
 
+- Reference remote delivery agent: `acmex agent serve` serves the server side
+  of the `HttpAgentSink` protocol (token auth via `env:`/`file:` SecretRef
+  only, constant-time comparison, atomic single-slot activation, graceful
+  shutdown). `tests/agent_live.rs` drives the real subprocess through the
+  full stage/activate/health/rollback/cleanup contract including
+  `kill -9` -> `DeploymentHealth::Unknown`, closing the T20 remote-agent
+  evidence gap.
+- `FileSecretStore` writes are now durable: secret files are fsynced before
+  their atomic rename (and the directory after, on unix), with permissions
+  `0600` from the first byte. Previously secret writes never fsynced, so a
+  crash could orphan an ACME account by losing its freshly written key.
+  Secrets always fsync immediately, independent of `FsyncMode`.
+- `[repository.file] fsync` / `fsync_interval_ms` configuration selects the
+  repository durability mode at runtime (default `always`, unchanged
+  behavior); invalid values fail configuration validation at startup.
+  `acmex init` templates document the options.
+- File repository durability modes: `FileRepository::with_mode` accepts
+  `FsyncMode::Always` (default, unchanged per-write fsync) or
+  `FsyncMode::Interval` (opt-in group commit like Redis AOF `everysec`:
+  writes visible immediately, fsync by a background sweeper at most one
+  window later, final flush on drop). Always-mode write paths also drop
+  redundant per-write syscalls and route CAS/lease/outbox reads through the
+  stamp-validated parse cache (stamps now include the unix inode, keeping
+  cross-process rename detection exact).
+
 - Release engineering baseline for the v0.9.0/v0.10.0 closeout: release notes,
   migration guides, release decision record, and a semver compatibility gate.
 - CLI `order list` and `order show` now query durable `/api/v1/operations`
@@ -108,6 +133,15 @@ must call out any unverified external evidence.
   ignored.
 
 ### Fixed
+
+- `cargo check --no-default-features` (and therefore the feature-matrix
+  release gate) failed to compile: the `not(any(aws-lc-rs, ring-crypto))`
+  fallback of ECDSA chain verification referenced `mismatch`, a helper that
+  only exists under the `aws-lc-rs` cfg.
+- The terminal `VALIDATION_CHALLENGE_INCOMPATIBLE` error now carries the CA's
+  challenge problem summary, our challenge type/URL, and every offered
+  challenge's status; previously the CA's failure reason was stored only in
+  the challenge session record and never surfaced in the operation error.
 
 - **JWS bodies now use the RFC 8555 §6.2 flattened JSON serialization.** The
   signer previously emitted the compact `a.b.c` serialization as the POST

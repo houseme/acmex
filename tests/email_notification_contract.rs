@@ -671,7 +671,13 @@ to = ["ops@example.test"]
         .deliver(&outbox_event("operation.created"))
         .await
         .expect_err("webhook failure must surface");
-    assert!(err.to_string().contains("Webhook"), "got: {err}");
+    // Case-insensitive: the rendered text differs by network environment
+    // (a system proxy's 502 vs a direct connection refusal), but the
+    // webhook channel is always named in the failure.
+    assert!(
+        err.to_string().to_lowercase().contains("webhook"),
+        "got: {err}"
+    );
     assert_eq!(
         server.transcript.messages().len(),
         1,

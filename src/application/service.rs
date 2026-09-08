@@ -64,7 +64,13 @@ impl ApplicationServiceBuilder {
                         "repository.file.path is required when repository.backend = \"file\"",
                     ));
                 };
-                FileRepository::new(&file.path).await?.into_set()
+                // `[repository.file].fsync` drives the durability policy;
+                // invalid values fail assembly (startup) with an explicit
+                // configuration error. The secrets/ store is not affected:
+                // secret writes always fsync immediately.
+                FileRepository::with_mode(&file.path, file.fsync_mode()?)
+                    .await?
+                    .into_set()
             }
             #[cfg(feature = "redis")]
             "redis" => {

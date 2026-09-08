@@ -125,7 +125,25 @@ acmex daemon --config acmex.toml --check-interval 3600
 
 # REST API + embedded workflow worker + metrics endpoint.
 acmex serve --config acmex.toml --addr 127.0.0.1:8080
+
+# Reference remote delivery agent: serves the server side of the
+# HttpAgentSink deployment protocol on its own host. Token comes from a
+# SecretRef (`env:VAR` or `file:/path`); bare strings are rejected.
+acmex agent serve --listen 127.0.0.1:9460 --token-ref env:AGENT_TOKEN
 ```
+
+Repository durability is configurable in `acmex.toml`:
+
+```toml
+[repository.file]
+path = ".acmex/repository"
+fsync = "always"        # default: crash-safe per write
+# fsync = "interval"    # opt-in group commit (like Redis AOF everysec)
+# fsync_interval_ms = 100
+```
+
+Account-key secrets under `.acmex/secrets` are always fsynced immediately,
+regardless of the mode.
 
 Optional OpenTelemetry tracing: set `OTEL_EXPORTER_OTLP_ENDPOINT` before
 starting any command; exporter failures degrade to plain logs.

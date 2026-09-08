@@ -172,6 +172,12 @@ impl ChallengePresenter for Dns01Presenter {
             .router
             .route(&resolution.zone_apex, self.selector.as_deref())?;
 
+        // dns-01: TXT at _acme-challenge.<domain> carrying
+        // base64url(SHA256(token.thumbprint)). dns-account-01: same TXT
+        // value, but the record name is derived from the account URL.
+        // dns-persist-01: a persistent _validation-persist.<domain> record
+        // binding the CA identity and the account URI (never cleaned by
+        // AcmeX — removal is a zone-owner operation).
         let locator = provider
             .present_txt(PresentTxt {
                 zone: resolution.zone_apex.clone(),

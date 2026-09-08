@@ -3,32 +3,50 @@
 These limitations are intentionally explicit so T12 cannot turn unrun external
 tests into implied success.
 
-- Pebble: a real gated harness exists (`tests/live_pebble_e2e.rs` +
+- Pebble: the gated harness (`tests/live_pebble_e2e.rs` +
   `scripts/docker-compose.pebble.yml`, driven by `scripts/run_pebble_e2e.sh`)
-  and has green 2026-09-06/07 L4 evidence for HTTP-01, DNS-01, TLS-ALPN-01,
-  renewal, revocation, restart and failure rollback (artifact
-  `target/pebble-e2e/`). The harness pins the VA to always-valid for the test
-  domain because recent Pebble validates every offered challenge, including
-  draft types AcmeX does not implement; DNS-01 evidence additionally includes
-  a live VA run without that override.
-- Let's Encrypt staging has a non-mutating directory smoke, but issuance,
-  renewal, ARI `replaces`, profile, EAB CA and IP identifier behavior are not
-  yet validated.
+  executed green repeatedly on 2026-09-06/07: HTTP-01, DNS-01, TLS-ALPN-01,
+  renewal, revocation, real-executor restart and failure-rollback scenarios
+  all passed against a real Pebble CA (latest runs archive under
+  `target/pebble-e2e/`; see `VALIDATION_EVIDENCE.md`, 2026-09-07 section,
+  including one archived transient 2/6 failure followed by two consecutive
+  6/6 greens). The harness pins the VA to always-valid for the test domain
+  because recent Pebble validates every offered challenge, including draft
+  types AcmeX does not implement; DNS-01 evidence additionally includes a
+  live VA run without that override.
+- Let's Encrypt staging has a non-mutating directory smoke (2026-09-07,
+  directory/ARI reachable), but issuance, renewal, ARI `replaces`, profile,
+  EAB CA and external-CA IP identifier behavior are not yet validated.
 - Live DNS providers are compile-gated only unless a provider contract run is
   supplied from an isolated zone.
-- File Sink and fake agent sink have local contract tests on current main, but
-  external remote HTTP agent live evidence still requires a separately deployed
-  agent host and token SecretRef.
-- Redis repository single-node live contract, Kubernetes/Vault scope evidence,
-  reference HTTP agent child-process contract and dual-process fencing now have
-  2026-09-06/07 evidence. Redis managed failover and durability behavior remain
-  operator-environment evidence, not a property of the local single-node run.
+- Kubernetes Secret and Vault KV v2 sinks have live L5 contract evidence
+  (2026-09-06 native cluster/dev server; 2026-09-07 containerized
+  reproducibility), and the Redis aggregate repository contract suite ran
+  against a live Redis server on 2026-09-07 with a documented failover scope
+  (`LIVE_INFRASTRUCTURE_EVIDENCE.md`); Redis managed failover and durability
+  behavior remain operator-environment evidence, not a property of the local
+  single-node run. The remote HTTP agent sink now has a
+  real-subprocess live run against the reference agent (`tests/agent_live.rs`,
+  2026-09-07); a production agent with persistent/multi-instance state has
+  not been exercised.
 - The AWS KMS key provider (`kms-aws`) is contract-tested against a mock
   KMS endpoint; live AWS KMS/IAM behavior (real policies, throttling,
   multi-region keys) is not yet validated. SMTP email delivery is
-  contract-tested against a fake SMTP server; live provider behavior is
-  not yet validated.
-- The current restart matrix and Pebble restart windows do not replace real
-  CA/DNS/sink adapter execution where those adapters have separate live gates.
-- IPv4 and IPv6 compatibility is covered by domain policy tests, but external
-  CA behavior for IP identifiers is not yet validated.
+  contract-tested against a fake SMTP server and now has a live local-relay
+  round-trip (2026-09-07 entry in LIVE_INFRASTRUCTURE_EVIDENCE.md); external
+  provider behavior (managed SMTP services) is not yet validated.
+- The offline restart matrix still uses fake idempotent external effects;
+  real-executor restart evidence is now provided by the Pebble gate's
+  three-window resume scenario (2026-09-06/07), so the fake matrix is
+  regression support rather than the sole restart evidence.
+- IPv4 and IPv6 identifier behavior is covered by domain policy tests, and
+  the local Pebble gate now collects real RFC 8738 IPv4 evidence: two
+  consecutive 9/9 greens on 2026-09-07 (UTC) added IPv4 HTTP-01 (challtestsrv
+  static address), IPv4 TLS-ALPN-01 (served by acmex's production
+  `LocalTlsListener`, since challtestsrv cannot mint the iPAddress-SAN
+  validation certificate Pebble requires) and IPv6 HTTP-01 (challtestsrv
+  static IPv6 over an `enable_ipv6` bridge; verified on OrbStack/docker
+  29.4.0) — see `VALIDATION_EVIDENCE.md`, 2026-09-07/08 section. External CA
+  behavior for IP identifiers is not yet validated: IPv4/IPv6 issuance
+  against a public or staging CA remains outstanding, and no IPv6 TLS-ALPN-01
+  scenario exists yet (only IPv6 HTTP-01).
