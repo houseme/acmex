@@ -1,0 +1,70 @@
+# Accepted public-API breaking changes vs the published acmex 0.8.0.
+# One fixed-string signature per line, matched against every failing item
+# line of cargo-semver-checks. Rationale per item:
+# docs/roadmap/v0.10.0/SEMVER_WAIVER.md.
+# Regenerate deliberately (never blindly):
+#   ACMEX_SEMVER_WRITE_WAIVER=1 scripts/run_semver_check.sh
+acmex::cli::commands::cert::handle_cert_revoke now takes 4 parameters instead of 3
+acmex::cli::commands::daemon::handle_daemon now takes 6 parameters instead of 5
+acmex::cli::commands::handle_cert_revoke now takes 4 parameters instead of 3
+acmex::cli::commands::handle_daemon now takes 6 parameters instead of 5
+acmex::cli::commands::handle_obtain now takes 1 parameters instead of 7
+acmex::cli::commands::handle_order_list now takes 2 parameters instead of 0
+acmex::cli::commands::handle_order_show now takes 3 parameters instead of 1
+acmex::cli::commands::obtain::handle_obtain now takes 1 parameters instead of 7
+acmex::cli::commands::order::handle_order_list now takes 2 parameters instead of 0
+acmex::cli::commands::order::handle_order_show now takes 3 parameters instead of 1
+enum acmex::certificate::OcspStatus
+enum acmex::certificate::ocsp::OcspStatus
+feature cli in the package's Cargo.toml
+feature metrics in the package's Cargo.toml
+field AcmeSettings.identifier_types
+field AcmeSettings.skip_certificate_trust_check
+field AcmeSettings.trust_anchor_pem_files
+field AppState.application
+field AppState.authorizer
+field AppState.query
+field AppState.repositories
+field Challenge.accounturi
+field Challenge.issuer_domain_names
+field Config.ca
+field Config.delivery
+field Config.dns
+field Config.key
+field Config.outbox
+field Config.repository
+field Directory.extensions
+field Directory.profiles
+field Directory.renewal_info
+field Dns01Config.propagation
+field EmailConfig.body_format
+field EmailConfig.ca_pem_files
+field EmailConfig.helo_name
+field EmailConfig.name
+field EmailConfig.subject_prefix
+field EmailConfig.timeout_secs
+field EmailConfig.tls_mode
+field HttpClientConfig.retry_policy
+field ObtainArgs.wait
+field OrderArgs.api_base
+field OrderArgs.api_key
+field RetryPolicy.retry_on_non_idempotent_methods
+field RetryPolicy.retry_on_transport_error
+field WebhookConfig.event_type_filter
+field WebhookConfig.replay_window_secs
+field WebhookConfig.signing_secret
+field account_url of variant CertCommands::Revoke
+field hooks of struct RenewalSettings
+mod acmex::certificate::ocsp
+struct acmex::Identifier became enum
+struct acmex::certificate::OcspVerifier
+struct acmex::certificate::ocsp::OcspVerifier
+struct acmex::config::RenewalHooks
+struct acmex::prelude::Identifier became enum
+struct acmex::types::Identifier became enum
+variant AcmeError:Conflict
+variant ChallengeType:DnsAccount01
+variant ChallengeType:DnsPersist01
+variant Commands:Agent
+variant Commands:Init
+variant Commands:Status

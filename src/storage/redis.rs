@@ -22,6 +22,18 @@ pub struct RedisStorage {
     manager: OnceCell<ConnectionManager>,
 }
 
+// Restore the auto traits the cached `ConnectionManager` (a
+// `tokio::sync::OnceCell<redis::aio::ConnectionManager>`) silently removed
+// when it replaced per-operation connections. This is a deliberate promise:
+// `ConnectionManager` multiplexes a self-healing connection that reconnects
+// on the next use after any failure (including one observed during an
+// unwind), so a `catch_unwind` that observes `&RedisStorage` mid-panic
+// cannot leave the backend in a state a subsequent operation would not
+// recover from. Downstream code compiled against acmex 0.8.0 relied on
+// these traits.
+impl std::panic::UnwindSafe for RedisStorage {}
+impl std::panic::RefUnwindSafe for RedisStorage {}
+
 impl RedisStorage {
     /// Creates a new `RedisStorage` instance with the specified Redis URL.
     pub fn new(redis_url: &str) -> Result<Self> {

@@ -85,8 +85,13 @@ must pass or have an explicit release-manager waiver"——以下逐项给出 wa
 - `src/storage/redis.rs:15`：`manager: OnceCell<redis::aio::ConnectionManager>` 取代每操作建连；
   `ConnectionManager` 非 unwind-safe，提交 `dc17605 "perf(storage): cursor SCAN and cached connection
   manager in legacy RedisStorage"`（CHANGELOG 性能条目）。
-- **结论：这是 11 项中唯一非预先设计的破坏**——性能重构的副作用，CHANGELOG 只记录了重构本身而未点名
-  auto-trait 丢失。实际影响低（存储经 `StorageBackend` trait 对象使用，正常消费方不依赖 auto trait）。
+- **处置：已修复（非 waiver）**——`src/storage/redis.rs` 显式恢复
+  `impl UnwindSafe / RefUnwindSafe for RedisStorage`，附书面论证：
+  `ConnectionManager` 是自愈式复用连接，任何失败（含 unwind 期间观察到的失败）后的下一次使用都会重连，
+  因此 `catch_unwind` 观察到 `&RedisStorage` 不会让后端停留在后续操作无法恢复的状态；
+  0.8.0 的下游依赖这两个 trait，恢复它们是真正的兼容性修复。
+- **结论：这是 11 项中唯一非预先设计的破坏，现已消除；waiver 清单（semver-waiver-accepted.txt）
+  覆盖其余 10 项检查。**
 
 ## 总体结论与处置
 
@@ -96,5 +101,8 @@ must pass or have an explicit release-manager waiver"——以下逐项给出 wa
   MIGRATION_v0.9.0 / MIGRATION_v0.10.0 均有对应条目）。
 - **未发现意外的功能性删除或静默行为破坏**。发布前对第 12 项二选一：(a) 由 release-manager 在本
   waiver 上签字放行（附上述影响评估）；(b) 在 `RedisStorage` 上恢复 auto-trait（如包一层 newtype）。
-- 本文件与 `RELEASE_DECISION.md` 的 semver gate 阻塞项一一对应，作为 waiver 附件归档；0.10.0 版本
-  bump 后（基线变为本次发布），本清单所列差异全部消失，后续 semver gate 恢复必须全绿。
+- 本文件与 `RELEASE_DECISION.md` 的 semver gate 阻塞项一一对应，作为 waiver 附件归档。
+- **门禁机制**：`scripts/run_semver_check.sh` 以
+  `docs/roadmap/v0.10.0/semver-waiver-accepted.txt`（机器无关签名单）核对本轮全部失败项——
+  全部覆盖则通过并注明 waiver；出现任何清单之外的破坏即失败。0.10.0 版本 bump 后（基线变为本次发布），
+  本清单所列差异全部消失，接受清单应收窄至空，后续 semver gate 恢复必须全绿。
