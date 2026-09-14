@@ -20,7 +20,7 @@ async-trait = "0.1.92"
 
 # Web & API Server
 axum = { version = "0.8.9", features = ["macros"] }
-reqwest = { version = "0.13.4", features = ["json", "gzip", "query", "form", "blocking"] }
+reqwest = { version = "0.13.5", features = ["json", "gzip", "query", "form", "blocking"] }
 urlencoding = "2.1.3"
 
 # Cryptography & Security
@@ -38,7 +38,7 @@ tokio-rustls = "0.26.5"
 # Serialization & Configuration
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-toml = "1.1.5"
+toml = "1.1.6"
 
 # Observability & Metrics
 tracing = "0.1.44"
@@ -50,12 +50,12 @@ opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 prometheus = "0.14"
 
 # DNS & Networking
-hickory-resolver = { version = "0.26.2", features = ["serde"] }
+hickory-resolver = { version = "0.26.3", features = ["serde"] }
 idna = "1.1.0"
 
 # Utilities
 clap = { version = "4.6", features = ["derive"] }
-jiff = { version = "0.2.35", features = ["serde"] }
+jiff = { version = "0.2.37", features = ["serde"] }
 rand = "0.10.2"
 regex = "1.13.1"
 
@@ -123,6 +123,6 @@ required-features = ["dns-cloudflare"]
 
 [dev-dependencies]
 mockito = "1.7.2"
-hickory-resolver = { version = "0.26.2", features = ["serde"] }
+hickory-resolver = { version = "0.26.3", features = ["serde"] }
 hex = "0.4.3"
 tower = { version = "0.5.3", features = ["util"] }
