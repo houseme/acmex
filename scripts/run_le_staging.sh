@@ -33,10 +33,62 @@ mkdir -p "$ACMEX_LE_STAGING_ARTIFACT_DIR"
 } >"$ACMEX_LE_STAGING_ARTIFACT_DIR/environment.txt"
 
 echo "== running LE staging preflight and evidence gate"
-if ! RUN_LE_STAGING=1 cargo test --test le_staging -- --ignored --nocapture 2>&1 \
-  | tee "$ACMEX_LE_STAGING_ARTIFACT_DIR/cargo-test-le-staging.log"; then
-  echo "== LE staging gate FAILED; artifacts: $ACMEX_LE_STAGING_ARTIFACT_DIR" >&2
-  exit 1
+run_cargo_gate() {
+  local name="$1"
+  shift
+  echo "== running $name"
+  if ! "$@" 2>&1 | tee "$ACMEX_LE_STAGING_ARTIFACT_DIR/${name}.log"; then
+    echo "== $name FAILED; artifacts: $ACMEX_LE_STAGING_ARTIFACT_DIR" >&2
+    exit 1
+  fi
+}
+
+scenario_selected() {
+  local needle="$1"
+  local raw="${ACMEX_LE_STAGING_SCENARIOS:-all}"
+  if [[ "$raw" == "all" ]]; then
+    return 0
+  fi
+
+  local item
+  IFS=',' read -ra items <<<"$raw"
+  for item in "${items[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+run_cargo_gate le-staging-preflight \
+  cargo test --test le_staging -- --ignored --nocapture
+
+if scenario_selected http-01 || scenario_selected dns-01 || \
+  scenario_selected renewal || scenario_selected profile; then
+  run_cargo_gate le-staging-issuance \
+    cargo test --test le_staging_issuance -- --ignored --nocapture
+fi
+
+if scenario_selected ip-http-01 || scenario_selected ip-tls-alpn-01; then
+  if [[ -z "${ACMEX_LE_STAGING_IP_SCENARIOS:-}" ]]; then
+    ip_scenarios=()
+    if scenario_selected ip-http-01; then
+      ip_scenarios+=(ipv4-http-01 ipv6-http-01)
+    fi
+    if scenario_selected ip-tls-alpn-01; then
+      ip_scenarios+=(ipv4-tls-alpn-01 ipv6-tls-alpn-01)
+    fi
+    export ACMEX_LE_STAGING_IP_SCENARIOS="$(IFS=,; echo "${ip_scenarios[*]}")"
+  fi
+  run_cargo_gate le-staging-ip \
+    cargo test --test le_staging_ip -- --ignored --nocapture
+fi
+
+if scenario_selected eab-ca; then
+  run_cargo_gate le-staging-eab \
+    cargo test --test le_staging_eab -- --ignored --nocapture
 fi
 
 if [[ -x "$SCRIPT_DIR/secret_scan.sh" ]]; then
