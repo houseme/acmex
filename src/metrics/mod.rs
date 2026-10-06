@@ -16,8 +16,11 @@ pub enum HealthStatus {
 /// Metrics registry wrapper
 pub struct MetricsRegistry {
     registry: Registry,
+    /// HTTP requests received by the REST API listener.
     pub requests_total: IntCounter,
+    /// Renewal operations successfully enqueued by the renewal controller.
     pub renewals_total: IntCounter,
+    /// Certificate lineages whose inventory currently has an active version.
     pub certs_managed: IntGauge,
     pub operations_total: IntCounterVec,
     pub operation_step_duration_seconds: HistogramVec,
@@ -37,6 +40,9 @@ pub struct MetricsRegistry {
 impl MetricsRegistry {
     pub fn registered_metric_names() -> &'static [&'static str] {
         &[
+            "acmex_requests_total",
+            "acmex_renewals_total",
+            "acmex_certs_managed",
             "acmex_operations_total",
             "acmex_operation_step_duration_seconds",
             "acmex_acme_requests_total",
@@ -55,9 +61,21 @@ impl MetricsRegistry {
 
     pub fn new() -> Self {
         let registry = Registry::new();
-        let requests_total = IntCounter::new("acmex_requests_total", "Total requests").unwrap();
-        let renewals_total = IntCounter::new("acmex_renewals_total", "Total renewals").unwrap();
-        let certs_managed = IntGauge::new("acmex_certs_managed", "Managed cert count").unwrap();
+        let requests_total = IntCounter::new(
+            "acmex_requests_total",
+            "HTTP requests received by the REST API listener",
+        )
+        .unwrap();
+        let renewals_total = IntCounter::new(
+            "acmex_renewals_total",
+            "Renewal operations successfully enqueued by the renewal controller",
+        )
+        .unwrap();
+        let certs_managed = IntGauge::new(
+            "acmex_certs_managed",
+            "Certificate lineages whose inventory has an active version",
+        )
+        .unwrap();
         let operations_total = IntCounterVec::new(
             Opts::new("acmex_operations_total", "Certificate lifecycle operations"),
             &["kind", "result", "error_class"],
@@ -263,6 +281,9 @@ mod tests {
     fn t11_metrics_are_registered() {
         let names = MetricsRegistry::registered_metric_names();
         for expected in [
+            "acmex_requests_total",
+            "acmex_renewals_total",
+            "acmex_certs_managed",
             "acmex_operations_total",
             "acmex_operation_step_duration_seconds",
             "acmex_acme_requests_total",

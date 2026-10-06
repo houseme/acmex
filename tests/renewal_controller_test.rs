@@ -657,6 +657,14 @@ async fn renewal_scan_records_metrics() {
         (0..=86_400).contains(&value),
         "expiry gauge should be ~12h in seconds, got {value}"
     );
+    assert!(text.contains("acmex_certs_managed 1"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "acmex_renewals_total {}",
+            report.operations_created
+        )),
+        "{text}"
+    );
 
     // Due renewals are counted by priority (seeded lineage is critical here).
     if report.operations_created > 0 {
@@ -690,4 +698,5 @@ async fn renewal_scan_records_failure_metric() {
         text.contains(r#"acmex_renewal_failures_total{ca="any",error_class="retryable"} 1"#),
         "{text}"
     );
+    assert!(text.contains("acmex_renewals_total 0"), "{text}");
 }

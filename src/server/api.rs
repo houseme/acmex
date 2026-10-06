@@ -4,6 +4,7 @@
 use axum::{
     Router,
     body::Body,
+    extract::State,
     http::{HeaderValue, header::HeaderName},
     middleware::{self, Next},
     response::Response,
@@ -106,6 +107,18 @@ pub async fn add_legacy_api_deprecation_headers(
         HeaderValue::from_static(LEGACY_API_MIGRATION_LINK),
     );
     response
+}
+
+/// Counts every request accepted by the REST API listener, including failed
+/// authentication and health checks. The dedicated scrape listener is a
+/// separate server and deliberately does not feed this API-traffic counter.
+pub async fn count_api_request(
+    State(metrics): State<crate::metrics::SharedMetrics>,
+    request: axum::extract::Request<Body>,
+    next: Next,
+) -> Response {
+    metrics.requests_total.inc();
+    next.run(request).await
 }
 
 /// Starts the REST API server on the specified address.
@@ -318,7 +331,9 @@ pub async fn start_server(
             .nest("/api", api_routes)
             .nest("/api/v1", api_v1_routes);
     }
-    let app = app.with_state(state);
+    let app = app
+        .with_state(state)
+        .layer(middleware::from_fn_with_state(metrics, count_api_request));
 
     // Bind and serve
     let listener = TcpListener::bind(addr).await.map_err(|e| {
@@ -371,7 +386,16 @@ impl axum::extract::FromRef<AppState> for Arc<WebhookHandler> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_ca_label;
+    use super::{count_api_request, sanitize_ca_label};
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        middleware,
+        routing::get,
+    };
+    use std::sync::Arc;
+    use tower::ServiceExt;
 
     #[test]
     fn ca_labels_stay_low_cardinality() {
@@ -382,5 +406,36 @@ mod tests {
             "https___ca_example_com_dir"
         );
         assert_eq!(sanitize_ca_label(""), "custom");
+    }
+
+    #[tokio::test]
+    async fn request_counter_tracks_each_api_request_once() {
+        let metrics = Arc::new(crate::metrics::MetricsRegistry::new());
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .layer(middleware::from_fn_with_state(
+                metrics.clone(),
+                count_api_request,
+            ));
+
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/health")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert!(
+            metrics.gather_text().contains("acmex_requests_total 2"),
+            "{}",
+            metrics.gather_text()
+        );
     }
 }

@@ -487,8 +487,9 @@ impl RenewalController {
         self
     }
 
-    /// Attaches the shared metrics registry (T11): due renewals, failures
-    /// and active-version expiry are recorded with low-cardinality labels.
+    /// Attaches the shared metrics registry (T11): inventory, enqueued
+    /// renewals, due renewals, failures and active-version expiry are
+    /// recorded with low-cardinality labels.
     pub fn with_metrics(mut self, metrics: crate::metrics::SharedMetrics) -> Self {
         self.repositories = self.repositories.clone().observe_errors(metrics.clone());
         self.metrics = Some(metrics);
@@ -584,6 +585,17 @@ impl RenewalController {
             .map_err(|_| AcmeError::invalid_input("renewal scan cursor must be numeric"))?;
         let mut lineages = self.repositories.lineages.list().await?;
         lineages.sort_by(|a, b| a.value.id.cmp(&b.value.id));
+        if let Some(metrics) = &self.metrics {
+            // This is an inventory gauge, not a scan-page counter: update it
+            // from the complete lineage listing before applying pagination.
+            let managed = lineages
+                .iter()
+                .filter(|lineage| lineage.value.active_version_id.is_some())
+                .count();
+            metrics
+                .certs_managed
+                .set(i64::try_from(managed).unwrap_or(i64::MAX));
+        }
         let total = lineages.len();
         let page_size = self.config.page_size.max(1);
         let page = lineages.into_iter().skip(offset).take(page_size);
@@ -635,7 +647,12 @@ impl RenewalController {
                 .create_renewal_operation_with_lease(&lineage, active_version_id)
                 .await
             {
-                Ok(true) => report.operations_created += 1,
+                Ok(true) => {
+                    report.operations_created += 1;
+                    if let Some(metrics) = &self.metrics {
+                        metrics.renewals_total.inc();
+                    }
+                }
                 Ok(false) => report.leases_skipped += 1,
                 Err(err) => {
                     if let Some(metrics) = &self.metrics {
