@@ -93,6 +93,9 @@ fn missing_required_env(scenarios: &BTreeSet<String>) -> Vec<String> {
     }
     if scenarios.contains("sink-kubernetes") {
         require_var(&mut missing, "ACMEX_LIVE_KUBECONFIG");
+        require_var(&mut missing, "ACMEX_LIVE_K8S_ENDPOINT");
+        require_var(&mut missing, "ACMEX_LIVE_K8S_TOKEN");
+        require_var(&mut missing, "ACMEX_LIVE_K8S_CA");
         require_var(&mut missing, "ACMEX_LIVE_K8S_NAMESPACE");
     }
     if scenarios.contains("sink-vault") {
@@ -153,14 +156,18 @@ fn live_infra_script_routes_every_manifest_scenario() {
             "run_live_infra.sh must explicitly route `{scenario}`"
         );
     }
-    for artifact in [
-        "sink-kubernetes-scope.md",
-        "sink-vault-scope.md",
-        "dual-process-fencing.log",
+    assert!(
+        script.contains("$ACMEX_LIVE_INFRA_ARTIFACT_DIR/${name}.log"),
+        "run_cargo_gate must archive every runner's output under its scenario name"
+    );
+    for runner in [
+        "--test k8s_sink_live",
+        "--test vault_sink_live",
+        "--test dual_instance_fencing_live",
     ] {
         assert!(
-            script.contains(artifact),
-            "evidence-only scenarios must require archived artifact `{artifact}`"
+            script.contains(runner),
+            "run_live_infra.sh must invoke the live runner `{runner}`"
         );
     }
 }
@@ -196,8 +203,8 @@ async fn live_infra_preflight_manifest_gate() {
             "redis-repository-contract.log",
             "reference-http-agent.log",
             "sink-http-agent.log",
-            "sink-kubernetes-scope.md",
-            "sink-vault-scope.md",
+            "sink-kubernetes.log",
+            "sink-vault.log",
             "dual-process-fencing.log"
         ],
         "secret_values_recorded": false,

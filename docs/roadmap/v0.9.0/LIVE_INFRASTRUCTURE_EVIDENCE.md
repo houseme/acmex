@@ -12,9 +12,9 @@ claim any live evidence by itself; a skipped or preflight-only run is not a rele
 | redis | `ACMEX_LIVE_REDIS_URL` plus an operator note describing AOF/RDB and timeout behavior | `redis-repository-contract.log` |
 | reference-http-agent | none beyond `RUN_LIVE_INFRA=1`; runs the real `acmex agent serve` child-process contract | `reference-http-agent.log` |
 | sink-http-agent | `ACMEX_LIVE_HTTP_AGENT_URL`, `ACMEX_LIVE_HTTP_AGENT_TOKEN_REF` (`env:`/`file:` SecretRef) | `sink-http-agent.log` |
-| sink-kubernetes | `ACMEX_LIVE_KUBECONFIG`, `ACMEX_LIVE_K8S_NAMESPACE` | `sink-kubernetes-scope.md` |
-| sink-vault | `ACMEX_LIVE_VAULT_ADDR`, `ACMEX_LIVE_VAULT_TOKEN_REF` | `sink-vault-scope.md` |
-| dual-process-fencing | `ACMEX_LIVE_FENCING_REPOSITORY`, `ACMEX_LIVE_FENCING_WORKERS=2` | `dual-process-fencing.log` |
+| sink-kubernetes | readable `ACMEX_LIVE_KUBECONFIG` plus `ACMEX_LIVE_K8S_ENDPOINT`, `ACMEX_LIVE_K8S_TOKEN=env:/file:…`, readable `ACMEX_LIVE_K8S_CA`, and dedicated `ACMEX_LIVE_K8S_NAMESPACE` | `sink-kubernetes.log` |
+| sink-vault | `ACMEX_LIVE_VAULT_ADDR`, `ACMEX_LIVE_VAULT_TOKEN_REF=env:/file:…` and optional `ACMEX_LIVE_VAULT_MOUNT` | `sink-vault.log` |
+| dual-process-fencing | shared `ACMEX_LIVE_FENCING_REPOSITORY=redis://…` and `ACMEX_LIVE_FENCING_WORKERS=2` | `dual-process-fencing.log` |
 
 ## Redis Failover Scope
 
@@ -75,4 +75,3 @@ be copied into artifacts.
   This replaces the last "remote agent has only fake evidence" limitation
   with a reproducible real-process run; a production agent with persistent
   state can substitute the reference binary without wire changes.
-

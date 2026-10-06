@@ -1,7 +1,7 @@
 # T19/T20 外部验证资产准备手册
 
 **适用范围**：T19 Let's Encrypt staging / 真实 CA 特性验证，T20 live DNS、外部 HTTP agent、Redis managed failover、Kubernetes/Vault/fencing 外部证据准备。
-**最后更新**：2026-09-07
+**最后更新**：2026-09-22
 **核心原则**：目录查询、环境预检、compile gate、单节点本地契约都不是 release pass；只有使用受控外部资产完成对应场景并归档证据，才能勾选 T19/T20 的外部验收项。
 
 ---
@@ -21,6 +21,33 @@
 9. **准备 Redis managed failover 环境**：托管 Redis/Sentinel/Cluster/云 HA，具备可控 failover 触发和日志/指标导出。
 10. **准备 K8s/Vault/fencing 证据资料**：当前脚本对 K8s/Vault/fencing 要求归档证据文件；没有 runner 时不得让脚本假绿。
 11. **按场景执行脚本**：先跑最小 smoke，再逐项扩展到完整 release pass；每次失败都记录是环境问题、CA 行为差异，还是 AcmeX bug。
+
+### 1.1 平台账号注册清单（先注册，后发最小权限凭据）
+
+下表是当前 T19/T20 未执行场景所需的外部账号清单。**仅创建账号、zone、项目或测试资源不构成验证通过**；每项仍须运行对应 gate 并归档无敏感信息的结果。注册时应使用组织控制的邮箱、启用 MFA、使用专用测试项目/订阅，并由密码管理器或密钥系统保存凭据。
+
+| 优先级 | 平台/资源 | 是否需要注册或开通 | 需要准备的最小权限/资产 | 覆盖的验证 |
+|---|---|---|---|---|
+| P0 | [Let's Encrypt Staging](https://letsencrypt.org/docs/staging-environment/) | 是：独立 staging ACME 账户和可收信邮箱 | staging 账户邮箱、测试域名、staging trust-anchor PEM | HTTP-01、续签、ARI、profile、IP 场景的主 CA |
+| P0 | [Cloudflare](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/) | 是：组织账号和隔离 DNS zone | 仅该 zone 的 `Zone DNS Read/Edit` API Token | T20 Cloudflare DNS 契约；T19 DNS-01 |
+| P0 | [AWS / Route 53](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-permissions.html) | 是：AWS 账号、专用 public hosted zone、专用 IAM role/profile | 仅目标 hosted zone 的 TXT `CREATE/UPSERT/DELETE`、读取记录与变更状态权限；限制记录名前缀 | T20 Route53 DNS 契约；T19 DNS-01 |
+| P0 | 一家要求 EAB 的 ACME CA（ZeroSSL 或 Google Trust Services staging，二选一） | 是：该 CA 的测试账户/EAB enrollment | CA directory、EAB key id、HMAC 的 `env:`/`file:` SecretRef、测试域名 | T19 EAB 注册与下单；badNonce/429 抽样 |
+| P0 | 公网主机或云服务商 | 视现有资产；没有则开通一台隔离实例/负载入口 | 可控公网 IPv4 和 IPv6、TCP/80 与 TCP/443 绑定权、测试 DNS 指向权限 | T19 HTTP-01、TLS-ALPN-01、RFC 8738 IP 证书 |
+| P1 | 托管 Redis（Redis Cloud 或组织已有 HA Redis） | 是：若没有可触发 failover 的受控 Redis 环境 | 独立数据库/前缀、TLS URL、failover 操作权限、日志/指标只读权限 | T20 managed failover 与恢复边界 |
+| P1 | Kubernetes 集群提供商或组织集群 | 视现有集群；可用 kind 仅作本地契约，不替代外部环境 | 专用 namespace、ServiceAccount/RBAC（仅 Secrets CRUD）、kubeconfig、CA、token SecretRef | T20 K8s Secret sink lifecycle |
+| P1 | Vault（HCP Vault 或组织 Vault） | 视现有实例；dev server 仅作受控本地证据 | 专用 KV v2 mount/path、最小 read/create/update/delete/list policy、token SecretRef | T20 Vault KV v2 sink lifecycle |
+| P1 | 独立 HTTP agent 运行环境 | 不一定：可使用已有独立主机/容器平台 | 与测试进程分离的 agent、测试 target namespace、最小 bearer token SecretRef | T20 外部 HTTP agent sink |
+| P2 | AWS KMS | 仅在关闭 `kms-aws` 外部验证债时需要 | 专用 KMS key、最小 `Sign`/`GetPublicKey` 等所需 IAM policy、CloudTrail/指标只读 | FEATURE_MATRIX 的 live AWS KMS/IAM 验证 |
+| P2 | 托管 SMTP 服务 | 仅在关闭外部 SMTP 行为债时需要 | sandbox/测试 sender、最小发送凭据、退信/投递日志只读 | 外部 SMTP 投递验证 |
+
+#### 注册与凭据验收顺序
+
+1. 先完成 P0 的 LE staging、Cloudflare、AWS/Route53、一个 EAB CA 以及公网主机资产；不要同时注册所有可选 DNS provider。
+2. 为 Cloudflare、AWS、EAB CA、Redis、K8s、Vault 和 agent 分别创建**独立**测试凭据，避免跨系统或生产环境复用。
+3. 只将凭据名称或 SecretRef 写入运行环境，例如 `env:ACMEX_EAB_HMAC`；禁止把 token、kubeconfig、AWS secret 或 Vault token 写进此文档、shell history、artifact 或 git。
+4. 注册完成后，按第 5 节批次先运行最小场景；每个成功 run 才能更新 `RELEASE_CHECKLIST.md`、`FEATURE_MATRIX.md` 和 `KNOWN_LIMITATIONS.md` 的事实状态。
+
+不需要额外平台注册的项目：本地 Pebble、reference HTTP agent 子进程、单节点 Redis、Vault dev server、kind 集群都可作为本地/受控契约环境；它们不替代上表要求的外部发布证据。
 
 ---
 
@@ -73,8 +100,8 @@ target/
     redis-repository-contract.log
     redis-managed-failover-summary.md
     sink-http-agent.log
-    sink-kubernetes-scope.md
-    sink-vault-scope.md
+    sink-kubernetes.log
+    sink-vault.log
     dual-process-fencing.log
 ```
 
@@ -253,9 +280,9 @@ RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=dns-cloudflare,dns-route53,sink-http
 | `redis` | 已路由到 Redis repository contract | 单节点可本地跑；managed failover 仍需外部 HA |
 | `reference-http-agent` | 已启动真实 reference agent 子进程契约 | 否，属于本地/子进程证据 |
 | `sink-http-agent` | 已路由到外部 HTTP agent ignored test | 是 |
-| `sink-kubernetes` | 当前要求归档 `sink-kubernetes-scope.md` | 是，仓库内无 runner |
-| `sink-vault` | 当前要求归档 `sink-vault-scope.md` | 是，仓库内无 runner |
-| `dual-process-fencing` | 当前要求归档 `dual-process-fencing.log` | 是，直到 first-class runner 合入 |
+| `sink-kubernetes` | 已路由到 Kubernetes Secret sink ignored lifecycle runner | 是 |
+| `sink-vault` | 已路由到 Vault KV v2 sink ignored lifecycle runner | 是 |
+| `dual-process-fencing` | 已路由到 Redis-backed dual-instance fencing ignored runner | 是 |
 
 ### 4.1 T20 公共变量
 
@@ -265,7 +292,7 @@ RUN_LIVE_INFRA=1 ACMEX_LIVE_INFRA_SCENARIOS=dns-cloudflare,dns-route53,sink-http
 | `ACMEX_LIVE_INFRA_SCENARIOS` | 逗号分隔场景名；建议一次只跑一类外部系统，便于归因 |
 | `ACMEX_LIVE_INFRA_ARTIFACT_DIR` | 证据目录；未设置时脚本生成 `target/live-infra/<timestamp>` |
 
-脚本会先运行 `live-infra-preflight`。未知场景名会直接失败；选中 K8s/Vault/fencing 但没有对应非空归档文件也会失败。
+脚本会在运行 `live-infra-preflight` 前检查所选场景的资产。未知场景名会直接失败；缺少受控环境、可读证书/配置或 `env:`/`file:` 凭据引用时以 exit 77 显式跳过，不能视为发布通过。runner 输出会归档并做高置信度 secret pattern 扫描。
 
 ### 4.2 Cloudflare Live DNS
 
@@ -362,13 +389,16 @@ Agent 要求：
 
 ### 4.6 Kubernetes Sink Scope
 
-当前仓库脚本没有 Kubernetes sink runner；选中 `sink-kubernetes` 时必须准备非空 `sink-kubernetes-scope.md`。
+`sink-kubernetes` 运行 `tests/k8s_sink_live.rs` 的完整 lifecycle 契约：stage、activate、health、篡改检测、rollback 与 cleanup；测试通过独立 `kubectl` 读取交叉验证。脚本要求以下资产，缺任一项以 exit 77 跳过。
 
 建议记录：
 
 | 资料 | 要求 |
 |---|---|
-| `ACMEX_LIVE_KUBECONFIG` | 只记录引用位置或 SecretRef，不记录内容 |
+| `ACMEX_LIVE_KUBECONFIG` | 可读 kubeconfig；只记录引用位置，不记录内容 |
+| `ACMEX_LIVE_K8S_ENDPOINT` | 受控 API server URL |
+| `ACMEX_LIVE_K8S_TOKEN` | 仅 `env:`/`file:` SecretRef |
+| `ACMEX_LIVE_K8S_CA` | 可读 API server CA PEM |
 | `ACMEX_LIVE_K8S_NAMESPACE` | 专用 namespace |
 | RBAC | 最小权限：目标 namespace 中 Secret create/get/update/delete/list/watch |
 | Secret 形态 | type、key 名称、owner label/annotation、版本标签 |
@@ -376,13 +406,13 @@ Agent 要求：
 
 通过标准：
 
-- scope 文档能证明实环境演练完成，而不只是权限说明。
+- `sink-kubernetes.log` 显示 lifecycle runner 通过，而不只是权限说明。
 - Secret 不残留，或残留原因和手工清理步骤明确。
 - 不能把 scope 文档替代为代码级实现声明。
 
 ### 4.7 Vault Sink Scope
 
-当前仓库脚本没有 Vault sink runner；选中 `sink-vault` 时必须准备非空 `sink-vault-scope.md`。
+`sink-vault` 运行 `tests/vault_sink_live.rs` 的 KV v2 lifecycle 契约：stage、activate、health、篡改检测、rollback 与 cleanup。脚本将公开 gate 变量适配为测试变量，token 仍只以 SecretRef 传递。
 
 建议记录：
 
@@ -396,30 +426,29 @@ Agent 要求：
 
 通过标准：
 
-- KV 写入、激活指针、回滚指针和 cleanup 行为都有证据。
+- `sink-vault.log` 显示 KV 写入、激活指针、回滚指针和 cleanup 行为均通过。
 - Vault token 不出现在日志和 artifact 中。
 - 失败时能区分 auth/permission/path/version 冲突。
 
 ### 4.8 Dual-process Fencing
 
-当前仓库脚本没有 first-class fencing runner；选中 `dual-process-fencing` 时必须准备非空 `dual-process-fencing.log`。
+`dual-process-fencing` 运行 `tests/dual_instance_fencing_live.rs`：两个独立 Redis 连接竞争同一续签 lease，断言只创建一个 renew operation，并验证 expiry takeover 后 fencing token 严格单调。它是 live shared-store/dual-instance 演练，不替代未来真正跨 OS 进程且带 ACME 与 deploy 副作用的更高层演练。
 
 需要准备：
 
 | 变量/资料 | 准备内容 |
 |---|---|
-| `ACMEX_LIVE_FENCING_REPOSITORY` | 两个进程共享的 repository，File 共享目录或 Redis 均可 |
-| `ACMEX_LIVE_FENCING_WORKERS=2` | 至少两个真实 worker 进程 |
+| `ACMEX_LIVE_FENCING_REPOSITORY` | 两个实例共享的 `redis://` 或 `rediss://` repository URL |
+| `ACMEX_LIVE_FENCING_WORKERS=2` | 固定为两个独立 Redis client 实例 |
 | 同一 lineage | 两个 worker 同时扫描/续签同一 lineage |
 | 外部副作用计数 | order、challenge、deployment activate 的唯一性断言 |
 | 观测输出 | lease 获取/续约/CAS 冲突/worker 退出或重试日志 |
 
 通过标准：
 
-- 两个真实进程并发时，只有一个 worker 完成续签和部署激活。
-- 另一个 worker 明确观察到 lease/CAS/fencing 冲突并安全退出或重试。
-- 同一 version 的 stage/activate 不重复产生不可接受副作用。
-- 调度器重复扫描不创建重复 order。
+- 两个独立 client 并发扫描时，只有一个实例创建 renew operation。
+- lease contender 被拒绝，过期 takeover 的 fencing token 严格递增。
+- 这条 contract 不声称已经验证跨进程 ACME order 或 deploy activation 的唯一性；该边界仍须在后续真实 worker 演练中补齐。
 
 ---
 
@@ -515,32 +544,26 @@ scripts/run_live_infra.sh
 
 随后执行受控 failover，并补充 `redis-managed-failover-summary.md`。该 summary 至少写清：触发方式、故障窗口、客户端观察到的错误、恢复后 resume 结果、是否有重复副作用、持久化边界。
 
-### 批次 G：K8s/Vault/fencing 归档证据
+### 批次 G：K8s/Vault/fencing live runners
 
-在没有 first-class runner 前，先把真实演练输出整理成脚本要求的文件名：
-
-```text
-sink-kubernetes-scope.md
-sink-vault-scope.md
-dual-process-fencing.log
-```
-
-再运行：
+将受控环境的配置与凭据引用注入脚本，再运行：
 
 ```bash
 RUN_LIVE_INFRA=1 \
 ACMEX_LIVE_INFRA_SCENARIOS=sink-kubernetes,sink-vault,dual-process-fencing \
-ACMEX_LIVE_KUBECONFIG=<kubeconfig-ref> \
+ACMEX_LIVE_KUBECONFIG=<readable-kubeconfig-path> \
+ACMEX_LIVE_K8S_ENDPOINT=<kubernetes-api-url> \
+ACMEX_LIVE_K8S_TOKEN=env:ACMEX_TEST_K8S_TOKEN \
+ACMEX_LIVE_K8S_CA=<readable-ca-pem-path> \
 ACMEX_LIVE_K8S_NAMESPACE=<namespace> \
 ACMEX_LIVE_VAULT_ADDR=<vault-addr> \
-ACMEX_LIVE_VAULT_TOKEN_REF=<secret-ref> \
-ACMEX_LIVE_FENCING_REPOSITORY=<shared-repository> \
+ACMEX_LIVE_VAULT_TOKEN_REF=env:ACMEX_TEST_VAULT_TOKEN \
+ACMEX_LIVE_FENCING_REPOSITORY=redis://<host>/<disposable-db> \
 ACMEX_LIVE_FENCING_WORKERS=2 \
-ACMEX_LIVE_INFRA_ARTIFACT_DIR=<dir-containing-required-evidence-files> \
 scripts/run_live_infra.sh
 ```
 
-如果三个文件不存在或为空，脚本应失败。这是预期行为，用于防止没有真实 runner 时出现假绿。
+缺少任一所需资产时脚本以 exit 77 跳过；三条 runner 都通过后，日志归档为 `sink-kubernetes.log`、`sink-vault.log`、`dual-process-fencing.log`。跳过不是发布通过。
 
 ---
 
@@ -559,9 +582,9 @@ scripts/run_live_infra.sh
 | Route53 DNS | Hosted zone、zone id、AWS credential | `RUN_LIVE_DNS_ROUTE53`、`ACMEX_LIVE_DNS_ROUTE53_HOSTED_ZONE_ID`、`AWS_PROFILE` | `live-dns-route53.log` |
 | 外部 HTTP agent | 独立 agent URL、token SecretRef | `ACMEX_LIVE_HTTP_AGENT_URL`、`ACMEX_LIVE_HTTP_AGENT_TOKEN_REF` | `sink-http-agent.log` |
 | Redis managed failover | HA Redis、failover 权限、日志/指标 | `ACMEX_LIVE_REDIS_URL` | `redis-repository-contract.log`、`redis-managed-failover-summary.md` |
-| Kubernetes scope | kubeconfig、namespace、RBAC、Secret 形态 | `ACMEX_LIVE_KUBECONFIG`、`ACMEX_LIVE_K8S_NAMESPACE` | `sink-kubernetes-scope.md` |
-| Vault scope | Vault addr、token SecretRef、KV path/policy | `ACMEX_LIVE_VAULT_ADDR`、`ACMEX_LIVE_VAULT_TOKEN_REF` | `sink-vault-scope.md` |
-| 双进程 fencing | 共享 repo、两个 worker、唯一副作用断言 | `ACMEX_LIVE_FENCING_REPOSITORY`、`ACMEX_LIVE_FENCING_WORKERS=2` | `dual-process-fencing.log` |
+| Kubernetes sink | kubeconfig、endpoint、CA、namespace、token SecretRef | `ACMEX_LIVE_KUBECONFIG`、`ACMEX_LIVE_K8S_ENDPOINT`、`ACMEX_LIVE_K8S_TOKEN`、`ACMEX_LIVE_K8S_CA`、`ACMEX_LIVE_K8S_NAMESPACE` | `sink-kubernetes.log` |
+| Vault sink | Vault addr、token SecretRef、KV path/policy | `ACMEX_LIVE_VAULT_ADDR`、`ACMEX_LIVE_VAULT_TOKEN_REF` | `sink-vault.log` |
+| 双实例 fencing | shared Redis、两个 client、唯一 renew operation/fencing monotonicity | `ACMEX_LIVE_FENCING_REPOSITORY`、`ACMEX_LIVE_FENCING_WORKERS=2` | `dual-process-fencing.log` |
 
 ---
 
