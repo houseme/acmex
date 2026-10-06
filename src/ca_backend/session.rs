@@ -172,6 +172,15 @@ impl AcmeSession {
         *self.directory.write().await = None;
     }
 
+    /// Seeds the session directory cache from a compatibility facade.
+    ///
+    /// The supplied value has already been fetched and parsed by that facade;
+    /// accepting it avoids an extra directory round trip while subsequent
+    /// JWS execution still uses this session's nonce and error handling.
+    pub async fn prime_directory(&self, directory: Directory) {
+        *self.directory.write().await = Some(directory);
+    }
+
     /// The JWK for the account key, derived from the key itself (Ed25519,
     /// ECDSA or RSA).
     fn jwk(&self) -> Result<Jwk> {

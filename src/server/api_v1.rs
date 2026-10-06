@@ -8,9 +8,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::application::{
-    ActorContext, CancelOperation, CertificateApplication, CertificateQuery,
+    AccountApplication, ActorContext, CancelOperation, CertificateApplication, CertificateQuery,
     CreateCertificateIntent, DeployCertificate, IssueCertificate, RenewCertificate,
-    RevokeCertificate,
+    RevokeCertificate, RolloverAccountKey,
 };
 use crate::domain::{ChallengeLeaseId, IntentId, LineageId, OperationId, TargetId, VersionId};
 use crate::error::{AcmeError, Result};
@@ -35,6 +35,7 @@ pub fn routes() -> Router<AppState> {
         .route("/certificate-versions/{id}/chain", get(get_version_chain))
         .route("/certificate-versions/{id}/deploy", post(deploy_version))
         .route("/certificate-versions/{id}/revoke", post(revoke_version))
+        .route("/accounts/{id}/key-rollover", post(rollover_account_key))
         .route("/operations", get(list_operations))
         .route("/operations/{id}", get(get_operation))
         .route("/operations/{id}/cancel", post(cancel_operation))
@@ -185,6 +186,9 @@ impl ApiProblem {
             AcmeError::NotFound(_) => ("RESOURCE_NOT_FOUND", false),
             AcmeError::Conflict(_) => ("IDEMPOTENCY_OR_CAS_CONFLICT", false),
             AcmeError::Configuration(_) => ("CONFIGURATION_ERROR", false),
+            AcmeError::Protocol(_) => ("ACME_PROTOCOL_ERROR", false),
+            AcmeError::Account(_) => ("ACCOUNT_OPERATION_FAILED", false),
+            AcmeError::Storage(_) => ("DURABILITY_FAILURE", false),
             AcmeError::RateLimited(_) => ("RATE_LIMITED", true),
             AcmeError::Timeout(_) => ("TIMEOUT", true),
             AcmeError::Transport(_) => ("UPSTREAM_TRANSPORT_ERROR", true),
@@ -287,6 +291,40 @@ fn query(state: &AppState) -> Result<&std::sync::Arc<dyn CertificateQuery>> {
         .query
         .as_ref()
         .ok_or_else(|| AcmeError::configuration("certificate query service is not configured"))
+}
+
+fn account_application(state: &AppState) -> Result<&std::sync::Arc<dyn AccountApplication>> {
+    state
+        .account_application
+        .as_ref()
+        .ok_or_else(|| AcmeError::configuration("account lifecycle service is not configured"))
+}
+
+/// POST /accounts/{id}/key-rollover
+///
+/// Executes the RFC 8555 keyChange exchange synchronously. This is not a
+/// queued certificate operation: the CA's key transition is irreversible and
+/// its success must be durably committed to the account secret store before
+/// this endpoint reports success. Concurrent attempts are fenced by the
+/// repository lease and return 409.
+pub async fn rollover_account_key(
+    State(state): State<AppState>,
+    actor: Option<Extension<ActorContext>>,
+    Path(id): Path<String>,
+) -> Response {
+    let result = async {
+        account_application(&state)?
+            .rollover_account_key(RolloverAccountKey {
+                context: actor_context(actor),
+                account_id: id,
+            })
+            .await
+    }
+    .await;
+    match result {
+        Ok(view) => Json(view).into_response(),
+        Err(err) => error_response(err),
+    }
 }
 
 pub async fn create_intent(

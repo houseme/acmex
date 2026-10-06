@@ -14,7 +14,7 @@ use acmex::ca_backend::{
 use acmex::dns::spec::SecretRef;
 use acmex::domain::Identifier;
 use acmex::error::AcmeError;
-use acmex::repository::MemoryRepository;
+use acmex::repository::{FileSecretStore, MemoryRepository};
 use jiff::Timestamp;
 
 fn now() -> Timestamp {
@@ -1348,6 +1348,155 @@ async fn key_rollover_sends_double_jws_and_switches_to_the_new_key() {
         record.value.account_url.as_deref(),
         Some("https://acme.example/acct/77")
     );
+}
+
+/// A control-plane rollover must not replace the durable local signing key
+/// until the CA has accepted `keyChange`; after success the restart source of
+/// truth is the new PEM, not merely the backend's in-memory key.
+#[tokio::test]
+async fn key_rollover_commits_the_new_key_to_the_configured_secret_store_after_ca_success() {
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/78".to_string()),
+            ),
+    );
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+
+    let secret_root = std::env::temp_dir().join(format!(
+        "acmex-rollover-secret-store-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let secret_store = FileSecretStore::new(&secret_root);
+    let old_key = ed25519_key();
+    let new_key = ed25519_key();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport,
+        old_key,
+        MemoryRepository::new().into_set(),
+    )
+    .with_account_secret_store(secret_store.clone(), "account_key_test-ca");
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap();
+
+    let persisted = secret_store
+        .get("account_key_test-ca")
+        .await
+        .unwrap()
+        .expect("successful rollover must persist its restart key");
+    let persisted = KeyPair::from_pem(&String::from_utf8(persisted).unwrap()).unwrap();
+    assert_eq!(persisted.public_key_bytes(), new_key.public_key_bytes());
+    std::fs::remove_dir_all(secret_root).unwrap();
+}
+
+/// A local durability failure occurs before the irreversible `keyChange`
+/// request. The old CA account and active local key therefore remain usable;
+/// no unpersisted replacement is ever sent to the CA.
+#[tokio::test]
+async fn key_rollover_refuses_to_contact_the_ca_when_candidate_staging_fails() {
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/79".to_string()),
+            ),
+    );
+    let secret_root = std::env::temp_dir().join(format!(
+        "acmex-rollover-blocked-secret-store-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    // A regular file in place of the secret-store directory makes the
+    // candidate's first durable write fail deterministically.
+    std::fs::write(&secret_root, b"not a directory").unwrap();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport.clone(),
+        ed25519_key(),
+        MemoryRepository::new().into_set(),
+    )
+    .with_account_secret_store(FileSecretStore::new(&secret_root), "account_key_test-ca");
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    let error = backend
+        .roll_account_key(&account, ed25519_key())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AcmeError::Storage(_)));
+    assert_eq!(transport.post_count("key-change"), 0);
+    std::fs::remove_file(secret_root).unwrap();
+}
+
+/// If promotion of the active secret name fails after CA acceptance, the
+/// fsynced candidate remains available for startup recovery instead of losing
+/// the only private key the CA now recognizes.
+#[tokio::test]
+async fn key_rollover_keeps_the_durable_candidate_when_active_promotion_fails() {
+    let transport = standard_transport();
+    transport.push(
+        ScriptedResponse::json("new-account", 201, serde_json::json!({"status": "valid"}))
+            .with_headers(
+                Some("acct-nonce".to_string()),
+                None,
+                Some("https://acme.example/acct/80".to_string()),
+            ),
+    );
+    transport.push(ScriptedResponse::json(
+        "key-change",
+        200,
+        serde_json::json!({"status": "valid"}),
+    ));
+    let secret_root = std::env::temp_dir().join(format!(
+        "acmex-rollover-promotion-failure-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir(&secret_root).unwrap();
+    // `put(active)` writes its temporary file but cannot atomically replace
+    // a directory at the final active-secret location.
+    std::fs::create_dir(secret_root.join("account_key_test-ca.enc")).unwrap();
+    let secret_store = FileSecretStore::new(&secret_root);
+    let new_key = ed25519_key();
+    let backend = AcmeCaBackend::with_fake_transport(
+        "test-ca",
+        "https://acme.example/directory",
+        transport,
+        ed25519_key(),
+        MemoryRepository::new().into_set(),
+    )
+    .with_account_secret_store(secret_store.clone(), "account_key_test-ca");
+
+    let account = backend.ensure_account(&account_ref()).await.unwrap();
+    let error = backend
+        .roll_account_key(&account, new_key.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AcmeError::Storage(_)));
+    let candidate = secret_store
+        .get("account_key_test-ca.pending")
+        .await
+        .unwrap()
+        .expect("promotion failure must retain the staged recovery key");
+    let candidate = KeyPair::from_pem(&String::from_utf8(candidate).unwrap()).unwrap();
+    assert_eq!(candidate.public_key_bytes(), new_key.public_key_bytes());
+    std::fs::remove_dir_all(secret_root).unwrap();
 }
 
 /// Review P3-6 regression: a successful RFC 8555 §7.3.5 rollover publishes

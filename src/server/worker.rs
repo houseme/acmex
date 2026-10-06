@@ -55,6 +55,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::application::{AccountApplication, RepositoryAccountApplication};
 use crate::ca_backend::backend::AccountJwkHandle;
 use crate::ca_backend::{AcmeCaBackend, InstrumentedAcmeTransport, ReqwestAcmeTransport};
 use crate::challenge::{
@@ -158,6 +159,17 @@ pub struct WorkflowWorkerComponents {
     pub orchestrator: DeploymentOrchestrator,
 }
 
+/// Production worker plus the account lifecycle service sharing its CA
+/// backend. Keeping these handles together prevents a control-plane key
+/// rollover from leaving an in-process workflow worker signing with a stale
+/// account key.
+pub struct WorkflowWorkerRuntime {
+    /// Durable workflow engine for certificate operations.
+    pub engine: WorkflowEngine,
+    /// Triggered account lifecycle use cases backed by the same CA session.
+    pub account_application: Arc<dyn AccountApplication>,
+}
+
 /// Registers the full production executor set on an engine.
 ///
 /// Public so tests and custom deployments can assemble the exact same
@@ -249,6 +261,20 @@ async fn load_or_create_account_key(
     key_type: crate::crypto::keypair::KeyType,
 ) -> crate::error::Result<crate::account::KeyPair> {
     let key_id = format!("account_key_{ca_label}");
+    // A rollover stages its candidate before making the irreversible CA
+    // request. If the process dies after CA success but before the active
+    // name is replaced, this durable candidate is the only key the CA will
+    // accept. Promote it before ever considering the older active key.
+    let pending_key_id = format!("{key_id}.pending");
+    if let Some(pem) = store.get(&pending_key_id).await? {
+        store.put(&key_id, &pem).await?;
+        if let Err(error) = store.remove(&pending_key_id).await {
+            tracing::warn!(error = %error, "account rollover candidate was promoted but not cleaned up");
+        }
+        return crate::account::KeyPair::from_pem(&String::from_utf8_lossy(&pem)).map_err(|err| {
+            crate::error::AcmeError::crypto(format!("stored rollover candidate: {err}"))
+        });
+    }
     if let Some(pem) = store.get(&key_id).await? {
         return crate::account::KeyPair::from_pem(&String::from_utf8_lossy(&pem))
             .map_err(|err| crate::error::AcmeError::crypto(format!("stored account key: {err}")));
@@ -589,7 +615,7 @@ async fn build_key_provider(
     }
 }
 
-/// Assembles a fully equipped [`WorkflowEngine`] from configuration.
+/// Assembles a fully equipped production worker runtime from configuration.
 ///
 /// This is the shared assembly for the embedded server worker, the CLI
 /// (`obtain --wait`, `daemon`) and library consumers. It:
@@ -606,13 +632,14 @@ async fn build_key_provider(
 ///
 /// The returned engine advances operations when `run_once`/`run_step` is
 /// called; pair it with your own driving loop or use
-/// [`spawn_from_config`].
-pub async fn build_engine_from_config(
+/// [`spawn_from_config`]. The account application shares the engine's CA
+/// backend and therefore its current signing key.
+pub async fn build_worker_runtime_from_config(
     config: &Config,
     repositories: RepositorySet,
     metrics: SharedMetrics,
     settings: WorkflowWorkerSettings,
-) -> crate::error::Result<WorkflowEngine> {
+) -> crate::error::Result<WorkflowWorkerRuntime> {
     let mut settings = settings;
     if config.challenge.dns01.is_some() {
         settings.propagation_timeout = config.dns_propagation_policy_for(None)?.max_wait;
@@ -637,13 +664,15 @@ pub async fn build_engine_from_config(
         Arc::new(ReqwestAcmeTransport::new()),
         metrics.clone(),
     );
+    let account_secret_id = format!("account_key_{ca_label}");
     let mut acme_backend = AcmeCaBackend::new(
         ca_label,
         config.acme.directory.clone(),
         transport,
         key_pair,
         repositories.clone(),
-    );
+    )
+    .with_account_secret_store(secret_store, account_secret_id);
     // Declare the identifier types this deployment accepts (default
     // DNS-only). The pre-order capability gate uses this to reject
     // unsupported intents at plan time without creating an ACME order.
@@ -656,6 +685,13 @@ pub async fn build_engine_from_config(
     let acme_backend = Arc::new(acme_backend);
     acme_backend.attach_jwk_handle(account_jwk.clone());
     let backend: Arc<dyn crate::ca_backend::CaBackend> = acme_backend;
+    let account_application: Arc<dyn AccountApplication> =
+        Arc::new(RepositoryAccountApplication::new(
+            repositories.clone(),
+            backend.clone(),
+            account_key_type,
+            "server-worker",
+        ));
 
     // An explicit `kms-aws` backend that cannot be assembled fails startup:
     // silently issuing with local keys would defeat the point of the
@@ -691,7 +727,27 @@ pub async fn build_engine_from_config(
         },
     );
 
-    Ok(engine)
+    Ok(WorkflowWorkerRuntime {
+        engine,
+        account_application,
+    })
+}
+
+/// Builds only the production workflow engine.
+///
+/// Prefer [`build_worker_runtime_from_config`] when the caller also exposes
+/// the account lifecycle API, so both paths use the same backend instance.
+pub async fn build_engine_from_config(
+    config: &Config,
+    repositories: RepositorySet,
+    metrics: SharedMetrics,
+    settings: WorkflowWorkerSettings,
+) -> crate::error::Result<WorkflowEngine> {
+    Ok(
+        build_worker_runtime_from_config(config, repositories, metrics, settings)
+            .await?
+            .engine,
+    )
 }
 
 fn load_trust_anchor_pems(config: &Config) -> crate::error::Result<Vec<String>> {
@@ -723,7 +779,9 @@ pub async fn spawn_from_config(
 ) -> crate::error::Result<tokio::task::JoinHandle<()>> {
     let poll_interval = settings.poll_interval;
     let engine = std::sync::Arc::new(
-        build_engine_from_config(config, repositories, metrics, settings).await?,
+        build_worker_runtime_from_config(config, repositories, metrics, settings)
+            .await?
+            .engine,
     );
     Ok(tokio::spawn(async move {
         let mut interval = tokio::time::interval(poll_interval);
@@ -741,6 +799,32 @@ pub async fn spawn_from_config(
             }
         }
     }))
+}
+
+/// Spawns the production worker and returns the account lifecycle service that
+/// shares its backend. The embedded API server uses this instead of creating a
+/// second backend with an independent session/key cache.
+pub async fn spawn_with_account_application_from_config(
+    config: &Config,
+    repositories: RepositorySet,
+    metrics: SharedMetrics,
+    settings: WorkflowWorkerSettings,
+) -> crate::error::Result<(tokio::task::JoinHandle<()>, Arc<dyn AccountApplication>)> {
+    let poll_interval = settings.poll_interval;
+    let runtime = build_worker_runtime_from_config(config, repositories, metrics, settings).await?;
+    let account_application = runtime.account_application.clone();
+    let engine = Arc::new(runtime.engine);
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(poll_interval);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(err) = engine.run_once().await {
+                tracing::error!(error = %err, "workflow worker pass failed");
+            }
+        }
+    });
+    Ok((handle, account_application))
 }
 
 #[cfg(test)]

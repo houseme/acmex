@@ -24,7 +24,7 @@ same value.
 | `GET /api/certificates/{id}` | `GET /api/v1/certificate-versions/{id}` | v1 never serializes private key material. |
 | `POST /api/certificates/{id}/renew` | `POST /api/v1/certificate-lineages/{id}/renew` | Renewal is lineage-scoped and returns a durable operation to poll. |
 | `POST /api/certificates/{id}/revoke` | `POST /api/v1/certificate-versions/{id}/revoke` | v1 creates a durable revoke operation; success means the CA backend was called and the local version state reached `revoked`. |
-| `GET /api/accounts`, `GET/PATCH/DELETE /api/accounts/{id}` | No v1 replacement in T17 | Account lifecycle work is owned by T14; legacy routes remain compatibility-only until that API is finalized. |
+| `GET /api/accounts`, `GET/PATCH/DELETE /api/accounts/{id}` | No broad v1 replacement | Legacy account CRUD remains compatibility-only. The new T14 lifecycle operation is `POST /api/v1/accounts/{id}/key-rollover`; it is admin-only, never exposes key material, and uses the worker's durable account-key store. |
 | `GET /api/diagnostics` | `GET /ready`, `GET /health`, metrics listener `/metrics` | v1 operational readiness is split between health/readiness and Prometheus metrics. |
 
 ## Challenge Status

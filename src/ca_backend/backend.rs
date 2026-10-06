@@ -13,7 +13,7 @@ use crate::dns::spec::{EnvFileSecretResolver, SecretResolver};
 use crate::domain::{AccountRecord, AccountStatus, KeyAlgorithm, KeyId, KeyRef, TenantId};
 use crate::error::{AcmeError, Result};
 use crate::protocol::{Jwk, JwsSigner};
-use crate::repository::RepositorySet;
+use crate::repository::{FileSecretStore, RepositorySet};
 use crate::types::Identifier;
 
 use super::ari::{ari_cert_id_from_pem, parse_renewal_window, renewal_info_url};
@@ -217,6 +217,12 @@ pub struct AcmeCaBackend {
     /// the extra types via
     /// [`with_identifier_types`](Self::with_identifier_types).
     identifier_types: Vec<String>,
+    /// The durable location of the active account signing key. It is optional
+    /// for embedders which manage key material themselves; production worker
+    /// assembly always supplies it.
+    account_secret_store: Option<FileSecretStore>,
+    /// Stable secret-store name for the active account key.
+    account_secret_id: Option<String>,
 }
 
 impl AcmeCaBackend {
@@ -241,6 +247,8 @@ impl AcmeCaBackend {
             nonce_pool: Arc::new(super::session::SharedNoncePool::new()),
             sessions: tokio::sync::RwLock::new(Vec::new()),
             identifier_types: Vec::new(),
+            account_secret_store: None,
+            account_secret_id: None,
         }
     }
 
@@ -277,6 +285,23 @@ impl AcmeCaBackend {
     /// effectively always support DNS).
     pub fn with_identifier_types(mut self, identifier_types: Vec<String>) -> Self {
         self.identifier_types = identifier_types;
+        self
+    }
+
+    /// Persists a successfully rolled-over account key at this durable secret
+    /// location before the backend publishes it to new requests.
+    ///
+    /// The key is deliberately not written before the CA accepts RFC 8555
+    /// `keyChange`: a rejected request must leave the local signing key
+    /// untouched. [`FileSecretStore::put`] atomically replaces the active
+    /// secret and fsyncs both file and containing directory.
+    pub fn with_account_secret_store(
+        mut self,
+        store: FileSecretStore,
+        secret_id: impl Into<String>,
+    ) -> Self {
+        self.account_secret_store = Some(store);
+        self.account_secret_id = Some(secret_id.into());
         self
     }
 
@@ -561,11 +586,57 @@ impl CaBackend for AcmeCaBackend {
         // is rejected with "payload did not parse as JSON").
         let inner_object: serde_json::Value = serde_json::from_str(&inner_jws)
             .map_err(|e| AcmeError::protocol(format!("inner key-change JWS: {e}")))?;
-        session
+        // Stage the replacement before the irreversible remote call. The
+        // active key is intentionally untouched here. If the process crashes
+        // after the CA accepts but before the active name is promoted, worker
+        // startup promotes this durable candidate instead of loading the old
+        // key and orphaning the CA account.
+        let pending_secret_id = self
+            .account_secret_id
+            .as_ref()
+            .map(|id| format!("{id}.pending"));
+        if let (Some(store), Some(pending_secret_id)) =
+            (&self.account_secret_store, pending_secret_id.as_deref())
+        {
+            store
+                .put(pending_secret_id, new_key.serialize_pem().as_bytes())
+                .await?;
+        }
+
+        let ca_result = session
             .execute_jws(&key_change_url, JwsPayload::Object(inner_object))
-            .await?;
+            .await;
+        if let Err(error) = ca_result {
+            // The CA did not accept the change, so the candidate must never
+            // become an active startup key. Cleanup failure is surfaced as a
+            // storage error instead of pretending the rejected candidate was
+            // safely discarded.
+            if let (Some(store), Some(pending_secret_id)) =
+                (&self.account_secret_store, pending_secret_id.as_deref())
+                && let Err(cleanup_error) = store.remove(pending_secret_id).await
+            {
+                return Err(AcmeError::storage(format!(
+                    "keyChange failed ({error}); also failed to remove staged rollover key: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
 
         // ---- keyChange accepted: switch everything to the new key. ----
+        // Commit the process-restart source of truth before publishing the
+        // key in memory. This is intentionally after the CA acknowledgement:
+        // a rejected keyChange cannot replace the local key. A secret-store
+        // failure is surfaced without an in-memory switch, so an operator
+        // can recover the durable key material instead of silently issuing
+        // with a key the CA no longer accepts.
+        if let (Some(store), Some(secret_id)) =
+            (&self.account_secret_store, &self.account_secret_id)
+        {
+            store
+                .put(secret_id, new_key.serialize_pem().as_bytes())
+                .await?;
+        }
+
         // Durable state first: the stored record now references the new key
         // so a restart resumes with it. On persistence failure nothing
         // in-memory has switched yet — the old key keeps signing and the
@@ -595,6 +666,16 @@ impl CaBackend for AcmeCaBackend {
         // authorization (`token.thumbprint`) is computed from the key the
         // CA now holds (review P3-6).
         self.publish_account_jwk(new_account_jwk);
+
+        if let (Some(store), Some(pending_secret_id)) =
+            (&self.account_secret_store, pending_secret_id.as_deref())
+            && let Err(error) = store.remove(pending_secret_id).await
+        {
+            // The active key and account record are already durable. Leaving
+            // the candidate is safe (startup promotes the identical bytes),
+            // so cleanup is diagnostic rather than a false rollover failure.
+            tracing::warn!(error = %error, "account rollover candidate was not cleaned up");
+        }
 
         tracing::info!(
             ca = self.ca_id,

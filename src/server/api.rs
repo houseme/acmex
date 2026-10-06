@@ -26,7 +26,7 @@ use super::order::{create_order, get_order, list_orders, trigger_full_renewal};
 use super::webhook::{WebhookHandler, webhook_handler};
 use crate::AcmeClient;
 use crate::application::{
-    ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
+    AccountApplication, ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
     RepositoryCertificateApplication,
 };
 use crate::config::Config;
@@ -79,6 +79,8 @@ pub struct AppState {
     pub application: Option<Arc<dyn CertificateApplication>>,
     /// Query-side lifecycle projections.
     pub query: Option<Arc<dyn CertificateQuery>>,
+    /// Triggered account lifecycle use cases sharing the workflow backend.
+    pub account_application: Option<Arc<dyn AccountApplication>>,
 }
 
 /// Adds RFC 8594-style deprecation metadata to every legacy `/api`
@@ -145,7 +147,7 @@ pub async fn start_server(
     // presenters, key provider, deployment orchestration) advancing queued
     // operations. Assembly failures (e.g. unreadable key store) are logged,
     // not fatal: the API stays up while the loop is down.
-    match super::worker::spawn_from_config(
+    let account_application = match super::worker::spawn_with_account_application_from_config(
         &config,
         repositories.clone(),
         metrics.clone(),
@@ -161,17 +163,19 @@ pub async fn start_server(
     )
     .await
     {
-        Ok(handle) => {
+        Ok((handle, account_application)) => {
             tokio::spawn(async move {
                 if handle.await.is_err() {
                     tracing::error!("workflow worker task terminated unexpectedly");
                 }
             });
+            Some(account_application)
         }
         Err(err) => {
             tracing::error!(error = %err, "workflow worker not started");
+            None
         }
-    }
+    };
 
     // The durable outbox consumer: drains operation/deployment/audit events
     // from the repository outbox to the configured outbound notification
@@ -269,6 +273,7 @@ pub async fn start_server(
         repositories: Some(api_repositories),
         application: Some(application),
         query: Some(query),
+        account_application,
     };
 
     // Define API routes with authentication middleware

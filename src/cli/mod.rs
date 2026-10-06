@@ -128,6 +128,10 @@ pub async fn run() -> crate::error::Result<()> {
                 tracing::info!("Rotating ACME account key pair");
                 commands::handle_rotate_key(a.key_path, a.new_key_path, a.prod).await?;
             }
+            AccountCommands::Rollover(a) => {
+                tracing::info!(account_id = %a.account_id, "Requesting control-plane account key rollover");
+                commands::handle_rollover_account_key(a.account_id, a.api_base, a.api_key).await?;
+            }
         },
         Commands::Serve(args) => {
             tracing::info!("Starting AcmeX REST API server on {}", args.addr);

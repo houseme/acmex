@@ -10,8 +10,9 @@ use tower::ServiceExt;
 
 use acmex::application::Permission;
 use acmex::application::{
-    ActorContext, ApplicationServiceBuilder, CertificateApplication, CertificateQuery,
-    CreateCertificateIntent, IssueCertificate,
+    AccountApplication, AccountKeyRolloverView, ActorContext, ApplicationServiceBuilder,
+    CertificateApplication, CertificateQuery, CreateCertificateIntent, IssueCertificate,
+    RolloverAccountKey,
 };
 use acmex::challenge::{ChallengeSession, ChallengeSessionState};
 use acmex::config::Config;
@@ -46,6 +47,7 @@ fn legacy_state(tasks: Arc<RwLock<HashMap<String, TaskInfo>>>) -> AppState {
         repositories: None,
         application: None,
         query: None,
+        account_application: None,
     }
 }
 
@@ -76,6 +78,7 @@ ca_environment = "staging"
         repositories,
         application: Some(application),
         query: Some(query),
+        account_application: None,
     }
 }
 
@@ -97,6 +100,24 @@ fn read_only_application_state() -> AppState {
     .unwrap();
     state.api_keys = Arc::new(ApiKeySet::from_credentials(vec![credential]));
     state
+}
+
+struct SuccessfulAccountRollover;
+
+#[async_trait::async_trait]
+impl AccountApplication for SuccessfulAccountRollover {
+    async fn rollover_account_key(
+        &self,
+        command: RolloverAccountKey,
+    ) -> acmex::Result<AccountKeyRolloverView> {
+        assert_eq!(command.account_id, "ten_default:test-ca");
+        Ok(AccountKeyRolloverView {
+            account_id: command.account_id,
+            ca_id: "test-ca".to_string(),
+            key_id: "key_replacement".to_string(),
+            updated_at: Timestamp::now(),
+        })
+    }
 }
 
 #[tokio::test]
@@ -279,6 +300,31 @@ async fn api_v1_issue_returns_operation_with_location() {
     let operation: serde_json::Value = serde_json::from_slice(&issue_body).unwrap();
     assert_eq!(operation["kind"], "issue");
     assert_eq!(operation["status"], "queued");
+}
+
+#[tokio::test]
+async fn api_v1_account_key_rollover_uses_the_account_application() {
+    let mut state = application_state();
+    state.account_application = Some(Arc::new(SuccessfulAccountRollover));
+    let app = axum::Router::new()
+        .nest("/api/v1", acmex::server::api_v1::routes())
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/accounts/ten_default:test-ca/key-rollover")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["account_id"], "ten_default:test-ca");
+    assert_eq!(body["key_id"], "key_replacement");
 }
 
 #[tokio::test]

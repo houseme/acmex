@@ -5,9 +5,14 @@
 //! durable operations and returns immediately; workers advance those operations
 //! through the workflow engine.
 
+mod account;
 mod service;
 mod types;
 
+pub use account::{
+    AccountApplication, AccountKeyRolloverView, RepositoryAccountApplication, RolloverAccountKey,
+    default_account_id,
+};
 pub use service::{ApplicationServiceBuilder, RepositoryCertificateApplication};
 pub use types::{
     ActorContext, CancelOperation, CertificateApplication, CertificateQuery, ChallengeLeaseView,

@@ -243,6 +243,8 @@ pub enum AccountCommands {
     Deactivate(AccountDeactivateArgs),
     /// Rotate account key
     RotateKey(AccountRotateKeyArgs),
+    /// Rotate the configured account key through the API v1 control plane
+    Rollover(AccountRolloverArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -299,6 +301,22 @@ pub struct AccountRotateKeyArgs {
     /// Use production Let's Encrypt
     #[arg(long, default_value_t = false)]
     pub prod: bool,
+}
+
+/// Arguments for the new control-plane account key rollover operation.
+#[derive(Parser, Debug)]
+pub struct AccountRolloverArgs {
+    /// Composite persisted account id (`<tenant>:<ca_id>`).
+    #[arg(long)]
+    pub account_id: String,
+
+    /// API v1 base URL.
+    #[arg(long, default_value = "http://127.0.0.1:8080/api/v1")]
+    pub api_base: String,
+
+    /// Management API key. Defaults to ACMEX_API_KEY.
+    #[arg(long)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Parser, Debug)]

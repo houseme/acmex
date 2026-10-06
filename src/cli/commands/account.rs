@@ -1,6 +1,6 @@
 /// Account management commands
 use crate::account::{AccountManager, KeyPair, KeyRollover};
-use crate::error::Result;
+use crate::error::{AcmeError, Result};
 use crate::protocol::{DirectoryManager, NonceManager};
 use crate::types::Contact;
 use tracing::info;
@@ -151,5 +151,52 @@ pub async fn handle_rotate_key(key_path: String, new_key_path: String, prod: boo
     println!("✅ Account key rotated successfully");
     println!("   New key saved to: {}", new_key_path);
 
+    Ok(())
+}
+
+/// Triggers the safe account-key rollover exposed by the API v1 control
+/// plane. The server owns the account secret store and shares its backend
+/// with the workflow worker, so this CLI never reads or writes private keys.
+pub async fn handle_rollover_account_key(
+    account_id: String,
+    api_base: String,
+    api_key: Option<String>,
+) -> Result<()> {
+    let key = api_key
+        .or_else(|| std::env::var("ACMEX_API_KEY").ok())
+        .ok_or_else(|| AcmeError::invalid_input("provide --api-key or set ACMEX_API_KEY"))?;
+    let base = api_base.trim_end_matches('/');
+    let response = reqwest::Client::new()
+        .post(format!("{base}/accounts/{account_id}/key-rollover"))
+        .header("X-API-Key", key)
+        .send()
+        .await
+        .map_err(|err| AcmeError::transport(format!("API request failed: {err}")))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|err| AcmeError::transport(format!("API response read failed: {err}")))?;
+    if !status.is_success() {
+        let detail = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value["detail"]
+                    .as_str()
+                    .or_else(|| value["title"].as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned());
+        return Err(AcmeError::transport(format!(
+            "API returned {status}: {detail}"
+        )));
+    }
+    let view: serde_json::Value = serde_json::from_slice(&body)?;
+    println!(
+        "Account key rollover completed: account={} ca={} key_id={}",
+        view["account_id"].as_str().unwrap_or("-"),
+        view["ca_id"].as_str().unwrap_or("-"),
+        view["key_id"].as_str().unwrap_or("-")
+    );
     Ok(())
 }

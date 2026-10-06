@@ -91,4 +91,5 @@ RUN_PEBBLE_E2E=1 scripts/run_pebble_e2e.sh   # EAB/rollover 场景（依赖 T13 
 - 生产 `server::worker::build_engine_from_config` 将 EAB 配置传入 `EnsureAccountStep`，再进入 `ca_backend::ensure_account`；`acmex init` 与 `acmex.toml.example` 已给出 SecretRef 示例且不包含明文 HMAC。
 - `AcmeCaBackend` 的 EAB resolver 已可注入；默认 resolver 支持 `env:`/`file:`，`vault:`/`provider:` 由部署提供自定义 resolver。
 - keyChange 内层 JWS 构造已抽为 `ca_backend::key_change_inner_jws`，新 `ca_backend` rollover 与 legacy `account::KeyRollover` 共享该实现，减少双栈漂移。
+- 新控制面入口为 `POST /api/v1/accounts/{id}/key-rollover` 与 `acmex account rollover`。它复用 worker 的同一 backend/session/JWK handle，使用 repository lease 防并发；新密钥先作为 fsync 的候选项落盘，CA 接受后才提升为活动密钥。若进程在提升前中断，下一次 worker 装配优先恢复候选密钥，绝不回退为 CA 已弃用的旧密钥。API 和 CLI 均不传递或输出 PEM。
 - 未宣称完成项：旧 `AcmeClient`/`AccountManager` 仍保留独立 HTTP、nonce 与错误分类路径，等待后续 facade 迁移；Pebble EAB/rollover 需要 T13 harness 环境执行后才能勾选。

@@ -217,6 +217,38 @@ paths:
       responses:
         '202':
           $ref: '#/components/responses/OperationAccepted'
+  /accounts/{id}/key-rollover:
+    post:
+      summary: Rotate the active key of a persisted ACME account
+      description: >
+        Executes RFC 8555 keyChange synchronously through the same CA backend
+        used by the workflow worker. AcmeX stages the replacement key
+        durably before contacting the CA, promotes it only after CA success,
+        and fences concurrent attempts with a repository lease. This route
+        requires the admin permission and never accepts or returns key
+        material. A rejected CA request is terminal; transport and rate-limit
+        errors remain classified retryable in the problem response.
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+      responses:
+        '200':
+          description: Account key rolled over and durable restart key updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountKeyRolloverView'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+        '409':
+          $ref: '#/components/responses/Problem'
+        '429':
+          $ref: '#/components/responses/Problem'
+        '502':
+          $ref: '#/components/responses/Problem'
   /operations:
     get:
       summary: List operations
@@ -324,6 +356,13 @@ components:
       schema:
         type: string
         pattern: '^chl_'
+    AccountId:
+      name: id
+      in: path
+      required: true
+      description: Composite persisted account id (`<tenant>:<ca_id>`).
+      schema:
+        type: string
   responses:
     OperationAccepted:
       description: Durable operation accepted
@@ -402,6 +441,24 @@ components:
           items:
             type: object
           description: Full replacement of the delivery target list.
+    AccountKeyRolloverView:
+      type: object
+      required:
+        - account_id
+        - ca_id
+        - key_id
+        - updated_at
+      properties:
+        account_id:
+          type: string
+        ca_id:
+          type: string
+        key_id:
+          type: string
+          description: Public key reference only; never private key material.
+        updated_at:
+          type: string
+          format: date-time
     IntentView:
       type: object
       required:

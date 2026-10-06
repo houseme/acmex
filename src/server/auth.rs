@@ -244,6 +244,12 @@ pub fn required_permission(method: &Method, path: &str) -> Permission {
     if path.contains("/challenge-cleanup") && *method == Method::POST {
         return Permission::Admin;
     }
+    // Account key rollover changes the credential that authorizes every
+    // future ACME request. It is deliberately an admin-only lifecycle
+    // action, never an ordinary intent mutation.
+    if path.contains("/key-rollover") {
+        return Permission::Admin;
+    }
     if path.contains("/issue") {
         return Permission::Issue;
     }

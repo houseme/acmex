@@ -233,6 +233,14 @@ impl ReqwestAcmeTransport {
                 .expect("reqwest client builder"),
         }
     }
+
+    /// Wraps an existing reqwest client.
+    ///
+    /// Compatibility facades use this to enter the shared ACME session path
+    /// without changing their caller-visible HTTP client configuration.
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self { client }
+    }
 }
 
 impl Default for ReqwestAcmeTransport {
