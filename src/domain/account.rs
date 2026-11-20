@@ -80,10 +80,14 @@ mod tests {
             contacts: vec!["mailto:admin@example.com".to_string()],
             eab_bound: false,
             status: AccountStatus::Active,
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
+            created_at: "2026-01-02T03:04:05Z".parse().unwrap(),
+            updated_at: "2026-01-02T03:04:05.123456789Z".parse().unwrap(),
         };
         let json = serde_json::to_string(&account).unwrap();
+        // Persisted timestamps retain the RFC 3339 representation used before Jiff 1.0.
+        let stored: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(stored["created_at"], "2026-01-02T03:04:05Z");
+        assert_eq!(stored["updated_at"], "2026-01-02T03:04:05.123456789Z");
         // Key material must never appear in the stored form.
         assert!(!json.contains("BEGIN PRIVATE"));
         let back: AccountRecord = serde_json::from_str(&json).unwrap();

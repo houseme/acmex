@@ -29,7 +29,7 @@ impl<B: StorageBackend> CertificateRenewer<B> {
     /// Check if a certificate needs renewal
     fn needs_renewal(&self, cert_der: &[u8]) -> bool {
         if let Ok((_, x509)) = parse_x509_certificate(cert_der) {
-            let now = jiff::Zoned::now();
+            let now = jiff::ZonedDateTime::now();
             let not_after = x509.validity().not_after;
             let expiry_ts = not_after.timestamp();
             let now_ts = now.timestamp().as_second();

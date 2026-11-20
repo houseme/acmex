@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::domain::{DnsIdentifier, Identifier};
 use crate::error::{AcmeError, Result};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use x509_parser::asn1_rs::FromDer;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::*;
@@ -90,7 +90,7 @@ impl CertificateChain {
                 AcmeError::certificate(format!("Invalid intermediate certificate {}: {}", i, e))
             })?;
 
-            let now = Zoned::now().timestamp().as_second();
+            let now = ZonedDateTime::now().timestamp().as_second();
             if x509.validity().not_before.timestamp() > now {
                 return Err(AcmeError::certificate(format!("Cert {} not yet valid", i)));
             }
@@ -198,21 +198,21 @@ impl CertificateChain {
     }
 
     /// The leaf certificate's `notBefore` instant.
-    pub fn not_before(&self) -> Result<Zoned> {
+    pub fn not_before(&self) -> Result<ZonedDateTime> {
         let (_, cert) = X509Certificate::from_der(&self.leaf)
             .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
         let timestamp = jiff::Timestamp::from_second(cert.validity().not_before.timestamp())
             .map_err(|e| AcmeError::crypto(format!("notBefore conversion failed: {e}")))?;
-        Ok(timestamp.to_zoned(jiff::tz::TimeZone::UTC))
+        Ok(timestamp.to_zoned_datetime(jiff::tz::TimeZone::UTC))
     }
 
     /// The leaf certificate's `notAfter` instant.
-    pub fn not_after(&self) -> Result<Zoned> {
+    pub fn not_after(&self) -> Result<ZonedDateTime> {
         let (_, cert) = X509Certificate::from_der(&self.leaf)
             .map_err(|e| AcmeError::crypto(format!("Invalid leaf certificate: {}", e)))?;
         let timestamp = jiff::Timestamp::from_second(cert.validity().not_after.timestamp())
             .map_err(|e| AcmeError::crypto(format!("notAfter conversion failed: {e}")))?;
-        Ok(timestamp.to_zoned(jiff::tz::TimeZone::UTC))
+        Ok(timestamp.to_zoned_datetime(jiff::tz::TimeZone::UTC))
     }
 
     /// The leaf certificate serial number, hex-encoded.

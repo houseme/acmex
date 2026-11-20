@@ -4,7 +4,7 @@ use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use sha2::{Digest, Sha256};
 
 /// Tencent Cloud DNS Provider for handling DNS-01 challenges.
@@ -44,7 +44,7 @@ impl TencentCloudDnsProvider {
         _action: &str,
         payload: &str,
     ) -> (String, String) {
-        let now = Zoned::now();
+        let now = ZonedDateTime::now();
         let timestamp = now.timestamp().as_second().to_string();
         let date = now.strftime("%Y-%m-%d").to_string();
 
@@ -152,7 +152,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let action = "CreateRecord";
         let (timestamp, signature) = self.sign_request("POST", service, action, &payload);
 
-        let date = Zoned::now().strftime("%Y-%m-%d").to_string();
+        let date = ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
             self.secret_id, date, service, signature
@@ -226,7 +226,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let action = "DeleteRecord";
         let (timestamp, signature) = self.sign_request("POST", service, action, &payload);
 
-        let date = Zoned::now().strftime("%Y-%m-%d").to_string();
+        let date = ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
             self.secret_id, date, service, signature
@@ -288,7 +288,7 @@ impl DnsProvider for TencentCloudDnsProvider {
         let action = "DescribeRecordList";
         let (timestamp, signature) = self.sign_request("POST", service, action, &payload);
 
-        let date = Zoned::now().strftime("%Y-%m-%d").to_string();
+        let date = ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
         let auth_header = format!(
             "TC3-HMAC-SHA256 Credential={}/{}/{}/tc3_request, SignedHeaders=content-type;host, Signature={}",
             self.secret_id, date, service, signature

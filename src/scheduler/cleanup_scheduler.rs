@@ -42,7 +42,7 @@ impl<B: StorageBackend> CleanupScheduler<B> {
             if let Some(data) = self.backend.load(&key).await? {
                 // 尝试解析证书
                 if let Ok((_, x509)) = parse_x509_certificate(&data) {
-                    let now = jiff::Zoned::now();
+                    let now = jiff::ZonedDateTime::now();
                     let not_after = x509.validity().not_after;
 
                     // 检查是否过期

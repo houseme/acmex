@@ -6,7 +6,7 @@ use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use sha1::Sha1;
 use std::collections::BTreeMap;
 
@@ -115,7 +115,9 @@ impl AlibabaCloudDnsProvider {
         );
         params.insert(
             "Timestamp".to_string(),
-            Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            ZonedDateTime::now()
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
         );
 
         let signature = self.sign_request("GET", &params);

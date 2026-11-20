@@ -15,7 +15,7 @@ use crate::error::{AcmeError, Result};
 use crate::repository::{LeaseOutcome, OutboxEvent, RepositorySet};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -73,7 +73,9 @@ impl WebhookEvent {
     ) -> Self {
         Self {
             event_type,
-            timestamp: Zoned::now().strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            timestamp: ZonedDateTime::now()
+                .strftime("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
             domains,
             subject,
             message,
@@ -949,11 +951,11 @@ fn stable_delivery_error(err: &AcmeError) -> String {
 /// RFC 3339 UTC timestamp for webhook signing.
 ///
 /// Must be true UTC: the `Z` suffix is a format literal, so formatting
-/// `Zoned::now()` directly would stamp local time as UTC on non-UTC hosts
+/// `ZonedDateTime::now()` directly would stamp local time as UTC on non-UTC hosts
 /// and shift every signature outside any sane replay window.
 fn signing_timestamp() -> String {
     jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .strftime("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }

@@ -4,7 +4,7 @@ use crate::challenge::DnsProvider;
 use crate::error::{AcmeError, Result};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
-use jiff::Zoned;
+use jiff::ZonedDateTime;
 use sha2::{Digest, Sha256};
 
 /// Huawei Cloud DNS Provider for handling DNS-01 challenges.
@@ -38,7 +38,7 @@ impl HuaweiCloudDnsProvider {
 
     /// Signs the request for Huawei Cloud API using the SDKV2 / SIGV4 algorithm.
     fn sign_request(&self, method: &str, url: &str, payload: &str) -> (String, String) {
-        let now = Zoned::now();
+        let now = ZonedDateTime::now();
         let timestamp = now.strftime("%Y%m%dT%H%M%SZ").to_string();
 
         // 1. Construct Canonical Request

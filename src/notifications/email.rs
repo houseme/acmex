@@ -740,7 +740,7 @@ fn envelope_address(mailbox: &str) -> Result<String> {
 /// RFC 5322 date from the current time (jiff, UTC).
 fn rfc5322_date() -> String {
     jiff::Timestamp::now()
-        .to_zoned(TimeZone::UTC)
+        .to_zoned_datetime(TimeZone::UTC)
         .strftime("%a, %d %b %Y %H:%M:%S %z")
         .to_string()
 }
