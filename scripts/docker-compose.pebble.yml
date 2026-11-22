@@ -29,8 +29,10 @@ name: acmex-pebble-e2e
 
 # Host-side knobs (with defaults): host ports 14000/15000, challenge
 # subnet 10.30.50.0/24. The IPv4 TLS-ALPN-01 IP scenario dials a host
-# address that containers can reach — set PEBBLE_E2E_HOST_IPV4 when the
-# OrbStack default (0.250.250.254) does not apply to your runtime.
+# address that containers can reach — run_pebble_e2e.sh resolves it from
+# the `acmex-host-gateway` extra_hosts entry (Docker `host-gateway`); set
+# PEBBLE_E2E_HOST_IPV4 explicitly when your runtime cannot route to the
+# host gateway.
 
 services:
   pebble:
@@ -52,6 +54,13 @@ services:
       # additionally proven against the live VA without this override.
     volumes:
       - ./pebble/pebble.json:/etc/pebble/pebble.json:ro
+    extra_hosts:
+      # Container→host address for the RFC 8738 IP TLS-ALPN-01 scenario: the
+      # VA dials the identifier IP:8051 and the test binds :8051 on the host.
+      # `host-gateway` resolves per runtime (OrbStack/Docker Desktop host IP,
+      # Linux bridge gateway .1); run_pebble_e2e.sh reads the resolved literal
+      # from the container's /etc/hosts into PEBBLE_E2E_HOST_IPV4.
+      - "acmex-host-gateway:host-gateway"
     ports:
       - "${ACMEX_PEBBLE_DIR_PORT:-14000}:14000" # ACME directory (HTTPS)
       - "${ACMEX_PEBBLE_ADMIN_PORT:-15000}:15000" # admin API
