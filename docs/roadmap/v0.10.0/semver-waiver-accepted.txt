@@ -21,6 +21,7 @@ feature metrics in the package's Cargo.toml
 field AcmeSettings.identifier_types
 field AcmeSettings.skip_certificate_trust_check
 field AcmeSettings.trust_anchor_pem_files
+field AppState.account_application
 field AppState.application
 field AppState.authorizer
 field AppState.query
@@ -62,6 +63,7 @@ struct acmex::certificate::ocsp::OcspVerifier
 struct acmex::config::RenewalHooks
 struct acmex::prelude::Identifier became enum
 struct acmex::types::Identifier became enum
+variant AccountCommands:Rollover
 variant AcmeError:Conflict
 variant ChallengeType:DnsAccount01
 variant ChallengeType:DnsPersist01
