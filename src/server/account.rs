@@ -86,8 +86,12 @@ pub async fn create_account(
     };
     let config = AcmeConfig::new(state.config.acme_directory())
         .with_contact(Contact::email(payload.email.clone()))
-        .with_tos_agreed(payload.tos_agreed);
-    let mut registration_client = AcmeClient::with_key_pair(config, key_pair);
+        .with_tos_agreed(payload.tos_agreed)
+        .with_proxy_from_config(&state.config.acme);
+    let mut registration_client = match AcmeClient::with_key_pair(config, key_pair) {
+        Ok(client) => client,
+        Err(err) => return problem_response(err.to_problem_details()),
+    };
     let account_url = match registration_client.register_account().await {
         Ok(account_url) => account_url,
         Err(err) => return problem_response(err.to_problem_details()),
@@ -184,6 +188,7 @@ pub async fn update_account(
         client,
         &account_url,
         AccountOperation::UpdateContacts(contacts),
+        state.config.acme.proxy.as_ref(),
     )
     .await
     {
@@ -234,6 +239,7 @@ pub async fn deactivate_account(
         client,
         &account_url,
         AccountOperation::Deactivate,
+        state.config.acme.proxy.as_ref(),
     )
     .await
     {
@@ -257,17 +263,32 @@ enum AccountOperation {
 
 /// Shared HTTP client for CA round-trips: building a fresh client per request
 /// re-did the TLS/connection-pool setup every time and had no timeouts. One
-/// client with connect + whole-request timeouts is created lazily and reused.
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+/// client with connect + whole-request timeouts is created lazily and reused,
+/// routed through the server's `[acme.proxy]` settings when configured
+/// (issue #171). The build result is cached with the config-fixed proxy: a
+/// broken proxy fails every call explicitly instead of silently degrading
+/// to direct access.
+fn http_client(proxy: Option<&crate::config::ProxySettings>) -> Result<&'static reqwest::Client> {
+    static CLIENT: OnceLock<std::result::Result<reqwest::Client, String>> = OnceLock::new();
+    let built = CLIENT.get_or_init(|| {
+        let builder = reqwest::Client::builder()
             .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+        let builder = match proxy {
+            Some(proxy) => match proxy.apply_to_client_builder(builder) {
+                Ok(builder) => builder,
+                Err(err) => return Err(err.to_string()),
+            },
+            None => builder,
+        };
+        builder
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+            .map_err(|e| format!("failed to build server ACME HTTP client: {e}"))
+    });
+    built
+        .as_ref()
+        .map_err(|message| AcmeError::configuration(message.clone()))
 }
 
 /// Calls the CA for an account operation, signing with the legacy account
@@ -278,11 +299,12 @@ async fn perform_account_operation(
     client: &AcmeClient,
     account_url: &str,
     operation: AccountOperation,
+    proxy: Option<&crate::config::ProxySettings>,
 ) -> Result<()> {
     // The client already holds a parsed key pair: borrow it instead of the
     // per-request PEM serialize + re-parse round trip.
     let key_pair = client.key_pair();
-    let http_client = http_client().clone();
+    let http_client = http_client(proxy)?.clone();
     let directory_manager = DirectoryManager::new(directory_url, http_client.clone());
     let directory = directory_manager.get().await?;
     let nonce_manager = NonceManager::new(&directory.new_nonce, http_client.clone());

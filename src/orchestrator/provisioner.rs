@@ -76,8 +76,9 @@ impl CertificateProvisioner {
             "Configuring ACME client for directory: {}",
             config.acme.directory
         );
-        let mut acme_config =
-            AcmeConfig::new(&config.acme.directory).with_tos_agreed(config.acme.tos_agreed);
+        let mut acme_config = AcmeConfig::new(&config.acme.directory)
+            .with_tos_agreed(config.acme.tos_agreed)
+            .with_proxy_from_config(&config.acme);
 
         for contact in &config.acme.contact {
             if contact.strip_prefix("mailto:").is_some() {

@@ -77,7 +77,7 @@ pub async fn handle_cert_revoke(
     let key_pair = KeyPair::from_pem(&key_pem)?;
 
     // 3. Initialize ACME protocol components
-    let http_client = reqwest::Client::new();
+    let http_client = crate::client::standalone_acme_http_client()?;
     let dir_url = "https://acme-v02.api.letsencrypt.org/directory"; // Default to prod for revocation usually
     let dir_manager = DirectoryManager::new(dir_url, http_client.clone());
     let directory = dir_manager.get().await?;

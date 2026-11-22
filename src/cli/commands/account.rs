@@ -19,7 +19,7 @@ pub async fn handle_register(email: String, prod: bool, key_path: String) -> Res
         "https://acme-staging-v02.api.letsencrypt.org/directory"
     };
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::client::standalone_acme_http_client()?;
     let dir_mgr = DirectoryManager::new(acme_url, http_client.clone());
     let directory = dir_mgr.get().await?;
     let nonce_mgr = NonceManager::new(&directory.new_nonce, http_client.clone());
@@ -56,7 +56,7 @@ pub async fn handle_update(key_path: String, email: String, prod: bool) -> Resul
         "https://acme-staging-v02.api.letsencrypt.org/directory"
     };
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::client::standalone_acme_http_client()?;
     let dir_mgr = DirectoryManager::new(acme_url, http_client.clone());
     let directory = dir_mgr.get().await?;
     let nonce_mgr = NonceManager::new(&directory.new_nonce, http_client.clone());
@@ -96,7 +96,7 @@ pub async fn handle_deactivate(key_path: String, prod: bool) -> Result<()> {
         "https://acme-staging-v02.api.letsencrypt.org/directory"
     };
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::client::standalone_acme_http_client()?;
     let dir_mgr = DirectoryManager::new(acme_url, http_client.clone());
     let directory = dir_mgr.get().await?;
     let nonce_mgr = NonceManager::new(&directory.new_nonce, http_client.clone());
@@ -130,7 +130,7 @@ pub async fn handle_rotate_key(key_path: String, new_key_path: String, prod: boo
         "https://acme-staging-v02.api.letsencrypt.org/directory"
     };
 
-    let http_client = reqwest::Client::new();
+    let http_client = crate::client::standalone_acme_http_client()?;
     let dir_mgr = DirectoryManager::new(acme_url, http_client.clone());
     let directory = dir_mgr.get().await?;
     let nonce_mgr = NonceManager::new(&directory.new_nonce, http_client.clone());
@@ -166,7 +166,7 @@ pub async fn handle_rollover_account_key(
         .or_else(|| std::env::var("ACMEX_API_KEY").ok())
         .ok_or_else(|| AcmeError::invalid_input("provide --api-key or set ACMEX_API_KEY"))?;
     let base = api_base.trim_end_matches('/');
-    let response = reqwest::Client::new()
+    let response = crate::client::standalone_acme_http_client()?
         .post(format!("{base}/accounts/{account_id}/key-rollover"))
         .header("X-API-Key", key)
         .send()

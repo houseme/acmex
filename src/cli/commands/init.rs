@@ -91,6 +91,16 @@ skip_certificate_trust_check = false
 # key_id = "ca-issued-key-id"
 # hmac_key = "env:ACMEX_EAB_HMAC"
 
+# Outbound proxy for every ACME request — for servers that cannot reach the
+# CA directly (ZeroSSL, Let's Encrypt, …). Credentials may ride in the URL
+# (prefer the env override ACMEX_ACME_PROXY_URL) or as a SecretRef below;
+# both are redacted from logs. Full semantics: docs/PROXY_SUPPORT_ZH.md.
+# [acme.proxy]
+# url = "http://proxy.internal:3128"        # or socks5://proxy.internal:1080
+# no_proxy = "localhost,.internal,10.0.0.0/8"
+# username = "proxy-user"
+# password = "env:ACMEX_PROXY_PASSWORD"
+
 # File storage for legacy bundles and the durable repository (intents,
 # lineages, versions, operations, outbox). All state survives restarts.
 [storage]

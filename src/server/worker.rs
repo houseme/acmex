@@ -471,21 +471,27 @@ async fn build_presenters(
 /// Builds the key-free RFC 9773 ARI provider used by renewal scanning.
 ///
 /// ARI lookups are unauthenticated GETs, so no account key is needed —
-/// only the directory URL and a metrics-instrumented transport. Shared by
-/// the embedded server scheduler, the CLI daemon and library consumers so
+/// only the directory URL and a metrics-instrumented transport (routed
+/// through `[acme.proxy]` when configured, issue #171). Shared by the
+/// embedded server scheduler, the CLI daemon and library consumers so
 /// every deployment gets identical ARI semantics (directory discovery
 /// cached, 404 → no suggestion, errors fall back to policy windows).
 pub fn build_ari_provider(
     config: &Config,
     metrics: SharedMetrics,
-) -> Arc<dyn crate::renewal::RenewalInfoProvider> {
+) -> crate::error::Result<Arc<dyn crate::renewal::RenewalInfoProvider>> {
     let ca_label = super::api::sanitize_ca_label(&config.acme.ca);
-    let transport =
-        InstrumentedAcmeTransport::wrap(ca_label, Arc::new(ReqwestAcmeTransport::new()), metrics);
-    Arc::new(crate::ca_backend::DirectoryAriProvider::new(
+    let transport = InstrumentedAcmeTransport::wrap(
+        ca_label,
+        Arc::new(ReqwestAcmeTransport::new_with_proxy(
+            config.acme.proxy.as_ref(),
+        )?),
+        metrics,
+    );
+    Ok(Arc::new(crate::ca_backend::DirectoryAriProvider::new(
         config.acme.directory.clone(),
         transport,
-    ))
+    )))
 }
 
 /// Registers the remote sinks configured under `[delivery]`.
@@ -661,7 +667,9 @@ pub async fn build_worker_runtime_from_config(
 
     let transport = InstrumentedAcmeTransport::wrap(
         ca_label.clone(),
-        Arc::new(ReqwestAcmeTransport::new()),
+        Arc::new(ReqwestAcmeTransport::new_with_proxy(
+            config.acme.proxy.as_ref(),
+        )?),
         metrics.clone(),
     );
     let account_secret_id = format!("account_key_{ca_label}");

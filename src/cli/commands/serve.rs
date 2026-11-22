@@ -21,10 +21,10 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         tracing::info!("Loading config from: {}", path);
         config = Config::from_file(std::path::Path::new(&path))?;
     }
-    let ca_config = config.acme.to_ca_config()?;
-    config.acme.directory = ca_config
-        .directory_url()
-        .map_err(crate::error::AcmeError::configuration)?;
+    // Environment overrides (including the `ACMEX_ACME_PROXY_URL` outbound
+    // proxy, issue #171) apply on top of the file/defaults; this also
+    // re-resolves and stores the ACME directory URL.
+    config.apply_env_overrides()?;
 
     let config = Arc::new(config);
 
@@ -60,9 +60,10 @@ pub async fn handle_serve(addr: String, config_path: Option<String>) -> Result<(
         }
     };
 
-    // Initialize ACME client
+    // Initialize ACME client (routed through `[acme.proxy]` when set)
     let mut acme_config = crate::client::AcmeConfig::new(&config.acme.directory)
-        .with_tos_agreed(config.acme.tos_agreed);
+        .with_tos_agreed(config.acme.tos_agreed)
+        .with_proxy_from_config(&config.acme);
     for contact in &config.acme.contact {
         if contact.strip_prefix("mailto:").is_some() {
             let contact_mail = &contact[7..];

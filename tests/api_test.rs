@@ -1587,10 +1587,13 @@ async fn legacy_account_update_rejects_key_fingerprint_mismatch() {
     // The server signs with a fresh key that cannot match the stored record's
     // random fixture key_ref.
     let key_pair = acmex::KeyPair::generate().unwrap();
-    state.client = Some(Arc::new(acmex::AcmeClient::with_key_pair(
-        acmex::AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory"),
-        key_pair,
-    )));
+    state.client = Some(Arc::new(
+        acmex::AcmeClient::with_key_pair(
+            acmex::AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory"),
+            key_pair,
+        )
+        .unwrap(),
+    ));
     let app = legacy_account_app(state);
 
     // The handler must fail fast with a configuration problem instead of
@@ -1646,10 +1649,13 @@ async fn legacy_account_deactivate_rejects_key_fingerprint_mismatch() {
         .await
         .unwrap();
     let key_pair = acmex::KeyPair::generate().unwrap();
-    state.client = Some(Arc::new(acmex::AcmeClient::with_key_pair(
-        acmex::AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory"),
-        key_pair,
-    )));
+    state.client = Some(Arc::new(
+        acmex::AcmeClient::with_key_pair(
+            acmex::AcmeConfig::new("https://acme-staging-v02.api.letsencrypt.org/directory"),
+            key_pair,
+        )
+        .unwrap(),
+    ));
     let app = legacy_account_app(state);
 
     let response = app

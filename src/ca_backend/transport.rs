@@ -224,14 +224,27 @@ pub struct ReqwestAcmeTransport {
 impl ReqwestAcmeTransport {
     /// Creates a transport with sane ACME defaults (timeouts, limits).
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("reqwest client builder"),
-        }
+        Self::new_with_proxy(None).expect("reqwest client builder")
+    }
+
+    /// Creates a transport with an optional explicit outbound proxy
+    /// (issue #171). When set, every ACME request is routed through the
+    /// proxy; failures surface as errors instead of silently degrading to
+    /// direct access.
+    pub fn new_with_proxy(proxy: Option<&crate::config::ProxySettings>) -> Result<Self> {
+        let builder = reqwest::Client::builder()
+            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30));
+        let builder = match proxy {
+            Some(proxy) => proxy.apply_to_client_builder(builder)?,
+            None => builder,
+        };
+        Ok(Self {
+            client: builder.build().map_err(|e| {
+                AcmeError::transport(format!("failed to build ACME transport client: {e}"))
+            })?,
+        })
     }
 
     /// Wraps an existing reqwest client.

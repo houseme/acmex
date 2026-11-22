@@ -177,10 +177,10 @@ pub use challenge::{
     TlsRouteState, TokenRegistry, ValidationCertificate, build_tls_alpn_validation_cert,
     http01_host_header, http01_url, ip_validation_sni, tls_alpn_validation_sni,
 };
-pub use client::{AcmeClient, AcmeConfig, CertificateBundle};
+pub use client::{AcmeClient, AcmeConfig, CertificateBundle, standalone_acme_http_client};
 pub use config::{
     AcmeSettings, ChallengeSettings, Config, FileRepositoryConfig, MigrationSettings,
-    RenewalSettings, RepositorySettings, StorageSettings,
+    ProxySettings, RenewalSettings, RepositorySettings, StorageSettings,
 };
 pub use delivery::k8s_sink::{KubernetesAuth, KubernetesSecretConfig, KubernetesSecretSink};
 pub use delivery::vault_sink::{VaultAuth, VaultKvConfig, VaultKvSink};

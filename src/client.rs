@@ -1,6 +1,7 @@
 /// High-level ACME client for certificate issuance and account management.
 use crate::account::{AccountManager, KeyPair};
 use crate::challenge::ChallengeSolverRegistry;
+use crate::config::ProxySettings;
 use crate::error::Result;
 use crate::order::{CsrGenerator, NewOrderRequest, OrderManager};
 use crate::protocol::{DirectoryManager, NonceManager, NoncePool};
@@ -18,6 +19,9 @@ pub struct AcmeConfig {
     pub contacts: Vec<Contact>,
     /// Whether the terms of service have been agreed to.
     pub terms_of_service_agreed: bool,
+    /// Optional outbound proxy for every ACME HTTP request (issue #171).
+    /// See [`ProxySettings`] for the TOML surface (`[acme.proxy]`).
+    pub proxy: Option<ProxySettings>,
 }
 
 impl AcmeConfig {
@@ -27,6 +31,7 @@ impl AcmeConfig {
             directory_url: directory_url.into(),
             contacts: Vec::new(),
             terms_of_service_agreed: false,
+            proxy: None,
         }
     }
 
@@ -42,6 +47,21 @@ impl AcmeConfig {
         self
     }
 
+    /// Routes every ACME HTTP request through the given proxy.
+    pub fn with_proxy(mut self, proxy: ProxySettings) -> Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    /// Applies the `[acme.proxy]` settings from the loaded configuration
+    /// when present; no-op otherwise (issue #171).
+    pub fn with_proxy_from_config(mut self, settings: &crate::config::AcmeSettings) -> Self {
+        if let Some(proxy) = &settings.proxy {
+            self.proxy = Some(proxy.clone());
+        }
+        self
+    }
+
     /// Returns a configuration for the Let's Encrypt staging directory.
     pub fn lets_encrypt_staging() -> Self {
         Self::new("https://acme-staging-v02.api.letsencrypt.org/directory")
@@ -51,6 +71,38 @@ impl AcmeConfig {
     pub fn lets_encrypt() -> Self {
         Self::new("https://acme-v02.api.letsencrypt.org/directory")
     }
+}
+
+/// Builds the internal reqwest client, applying the configured outbound
+/// proxy when present. Build failures are surfaced (`Result`) instead of
+/// silently falling back to an unproxied client — a misconfigured proxy
+/// must not downgrade to direct access (issue #171).
+fn build_http_client(config: &AcmeConfig) -> Result<reqwest::Client> {
+    let builder =
+        reqwest::Client::builder().user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")));
+    let builder = match &config.proxy {
+        Some(proxy) => proxy.apply_to_client_builder(builder)?,
+        None => builder,
+    };
+    builder.build().map_err(|e| {
+        crate::error::AcmeError::transport(format!("failed to build ACME HTTP client: {e}"))
+    })
+}
+
+/// Builds a standalone ACME HTTP client for legacy CLI tools that load no
+/// config file (account/cert commands). Honors the pure-environment proxy
+/// surface — `ACMEX_ACME_PROXY_URL` / `ACMEX_ACME_NO_PROXY` (issue #171) —
+/// when set, so proxied deployments can use every acmex command.
+pub fn standalone_acme_http_client() -> Result<reqwest::Client> {
+    let builder =
+        reqwest::Client::builder().user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")));
+    let builder = match ProxySettings::from_env() {
+        Some(proxy) => proxy.apply_to_client_builder(builder)?,
+        None => builder,
+    };
+    builder.build().map_err(|e| {
+        crate::error::AcmeError::transport(format!("failed to build ACME HTTP client: {e}"))
+    })
 }
 
 /// The primary high-level ACME client.
@@ -77,10 +129,7 @@ impl AcmeClient {
             "Creating new AcmeClient with directory: {}",
             config.directory_url
         );
-        let http_client = reqwest::Client::builder()
-            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http_client = build_http_client(&config)?;
         let key_pair = Arc::new(KeyPair::generate()?);
 
         Ok(Self {
@@ -93,13 +142,34 @@ impl AcmeClient {
     }
 
     /// Creates an ACME client with an existing key pair.
-    pub fn with_key_pair(config: AcmeConfig, key_pair: KeyPair) -> Self {
+    ///
+    /// Fails explicitly when the HTTP client (including the configured
+    /// proxy) cannot be built; use [`AcmeClient::with_http_client`] to
+    /// bring a pre-built `reqwest::Client` instead.
+    pub fn with_key_pair(config: AcmeConfig, key_pair: KeyPair) -> Result<Self> {
         tracing::debug!("Creating AcmeClient with existing key pair");
-        let http_client = reqwest::Client::builder()
-            .user_agent(concat!("acmex/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http_client = build_http_client(&config)?;
 
+        Ok(Self {
+            config,
+            http_client,
+            key_pair: Arc::new(key_pair),
+            account_id: None,
+            nonce_pool: None,
+        })
+    }
+
+    /// Creates an ACME client from fully pre-built parts (issue #171).
+    ///
+    /// Escape hatch for callers that need full control over the HTTP
+    /// stack — proxies, custom TLS roots, interceptors — beyond what
+    /// [`AcmeConfig::proxy`] expresses. The provided client is used as-is
+    /// for every ACME request; any proxy must already be baked into it.
+    pub fn with_http_client(
+        config: AcmeConfig,
+        key_pair: KeyPair,
+        http_client: reqwest::Client,
+    ) -> Self {
         Self {
             config,
             http_client,

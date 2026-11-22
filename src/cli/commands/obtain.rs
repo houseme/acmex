@@ -103,6 +103,11 @@ pub async fn handle_obtain(args: ObtainCommand) -> Result<()> {
         .map_err(AcmeError::configuration)?;
     config.acme.directory = acme_url.clone();
 
+    // Environment overrides (including the `ACMEX_ACME_PROXY_URL` outbound
+    // proxy, issue #171) apply on top of the assembled settings; this also
+    // validates the proxy section so failures surface before issuance.
+    config.apply_env_overrides()?;
+
     println!("   CA: {}", ca_config.ca);
     println!("   Environment: {:?}", ca_config.environment);
     println!("   ACME Directory: {}", acme_url);

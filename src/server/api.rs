@@ -226,19 +226,32 @@ pub async fn start_server(
         tracing::info!("outbox consumer disabled by configuration");
     }
 
-    let scheduler = scheduler.or_else(|| {
-        // Key-free RFC 9773 ARI provider over the metrics-instrumented
-        // transport (shared assembly with the CLI daemon).
-        let ari = super::worker::build_ari_provider(&config, metrics.clone());
-        let controller = RenewalController::new(
-            repositories.clone(),
-            application.clone(),
-            RenewalControllerConfig::default(),
-        )
-        .with_ari_provider(ari)
-        .with_metrics(metrics.clone());
-        Some(Arc::new(ControllerRenewalScheduler::new(controller)) as Arc<dyn RenewalScheduler>)
-    });
+    let scheduler = match scheduler {
+        Some(scheduler) => Some(scheduler),
+        None => {
+            // Key-free RFC 9773 ARI provider over the metrics-instrumented
+            // transport (shared assembly with the CLI daemon). Assembly
+            // failures (e.g. an invalid `[acme.proxy]`) are logged, not
+            // fatal: the API stays up while ARI renewals are down.
+            match super::worker::build_ari_provider(&config, metrics.clone()) {
+                Ok(ari) => {
+                    let controller = RenewalController::new(
+                        repositories.clone(),
+                        application.clone(),
+                        RenewalControllerConfig::default(),
+                    )
+                    .with_ari_provider(ari)
+                    .with_metrics(metrics.clone());
+                    Some(Arc::new(ControllerRenewalScheduler::new(controller))
+                        as Arc<dyn RenewalScheduler>)
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "ARI renewal provider not started");
+                    None
+                }
+            }
+        }
+    };
 
     // Load API keys from environment variable ACMEX_API_KEYS (comma separated).
     // Without explicit credentials only the unauthenticated health route is

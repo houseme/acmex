@@ -34,15 +34,19 @@ use crate::scheduler::RenewalScheduler;
 use crate::server::worker::{self, WorkflowWorkerSettings};
 
 /// Loads the daemon configuration: an explicit `--config` file, or the
-/// defaults (staging-safe) when none is given.
+/// defaults (staging-safe) when none is given. Environment overrides
+/// (including the `ACMEX_ACME_PROXY_URL` outbound proxy, issue #171)
+/// apply on top of either; proxy misconfiguration fails the load.
 fn load_config(path: Option<&str>) -> crate::error::Result<Config> {
-    match path {
+    let mut config = match path {
         Some(path) => {
             info!(config = path, "loading daemon configuration");
-            Config::from_file(std::path::Path::new(path))
+            Config::from_file(std::path::Path::new(path))?
         }
-        None => Ok(Config::default()),
-    }
+        None => Config::default(),
+    };
+    config.apply_env_overrides()?;
+    Ok(config)
 }
 
 /// Run daemon for automatic certificate renewal.
@@ -105,7 +109,7 @@ pub async fn handle_daemon(
 
     // 2. Renewal scan loop: ARI-first decisions create Renew operations.
     let scheduler: Arc<dyn RenewalScheduler> = {
-        let ari = worker::build_ari_provider(&config, metrics.clone());
+        let ari = worker::build_ari_provider(&config, metrics.clone())?;
         let controller = RenewalController::new(
             repositories.clone(),
             service.clone(),
