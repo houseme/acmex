@@ -172,6 +172,25 @@ directory_url = "https://acme-v02.api.letsencrypt.org/directory"
 contact_email = "admin@example.com"
 ```
 
+### 🔀 HTTP Proxy Support
+
+If your server cannot reach the CA (ZeroSSL, Let's Encrypt, …) directly,
+route all ACME traffic through an HTTP or SOCKS5 proxy:
+
+```toml
+[acme.proxy]
+url = "http://proxy.internal:3128"        # or socks5://proxy.internal:1080
+# no_proxy = "localhost,.internal,10.0.0.0/8"
+# username = "proxy-user"
+# password = "env:PROXY_PASSWORD"         # SecretRef; credentials never logged
+```
+
+Pure-environment deployments can skip the config file entirely with
+`ACMEX_ACME_PROXY_URL` (and `ACMEX_ACME_NO_PROXY`). Note that configuring
+the section replaces reqwest's ambient `https_proxy` detection for the
+ACME client rather than stacking on it. See
+[docs/PROXY_SUPPORT_ZH.md](docs/PROXY_SUPPORT_ZH.md) for full semantics.
+
 ## 🛠 Development
 
 ### Prerequisites

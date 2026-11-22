@@ -8,6 +8,23 @@ must call out any unverified external evidence.
 
 ### Added
 
+- HTTP/SOCKS proxy support for all ACME outbound traffic (issue #171):
+  the new `[acme.proxy]` config section (`url`, `no_proxy`, `username`,
+  `password` SecretRef) plus `ACMEX_ACME_PROXY_URL`/`ACMEX_ACME_NO_PROXY`
+  environment overrides route every ACME request — v0.10 durable-workflow
+  `ReqwestAcmeTransport` (worker, ARI, key rollover) and the legacy
+  `AcmeClient` facade (serve, provisioner, server account registration) —
+  through an `http`/`https`/`socks5`/`socks5h` proxy. `ACMEX_ACME_PROXY_URL`/
+  `ACMEX_ACME_NO_PROXY` environment overrides are now wired into the `serve`,
+  `daemon` and `obtain` config load paths (plus standalone `acmex account`/`cert`
+  tools via `standalone_acme_http_client`); proxy URLs are validated at startup
+  (scheme whitelist, unexpanded `${VAR}` rejection, credential pairing) and
+  redacted in Debug/error output; a dead proxy fails requests explicitly
+  instead of silently falling back to direct access. Library users get
+  `AcmeClient::with_http_client` to inject a fully pre-built
+  `reqwest::Client`. Behavior tests in `tests/proxy_support.rs` prove
+  proxy routing (absolute-form request lines), `no_proxy` bypass and
+  explicit failure; see `docs/PROXY_SUPPORT_ZH.md`.
 - Reference remote delivery agent: `acmex agent serve` serves the server side
   of the `HttpAgentSink` protocol (token auth via `env:`/`file:` SecretRef
   only, constant-time comparison, atomic single-slot activation, graceful

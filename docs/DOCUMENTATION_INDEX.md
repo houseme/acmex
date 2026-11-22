@@ -59,6 +59,7 @@
 | 文档 | 描述 |
 |------|------|
 | [OBSERVABILITY.md](OBSERVABILITY.md) | 指标、日志与追踪配置 |
+| [PROXY_SUPPORT_ZH.md](PROXY_SUPPORT_ZH.md) | ACME 出站 HTTP/SOCKS 代理配置（`[acme.proxy]`，issue #171） |
 | [CRYPTO.md](CRYPTO.md) / [CRYPTO_ZH.md](CRYPTO_ZH.md) | 加密后端（aws-lc-rs / ring）说明 |
 | [DNS_PROVIDERS.md](DNS_PROVIDERS.md) | DNS 提供商与凭据配置 |
 | [SECURITY_OBSERVABILITY_HA.md](SECURITY_OBSERVABILITY_HA.md) | 安全 / 可观测 / 高可用专题（早期稿，细节以 v0.9.0 T11 文档为准） |
