@@ -55,6 +55,8 @@ must pass or have an explicit release-manager waiver"——以下逐项给出 wa
   （`docs/MIGRATION_v0.9.0.md`："Start from `acmex init`"）。
 - `Commands::Status`（`0a456f9`）：v0.10.0 **T17 API contract closure** 的 `acmex status` 命令
   （`T17_API_CONTRACT_CLOSURE.md`：CLI status 展示 operation/challenge 进度）。
+- `AccountCommands::Rollover`（`7f24891`）：v0.10.0 **T14 EAB 与账户生命周期** 的控制面账户密钥
+  轮换 CLI 子命令（`acmex account rollover`，`T14_EAB_AND_ACCOUNT_LIFECYCLE.md`）。
 - 均为有意的新能力；下游对枚举的穷举 match 需补分支（标准 0.x 演进，CHANGELOG/迁移文档有叙述）。
 
 ### 9. enum_struct_variant_field_added — `CertCommands::Revoke` 新增 `account_url`（字段新增）
@@ -72,7 +74,8 @@ must pass or have an explicit release-manager waiver"——以下逐项给出 wa
 ### 11. constructible_struct_adds_field — 公共配置/装配结构体新增 pub 字段（字段新增）
 - 涉及：`EmailConfig.*`（`aed32b5` SMTP 投递 + 后续 polish）、`HttpClientConfig.retry_policy` /
   `RetryPolicy.retry_on_*`（`1f52c0a` 传输层重试策略）、`AppState.authorizer/repositories/application/
-  query`（`bb9f111`，T08）、`AcmeSettings.trust_anchor_pem_files / skip_certificate_trust_check`
+  query`（`bb9f111`，T08）、`AppState.account_application`（`7f24891`，T14 账户生命周期装配口）、
+  `AcmeSettings.trust_anchor_pem_files / skip_certificate_trust_check`
   （`4036cda`，T15）、`WebhookConfig.signing_secret/replay_window_secs/event_type_filter`
   （`66b534d`，v0.9.0 T11 可观测性/安全）、`ObtainArgs.wait`（`952759d`）、`Config.{ca,repository,dns,
   outbox,key,delivery}`（v0.9.0 T02/T03/T08/T10 配置 schema 扩展）、`Directory.{renewal_info,profiles,

@@ -61,9 +61,10 @@ struct PebbleEnv {
     /// for the RFC 8738 HTTP-01 scenario (the VA dials this address directly,
     /// no DNS involved).
     ipv4: String,
-    /// An IPv4 that reaches the *host* from pebble's container (OrbStack's
-    /// `host.docker.internal` literal): the identifier for the RFC 8738
-    /// TLS-ALPN-01 scenario, served by acmex's own production
+    /// An IPv4 that reaches the *host* from pebble's container, resolved by
+    /// scripts/run_pebble_e2e.sh from the compose `acmex-host-gateway` extra
+    /// hosts entry (Docker `host-gateway`, runtime-specific): the identifier
+    /// for the RFC 8738 TLS-ALPN-01 scenario, served by acmex's own production
     /// `LocalTlsListener` because challtestsrv cannot mint iPAddress-SAN
     /// certificates.
     host_ipv4: String,

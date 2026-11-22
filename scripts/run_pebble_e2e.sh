@@ -28,7 +28,10 @@ export PEBBLE_MANAGEMENT_URL="${PEBBLE_MANAGEMENT_URL:-https://127.0.0.1:15000}"
 export PEBBLE_E2E_DOMAIN="${PEBBLE_E2E_DOMAIN:-acmex-test.example.com}"
 # RFC 8738 scenario identifiers (see scripts/docker-compose.pebble.yml):
 export PEBBLE_E2E_IPV4="${PEBBLE_E2E_IPV4:-10.30.50.3}"
-export PEBBLE_E2E_HOST_IPV4="${PEBBLE_E2E_HOST_IPV4:-0.250.250.254}"
+# PEBBLE_E2E_HOST_IPV4 (container→host address for the IP TLS-ALPN-01
+# scenario) is resolved after compose up from the container's /etc/hosts
+# (`acmex-host-gateway` = Docker `host-gateway`); a value exported here
+# wins and skips the resolution.
 export PEBBLE_E2E_IPV6="${PEBBLE_E2E_IPV6:-fd3a:9d6d:1c4e::3}"
 # reqwest picks up the OS-level proxy configuration (macOS system proxy) and
 # would route loopback traffic through it, which fails with 400. The gate
@@ -49,6 +52,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "== starting pebble + challtestsrv"
+docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" up -d --wait
+
+# Resolve the container→host address for the IP TLS-ALPN-01 scenario: the
+# VA dials the identifier IP:8051 and the test binds :8051 on the host (all
+# interfaces), so the identifier must be an IP the pebble container can
+# route to the host. The compose file pins `acmex-host-gateway` to Docker's
+# `host-gateway` (OrbStack/Docker Desktop host IP, Linux bridge gateway .1)
+# and the resolved literal sits in the container's /etc/hosts — readable via
+# `docker compose cp` even though the pebble image has no shell.
+if [[ -z "${PEBBLE_E2E_HOST_IPV4:-}" ]]; then
+  hosts_copy="$PEBBLE_E2E_ARTIFACT_DIR/pebble-etc-hosts.txt"
+  if ! docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" cp pebble:/etc/hosts "$hosts_copy" >/dev/null 2>&1; then
+    echo "SKIP: cannot read /etc/hosts from the pebble container; set PEBBLE_E2E_HOST_IPV4 to a container-reachable host address. A skipped Pebble run is not a release pass." >&2
+    exit 77
+  fi
+  resolved_host_ipv4=$(awk '$2=="acmex-host-gateway" { print $1; exit }' "$hosts_copy")
+  if [[ -z "$resolved_host_ipv4" ]]; then
+    echo "SKIP: no acmex-host-gateway entry in the pebble container hosts file (docker host-gateway unsupported?); set PEBBLE_E2E_HOST_IPV4. A skipped Pebble run is not a release pass." >&2
+    exit 77
+  fi
+  export PEBBLE_E2E_HOST_IPV4="$resolved_host_ipv4"
+fi
+
 cat >"$PEBBLE_E2E_ARTIFACT_DIR/environment.txt" <<EOF
 timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 directory_url=$PEBBLE_DIRECTORY_URL
@@ -60,9 +87,6 @@ ip_host_v4=$PEBBLE_E2E_HOST_IPV4
 ip_v6=$PEBBLE_E2E_IPV6
 git_sha=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
 EOF
-
-echo "== starting pebble + challtestsrv"
-docker compose -f "$SCRIPT_DIR/docker-compose.pebble.yml" up -d --wait
 
 if [[ ! -s "$PEBBLE_TRUST_ANCHOR_PEM_FILE" ]]; then
   # The issuance root is generated at Pebble startup and served by its

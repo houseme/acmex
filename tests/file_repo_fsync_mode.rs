@@ -16,6 +16,14 @@ use acmex::repository::{
 use serde_json::json;
 use std::sync::atomic::Ordering;
 
+/// `FSYNC_SWEEPER_SHUTDOWNS` / `FSYNC_DROP_FLUSHES` are process-global and
+/// the test harness runs tests on parallel threads: snapshot-delta assertions
+/// would race with a sibling test's sweeper shutdown landing between the
+/// snapshot and the assert. The three `Interval`-mode tests (the only ones
+/// that spawn a sweeper) therefore serialize on this lock; `Always` mode
+/// never spawns a sweeper and stays parallel.
+static SWEEPER_COUNTER_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn unique_dir(label: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "acmex-file-fsync-mode-{label}-{}-{}",
@@ -108,6 +116,7 @@ async fn always_mode_intent_roundtrip_and_cas() {
 /// the pending files (observable via the fsynced-file counter).
 #[tokio::test]
 async fn interval_mode_defers_and_forces_fsync() {
+    let _counter_serial = SWEEPER_COUNTER_SERIAL.lock().await;
     let dir = unique_dir("interval-force");
     let repo = FileRepository::with_mode(&dir, FsyncMode::Interval(Duration::from_secs(3600)))
         .await
@@ -138,6 +147,7 @@ async fn interval_mode_defers_and_forces_fsync() {
 /// have exited.
 #[tokio::test]
 async fn interval_mode_background_sweeper_fsyncs_within_window() {
+    let _counter_serial = SWEEPER_COUNTER_SERIAL.lock().await;
     let dir = unique_dir("interval-window");
     let repo = FileRepository::with_mode(&dir, FsyncMode::Interval(Duration::from_millis(50)))
         .await
@@ -178,6 +188,10 @@ async fn interval_mode_background_sweeper_fsyncs_within_window() {
 /// the data.
 #[tokio::test]
 async fn interval_mode_drop_flushes_and_joins() {
+    // The counter assertions below are snapshot-deltas of process-global
+    // atomics; the serial lock keeps sibling Interval tests from shutting
+    // their own sweepers down inside the assertion window.
+    let _counter_serial = SWEEPER_COUNTER_SERIAL.lock().await;
     let dir = unique_dir("interval-drop");
     let shutdowns_before = FSYNC_SWEEPER_SHUTDOWNS.load(Ordering::SeqCst);
     let drop_flushes_before = FSYNC_DROP_FLUSHES.load(Ordering::SeqCst);
