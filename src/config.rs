@@ -119,9 +119,231 @@ pub struct AcmeSettings {
     #[serde(default)]
     pub skip_certificate_trust_check: bool,
 
+    /// Optional outbound proxy for ACME traffic (`[acme.proxy]`); see
+    /// [`ProxySettings`] (issue #171).
+    #[serde(default)]
+    pub proxy: Option<ProxySettings>,
+
     /// Internal cache for the resolved directory URL.
     #[serde(skip)]
     pub directory: String,
+}
+
+/// Outbound proxy settings for ACME HTTP traffic (`[acme.proxy]`).
+///
+/// Routes every ACME request (directory discovery, nonces, JWS posts,
+/// certificate download, ARI) through an HTTP or SOCKS5 proxy for
+/// deployments whose servers cannot reach the CA directly (issue #171):
+///
+/// ```toml
+/// [acme.proxy]
+/// url = "http://proxy.internal:3128"
+/// # url = "socks5://proxy.internal:1080"
+/// # no_proxy = "localhost,.internal,10.0.0.0/8"
+/// # username = "proxy-user"
+/// # password = "env:PROXY_PASSWORD"
+/// ```
+///
+/// Credentials embedded in `url` (`http://user:pass@proxy:3128`) are
+/// supported but should stay out of committed config files; prefer the
+/// `password` SecretRef or the `ACMEX_ACME_PROXY_URL` environment
+/// override. `${VAR}` expansion is applied to `url`, and the settings are
+/// Debug-redacted so credentials never reach logs.
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ProxySettings {
+    /// Proxy endpoint URL: `http://`, `https://`, `socks5://` or
+    /// `socks5h://` (SOCKS schemes ride on the always-enabled reqwest
+    /// `socks` feature).
+    #[serde(default)]
+    pub url: String,
+
+    /// Comma-separated exclusion list in `NO_PROXY` syntax (host names, IP
+    /// addresses or CIDR ranges) that bypasses the proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_proxy: Option<String>,
+
+    /// Optional proxy `Basic` auth user; required together with `password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+
+    /// Optional proxy password SecretRef (`env:`/`file:`); resolved at
+    /// client assembly and never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<SecretRef>,
+}
+
+impl ProxySettings {
+    /// Validates the settings: non-empty, parsable and scheme-supported
+    /// proxy URL (checked after `${VAR}` expansion, and redacted in error
+    /// messages), consistent `username`/`password` pairing and non-empty
+    /// `no_proxy` entries.
+    pub fn validate(&self, path: &str) -> Result<()> {
+        let expanded = Config::expand_env_var(&self.url)?;
+        if expanded.trim().is_empty() {
+            return Err(AcmeError::configuration(format!(
+                "{path}.url cannot be empty"
+            )));
+        }
+        if expanded.contains("${") {
+            // `expand_env_var` leaves `${VAR}` literal when the variable is
+            // unset; reqwest would happily treat it as a hostname and fail
+            // DNS much later — reject it here instead.
+            return Err(AcmeError::configuration(format!(
+                "{path}.url contains an unexpanded ${{VAR}} (variable not set?): `{}`",
+                Self::redact_url(&expanded)
+            )));
+        }
+        let url = reqwest::Url::parse(expanded.trim()).map_err(|e| {
+            AcmeError::configuration(format!(
+                "{path}.url `{}` is not a valid proxy URL: {e}",
+                Self::redact_url(&expanded)
+            ))
+        })?;
+        if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") {
+            return Err(AcmeError::configuration(format!(
+                "{path}.url scheme `{}` is not supported; expected http, https, socks5 or socks5h",
+                url.scheme()
+            )));
+        }
+        if url.host_str().is_none() {
+            return Err(AcmeError::configuration(format!(
+                "{path}.url `{}` is missing a host",
+                Self::redact_url(&expanded)
+            )));
+        }
+        if self.password.is_some() && self.username.is_none() {
+            return Err(AcmeError::configuration(format!(
+                "{path}.username is required when {path}.password is set"
+            )));
+        }
+        if let Some(no_proxy) = &self.no_proxy
+            && no_proxy.split(',').any(|entry| entry.trim().is_empty())
+        {
+            return Err(AcmeError::configuration(format!(
+                "{path}.no_proxy contains an empty entry (check for stray commas)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Applies these settings onto a `reqwest::ClientBuilder`.
+    ///
+    /// Note: configuring an explicit proxy *disables* reqwest's ambient
+    /// environment-proxy detection (`https_proxy`/`HTTPS_PROXY`/`ALL_PROXY`
+    /// are no longer consulted); the explicit proxy replaces it and
+    /// `no_proxy` carves direct-access exceptions out of it.
+    /// Password SecretRefs are resolved eagerly so a broken reference fails
+    /// at assembly instead of the first ACME request.
+    pub fn apply_to_client_builder(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder> {
+        let expanded = Config::expand_env_var(&self.url)?;
+        if expanded.contains("${") {
+            return Err(AcmeError::configuration(format!(
+                "proxy url contains an unexpanded ${{VAR}} (variable not set?): `{}`",
+                Self::redact_url(&expanded)
+            )));
+        }
+        let mut proxy = reqwest::Proxy::all(expanded.trim()).map_err(|e| {
+            AcmeError::configuration(format!(
+                "invalid proxy URL `{}`: {e}",
+                Self::redact_url(&expanded)
+            ))
+        })?;
+        if let Some(no_proxy) = self
+            .no_proxy
+            .as_deref()
+            .filter(|list| !list.trim().is_empty())
+        {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+        }
+        if let Some(username) = &self.username {
+            let reference = self.password.as_ref().cloned().ok_or_else(|| {
+                AcmeError::configuration("proxy username is set but proxy.password is missing")
+            })?;
+            let password = resolve_proxy_password(reference)?;
+            proxy = proxy.basic_auth(username, &password);
+        }
+        Ok(builder.proxy(proxy))
+    }
+
+    /// Reads the pure-environment proxy surface: `ACMEX_ACME_PROXY_URL`
+    /// (plus optional `ACMEX_ACME_NO_PROXY`). Returns `None` when the URL
+    /// variable is unset — this is how legacy CLI tools that load no
+    /// config file honor the same proxy configuration as `[acme.proxy]`.
+    pub fn from_env() -> Option<Self> {
+        let url = env::var("ACMEX_ACME_PROXY_URL").ok()?;
+        let no_proxy = env::var("ACMEX_ACME_NO_PROXY").ok();
+        Some(Self {
+            url,
+            no_proxy,
+            username: None,
+            password: None,
+        })
+    }
+
+    /// Redacts userinfo from a proxy URL so it can appear in errors and
+    /// Debug output without leaking credentials.
+    pub fn redact_url(url: &str) -> String {
+        let parsed = match reqwest::Url::parse(url.trim()) {
+            Ok(parsed) => parsed,
+            Err(_) => return "<unparsable-proxy-url>".to_string(),
+        };
+        if parsed.username().is_empty() && parsed.password().is_none() {
+            return parsed.to_string();
+        }
+        let host = parsed.host_str().unwrap_or("");
+        match parsed.port() {
+            Some(port) => format!("{}://***@{}:{port}{}", parsed.scheme(), host, parsed.path()),
+            None => format!("{}://***@{}{}", parsed.scheme(), host, parsed.path()),
+        }
+    }
+}
+
+impl std::fmt::Debug for ProxySettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxySettings")
+            .field("url", &Self::redact_url(&self.url))
+            .field("no_proxy", &self.no_proxy)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// Resolves a proxy-password SecretRef through the built-in `env:`/`file:`
+/// schemes (first line, trimmed). Vault and provider-specific references
+/// fail explicitly — they are not resolvable without a deployment-wired
+/// resolver.
+fn resolve_proxy_password(reference: SecretRef) -> Result<String> {
+    match &reference {
+        SecretRef::Env { name } => env::var(name).map_err(|_| {
+            AcmeError::configuration(format!(
+                "proxy password secret {} is not set in the environment",
+                reference.describe()
+            ))
+        }),
+        SecretRef::File { path } => {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                AcmeError::configuration(format!(
+                    "failed to read proxy password secret {}: {e}",
+                    reference.describe()
+                ))
+            })?;
+            Ok(content
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string())
+        }
+        other => Err(AcmeError::configuration(format!(
+            "proxy password secret {} cannot be resolved by the built-in env/file resolver; \
+             use an `env:` or `file:` reference",
+            other.describe()
+        ))),
+    }
 }
 
 /// CA-specific runtime configuration.
@@ -1250,6 +1472,7 @@ impl Default for AcmeSettings {
             identifier_types: Vec::new(),
             trust_anchor_pem_files: Vec::new(),
             skip_certificate_trust_check: false,
+            proxy: None,
             directory: String::new(),
         }
     }
@@ -1399,6 +1622,28 @@ impl Config {
             self.challenge.challenge_type = ct;
         }
 
+        // 3b. Outbound proxy overrides (issue #171): `ACMEX_ACME_PROXY_URL`
+        // lets deployments carry proxy credentials in the environment so
+        // they never sit inside the config file.
+        if let Ok(url) = env::var("ACMEX_ACME_PROXY_URL") {
+            self.acme
+                .proxy
+                .get_or_insert_with(ProxySettings::default)
+                .url = url;
+        }
+        if let Ok(no_proxy) = env::var("ACMEX_ACME_NO_PROXY") {
+            self.acme
+                .proxy
+                .get_or_insert_with(ProxySettings::default)
+                .no_proxy = Some(no_proxy);
+        }
+
+        // Fail fast on a misconfigured proxy (including the env override
+        // above) at load time instead of the first ACME request.
+        if let Some(ref proxy) = self.acme.proxy {
+            proxy.validate("acme.proxy")?;
+        }
+
         if let Ok(interval) = env::var("ACMEX_RENEWAL_CHECK_INTERVAL")
             && let Ok(secs) = interval.parse::<u64>()
         {
@@ -1460,6 +1705,10 @@ impl Config {
                      supported values are \"dns\" and \"ip\""
                 )));
             }
+        }
+
+        if let Some(ref proxy) = self.acme.proxy {
+            proxy.validate("acme.proxy")?;
         }
 
         match self.storage.backend.as_str() {
@@ -1675,6 +1924,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::MutexGuard;
+
+    /// Serializes tests that mutate process-global environment variables:
+    /// POSIX `setenv` is UB under concurrent `getenv` from other threads,
+    /// and a leaked var would contaminate later tests in this binary.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn test_default_config() {
@@ -2351,6 +2613,186 @@ poll_interval_secs = 3
             assert_eq!(repository.store().fsync_mode(), expected, "for {toml}");
             drop(repository);
             let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `[acme.proxy]` parses all fields and passes validation (issue #171).
+    #[test]
+    fn acme_proxy_settings_parse_and_validate() {
+        let toml = r#"
+[acme.proxy]
+url = "http://proxy.internal:3128"
+no_proxy = "localhost,.internal,10.0.0.0/8"
+username = "proxy-user"
+password = "env:PROXY_PASSWORD"
+"#;
+        let config = Config::from_str(toml).unwrap();
+        config.validate().unwrap();
+        let proxy = config.acme.proxy.expect("proxy section should parse");
+        assert_eq!(proxy.url, "http://proxy.internal:3128");
+        assert_eq!(
+            proxy.no_proxy.as_deref(),
+            Some("localhost,.internal,10.0.0.0/8")
+        );
+        assert_eq!(proxy.username.as_deref(), Some("proxy-user"));
+        assert!(matches!(proxy.password, Some(SecretRef::Env { .. })));
+    }
+
+    /// Unsupported proxy schemes fail validation; the error mentions only
+    /// the scheme, never the credential-bearing URL.
+    #[test]
+    fn acme_proxy_rejects_unsupported_scheme_and_redacts_error() {
+        let err = Config::from_str("[acme.proxy]\nurl = \"ftp://user:top-secret@proxy:21\"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("scheme `ftp` is not supported"), "got: {err}");
+        assert!(!err.contains("top-secret"), "credentials leaked: {err}");
+        assert!(!err.contains("user@"), "userinfo leaked: {err}");
+    }
+
+    /// An empty or host-less proxy URL is a configuration error.
+    #[test]
+    fn acme_proxy_rejects_empty_and_hostless_urls() {
+        let empty = Config::from_str("[acme.proxy]\nurl = \"  \"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("cannot be empty"), "got: {empty}");
+
+        let hostless = Config::from_str("[acme.proxy]\nurl = \"socks5:///path\"\n")
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(hostless.contains("missing a host"), "got: {hostless}");
+    }
+
+    /// A password without a username cannot form proxy Basic auth.
+    #[test]
+    fn acme_proxy_rejects_password_without_username() {
+        let err =
+            Config::from_str("[acme.proxy]\nurl = \"http://proxy:3128\"\npassword = \"env:P\"\n")
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("username is required"), "got: {err}");
+    }
+
+    /// Debug output redacts URL userinfo and the password reference value.
+    #[test]
+    fn acme_proxy_debug_redacts_credentials() {
+        let proxy = ProxySettings {
+            url: "http://alice:secret-pass@proxy.internal:3128".to_string(),
+            no_proxy: None,
+            username: Some("alice".to_string()),
+            password: Some(SecretRef::Env {
+                name: "PROXY_PASSWORD".to_string(),
+            }),
+        };
+        let debug = format!("{proxy:?}");
+        assert!(!debug.contains("secret-pass"), "leaked: {debug}");
+        assert!(debug.contains("***@proxy.internal:3128"), "got: {debug}");
+    }
+
+    /// `apply_to_client_builder` expands `${VAR}` in the URL and rejects an
+    /// unset credential secret at assembly time (fail fast, not on the
+    /// first ACME request).
+    #[test]
+    fn acme_proxy_apply_expands_var_and_fails_fast_on_missing_secret() {
+        let _env = lock_env();
+        unsafe {
+            std::env::set_var("ACMEX_PROXY_HOST", "proxy.expansion:3128");
+        }
+        let proxy = ProxySettings {
+            url: "http://${ACMEX_PROXY_HOST}".to_string(),
+            no_proxy: None,
+            username: Some("u".to_string()),
+            password: Some(SecretRef::Env {
+                name: "ACMEX_MISSING_PROXY_PASSWORD_VAR".to_string(),
+            }),
+        };
+        let err = proxy
+            .apply_to_client_builder(reqwest::Client::builder())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ACMEX_MISSING_PROXY_PASSWORD_VAR"),
+            "got: {err}"
+        );
+        unsafe {
+            std::env::remove_var("ACMEX_PROXY_HOST");
+        }
+    }
+
+    /// An unexpanded `${VAR}` (variable not set) is rejected instead of
+    /// becoming a bogus hostname discovered by DNS at request time.
+    #[test]
+    fn acme_proxy_rejects_unexpanded_var_placeholder() {
+        let err =
+            Config::from_str("[acme.proxy]\nurl = \"http://${ACMEX_DEFINITELY_UNSET_VAR}\"\n")
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("unexpanded"), "got: {err}");
+    }
+
+    /// A `no_proxy` list with stray commas is a configuration error.
+    #[test]
+    fn acme_proxy_rejects_empty_no_proxy_entries() {
+        let err =
+            Config::from_str("[acme.proxy]\nurl = \"http://proxy:3128\"\nno_proxy = \"a,,b\"\n")
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("empty entry"), "got: {err}");
+    }
+
+    /// `ProxySettings::from_env` powers the pure-env proxy surface used by
+    /// legacy CLI tools that load no config file.
+    #[test]
+    fn acme_proxy_from_env_reads_overrides() {
+        let _env = lock_env();
+        unsafe {
+            std::env::set_var("ACMEX_ACME_PROXY_URL", "http://env-proxy:3128");
+            std::env::set_var("ACMEX_ACME_NO_PROXY", "localhost");
+        }
+        let proxy = ProxySettings::from_env().expect("env proxy should be read");
+        assert_eq!(proxy.url, "http://env-proxy:3128");
+        assert_eq!(proxy.no_proxy.as_deref(), Some("localhost"));
+        unsafe {
+            std::env::remove_var("ACMEX_ACME_PROXY_URL");
+            std::env::remove_var("ACMEX_ACME_NO_PROXY");
+        }
+        assert!(ProxySettings::from_env().is_none(), "unset means None");
+    }
+
+    /// `ACMEX_ACME_PROXY_URL` / `ACMEX_ACME_NO_PROXY` create the proxy
+    /// section from scratch so pure-env deployments need no config file.
+    #[test]
+    fn acme_proxy_env_overrides_create_section() {
+        let _env = lock_env();
+        unsafe {
+            std::env::set_var("ACMEX_ACME_PROXY_URL", "socks5://env-proxy:1080");
+            std::env::set_var("ACMEX_ACME_NO_PROXY", "127.0.0.1,.local");
+        }
+        let mut config = Config::from_str("").unwrap();
+        config.apply_env_overrides().unwrap();
+        config.validate().unwrap();
+        let proxy = config
+            .acme
+            .proxy
+            .expect("env override should create the proxy section");
+        assert_eq!(proxy.url, "socks5://env-proxy:1080");
+        assert_eq!(proxy.no_proxy.as_deref(), Some("127.0.0.1,.local"));
+        unsafe {
+            std::env::remove_var("ACMEX_ACME_PROXY_URL");
+            std::env::remove_var("ACMEX_ACME_NO_PROXY");
         }
     }
 }
